@@ -7,10 +7,13 @@ import {
 import { Composio } from '@composio/core';
 import { createHash, randomBytes, randomUUID, sign } from 'node:crypto';
 import { z } from 'zod';
-import type {
-  IntegrationBackoff,
-  IntegrationFile,
-  IntegrationConnectionBrowser,
+import {
+  connectionCode,
+  connectionReason,
+  IntegrationConnectionError,
+  type IntegrationBackoff,
+  type IntegrationFile,
+  type IntegrationConnectionBrowser,
 } from '../../ports/integrations.ts';
 import type { CredentialKeyStore } from '../../ports/key-store.ts';
 import type { IntegrationIdentityCheckpoint } from '../../ports/integration-identity.ts';
@@ -265,11 +268,25 @@ export function createComposioProxy(options: {
       signal,
     });
     if (!response.ok) {
-      await response.body?.cancel();
-      throw new Error(
-        options.failure ?? 'The integration connection could not be completed. Try again.',
+      if (options.failure) {
+        await response.body?.cancel();
+        throw new Error(options.failure);
+      }
+      const refusal = await read(response, signal)
+        .then((text) => JSON.parse(text) as unknown)
+        .catch(() => undefined);
+      throw new IntegrationConnectionError(
+        connectionReason(response.status, false, false) ?? 'unavailable',
+        'link',
+        response.status,
+        connectionCode(
+          refusal && typeof refusal === 'object' && 'error' in refusal ? refusal.error : undefined,
+        ),
       );
     }
+    return JSON.parse(await read(response, signal)) as unknown;
+  }
+  async function read(response: Response, signal: AbortSignal) {
     if (!response.body || Number(response.headers.get('content-length')) > 32_768) {
       await response.body?.cancel();
       throw new Error('The integration response is invalid.');
@@ -291,9 +308,7 @@ export function createComposioProxy(options: {
       reader.releaseLock();
     }
     signal.throwIfAborted();
-    return JSON.parse(
-      new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size)),
-    ) as unknown;
+    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size));
   }
   let enrolling: Promise<void> | undefined;
   async function enroll(signal: AbortSignal) {
