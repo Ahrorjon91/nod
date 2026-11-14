@@ -267,7 +267,7 @@ test(
           assert.deepEqual(await saved(schedule.id), {
             ...schedule,
             lastRun: run,
-            activeRun: { turnId: run!.turnId, status: 'queued' },
+            activeRun: { turnId: run!.turnId, status: 'queued', questionMessageId: null },
           });
           assert.equal((await jobFor(schedule.id)).id, job.id);
           assert.equal((await runNow(schedule)).statusCode, 409);
@@ -886,6 +886,20 @@ test(
         async () => {
           const before = clock;
           const schedule = await create({ cron: '*/15 * * * *' });
+          const active = async () => {
+            const response = await request('GET', '/api/schedules');
+            assert.equal(response.statusCode, 200, response.body);
+            return response.json<Schedule[]>().find((item) => item.id === schedule.id)!.activeRun;
+          };
+          const question = async (turnId: string, text: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text)
+               SELECT $1,owner_id,thread_id,id,'assistant',$3 FROM turns WHERE id=$2`,
+              [id, turnId, text],
+            );
+            return id;
+          };
           const fire = async () => {
             const job = await jobFor(schedule.id);
             clock = new Date(job.data.scheduledFor);
@@ -893,6 +907,8 @@ test(
             return (await runs(schedule.id)).map((run) => run.turnId);
           };
           const [first] = await fire();
+          await question(first!, 'Checking the synthetic account report.');
+          const firstQuestion = await question(first!, 'May I use the synthetic saved login?');
           assert.deepEqual(await fire(), [first]);
           assert.equal((await runNow(schedule)).statusCode, 409);
           for (const status of ['running', 'waiting']) {
@@ -902,7 +918,11 @@ test(
             ]);
             assert.deepEqual(await fire(), [first]);
             assert.equal((await runNow(schedule)).statusCode, 409);
-            assert.equal((await saved(schedule.id)).activeRun?.status, status);
+            assert.deepEqual(await active(), {
+              turnId: first,
+              status,
+              questionMessageId: status === 'waiting' ? firstQuestion : null,
+            });
           }
           const resumed = randomUUID();
           await db.pool.query(
@@ -910,11 +930,40 @@ test(
              SELECT $1,owner_id,thread_id,'resume','Synthetic answer.',id,id,true,'queued',now() FROM turns WHERE id=$2`,
             [resumed, first],
           );
+          const resumedQuestion = await question(resumed, 'Enter the synthetic verification code.');
           for (const status of ['queued', 'running', 'waiting'] as const) {
             await db.pool.query('UPDATE turns SET status=$2 WHERE id=$1', [resumed, status]);
-            assert.deepEqual((await saved(schedule.id)).activeRun, { turnId: resumed, status });
+            assert.deepEqual(await active(), {
+              turnId: resumed,
+              status,
+              questionMessageId: status === 'waiting' ? resumedQuestion : null,
+            });
             assert.equal((await runNow(schedule)).statusCode, 409);
           }
+          const archivedThread = randomUUID();
+          await db.pool.query('INSERT INTO threads(id,owner_id,archived_at) VALUES($1,$2,now())', [
+            archivedThread,
+            ownerId,
+          ]);
+          for (const [owner, threadId, hidden, text] of [
+            ['another-owner', null, false, 'Foreign question'],
+            [ownerId, archivedThread, false, 'Question from another conversation'],
+            [ownerId, null, true, 'Hidden question'],
+            [ownerId, null, false, ''],
+          ] as const)
+            await db.pool.query(
+              `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,hidden_at,created_at)
+               SELECT $1,$3,COALESCE($4::uuid,thread_id),id,'assistant',$6,
+                 CASE WHEN $5 THEN now() END,now()+interval '1 second' FROM turns WHERE id=$2`,
+              [randomUUID(), resumed, owner, threadId, hidden, text],
+            );
+          assert.equal((await active())?.questionMessageId, resumedQuestion);
+          await db.pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [resumedQuestion]);
+          assert.deepEqual(await active(), {
+            turnId: resumed,
+            status: 'waiting',
+            questionMessageId: null,
+          });
           await db.pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [resumed]);
           assert.equal((await saved(schedule.id)).activeRun, null);
           assert.equal((await fire()).length, 2);
@@ -1965,7 +2014,7 @@ test('waiting scheduled runs open their pending question without starting anothe
       schedule = {
         ...schedule,
         lastRun: queued,
-        activeRun: { turnId: queued.turnId, status: 'queued' },
+        activeRun: { turnId: queued.turnId, status: 'queued', questionMessageId: null },
       };
       history = { runs: [queued, completed], nextCursor: null };
       return Response.json({ turnId: queued.turnId, activeRun: schedule.activeRun });
@@ -2003,7 +2052,7 @@ test('waiting scheduled runs open their pending question without starting anothe
   schedule = {
     ...schedule,
     lastRun: waiting,
-    activeRun: { turnId: waiting.turnId, status: 'waiting' },
+    activeRun: { turnId: waiting.turnId, status: 'waiting', questionMessageId: questionId },
   };
   history = { runs: [waiting, completed], nextCursor: null };
   await act(async () => {
@@ -2026,4 +2075,34 @@ test('waiting scheduled runs open their pending question without starting anothe
     [{ messageId: questionId }],
     'Needs your input must open the waiting run’s existing question in Chat.',
   );
+
+  const resumedQuestionId = randomUUID();
+  schedule = {
+    ...schedule,
+    activeRun: { turnId: randomUUID(), status: 'waiting', questionMessageId: resumedQuestionId },
+  };
+  await act(async () => pageDataCache.refresh('/api/schedules', true));
+  const resumedInput = dom.window.document.querySelector<HTMLButtonElement>(
+    `button[aria-label="Needs your input for ${schedule.title}"]`,
+  );
+  assert.ok(resumedInput);
+  await act(async () => resumedInput.click());
+  assert.deepEqual(focused, [{ messageId: questionId }, { messageId: resumedQuestionId }]);
+
+  for (const status of ['queued', 'running', 'waiting'] as const) {
+    schedule = {
+      ...schedule,
+      activeRun: { turnId: schedule.activeRun!.turnId, status, questionMessageId: null },
+    };
+    await act(async () => pageDataCache.refresh('/api/schedules', true));
+    const button = dom.window.document.querySelector<HTMLButtonElement>(
+      `button[aria-label$=" for ${schedule.title}"][aria-live="polite"]`,
+    );
+    assert.ok(button);
+    assert.equal(button.disabled, true);
+    await act(async () => button.click());
+  }
+  assert.deepEqual(mutations, expectedMutations);
+  assert.deepEqual(asked, []);
+  assert.deepEqual(focused, [{ messageId: questionId }, { messageId: resumedQuestionId }]);
 });
