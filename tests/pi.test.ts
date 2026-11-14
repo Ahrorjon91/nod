@@ -6458,6 +6458,82 @@ test('OpenAI-compatible servers get tool models, a system message and one attemp
   );
 });
 
+test('OpenAI-compatible discovery checks past the first three Ollama models and falls back for LocalAI', async (t) => {
+  const { createServer } = await import('node:http');
+  const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
+  const ids = [
+    'fixture/no-tools-1',
+    'fixture/no-tools-2',
+    'fixture/no-tools-3',
+    'fixture/tool-model',
+  ];
+  const showRequests: string[] = [];
+  let mode: 'ollama' | 'localai' | 'ollama-no-tools' = 'ollama';
+  const ollamaWithoutTools = ['fixture/chat-model', 'fixture/embedding-model'];
+  const server = createServer((request, response) => {
+    let text = '';
+    request.on('data', (chunk) => (text += chunk));
+    request.on('end', () => {
+      const send = (body: unknown) => {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify(body));
+      };
+      if (request.url === '/v1/models')
+        return send({
+          data: (mode === 'ollama-no-tools' ? ollamaWithoutTools : ids).map((id) => ({ id })),
+        });
+      if (request.url === '/api/version') return send({ version: 'fixture' });
+      if (request.url === '/api/show') {
+        const id = (JSON.parse(text) as { model: string }).model;
+        showRequests.push(id);
+        const capabilities =
+          mode === 'ollama-no-tools'
+            ? [id === ollamaWithoutTools[1] ? 'embedding' : 'completion']
+            : id === ids[3] && mode === 'ollama'
+              ? ['completion', 'tools']
+              : ['completion'];
+        return send({
+          capabilities,
+          ...(mode === 'localai' ? {} : { model_info: {} }),
+        });
+      }
+      if (request.url === '/api/v1/models' && mode === 'ollama')
+        return send({
+          models: ids.map((key) => ({
+            key,
+            type: 'llm',
+            capabilities: { trained_for_tool_use: key === ids[3] },
+          })),
+        });
+      response.writeHead(404);
+      response.end();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const { port } = server.address() as import('node:net').AddressInfo;
+  const credential = { type: 'endpoint' as const, url: `http://127.0.0.1:${port}/v1` };
+  const ollama = await createPiModelBackend().catalog('compatible', 'api_key', credential);
+  assert.deepEqual(
+    ollama.map(({ choice }) => choice.id),
+    [ids[3]],
+  );
+  assert.deepEqual(showRequests, ids);
+  mode = 'localai';
+  showRequests.length = 0;
+  const compatible = await createPiModelBackend().catalog('compatible', 'api_key', credential);
+  assert.deepEqual(
+    compatible.map(({ choice }) => choice.id),
+    ids,
+  );
+  assert.deepEqual(showRequests, ids);
+  mode = 'ollama-no-tools';
+  showRequests.length = 0;
+  const unusable = await createPiModelBackend().catalog('compatible', 'api_key', credential);
+  assert.deepEqual(unusable, []);
+  assert.deepEqual(showRequests, ollamaWithoutTools);
+});
+
 test('LM Studio servers list tool-trained chat models with their loaded context and vision', async (t) => {
   const { createServer } = await import('node:http');
   const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
