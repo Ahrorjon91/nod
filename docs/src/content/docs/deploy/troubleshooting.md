@@ -43,6 +43,12 @@ Keep a copy of the key somewhere safe. Saved credentials can't be read without i
 
 Another program uses port `4310`. Set another `PORT` in `.env` and [apply the configuration](/deploy/configuration/#apply-configuration-changes). Update your browser address and any SSH tunnel to match. A direct source install also needs database port `54329` on `127.0.0.1`; the self-hosting stack keeps its database port private.
 
+### This host is not permitted.
+
+Nod answers only at the address in `NOD_PUBLIC_URL`, which the Docker setup always sets (by default to `http://localhost:4310`). Any other address gets this error. That includes `127.0.0.1` and `localhost` after you set an HTTPS address.
+
+Open Nod at that exact address. To use another one, change `NOD_PUBLIC_URL` and [apply the configuration](/deploy/configuration/#apply-configuration-changes). Nod accepts one address at a time.
+
 ### You lost the access link
 
 For a local source install without `NOD_AUTH_TOKEN`, Nod prints a link with `#access=` when it starts, and your browser keeps the cookie. To get a new link, delete `access-key` in your data folder (`.local/` by default) and restart. A server configured with `NOD_AUTH_TOKEN` prints its address without that link; use its configured token, or follow [Rotate access](/deploy/server-operations/#rotate-access).
