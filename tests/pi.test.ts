@@ -6506,6 +6506,7 @@ test('OpenAI-compatible discovery checks each model and respects capabilities wi
     'fixture/tool-model',
   ];
   const showRequests: string[] = [];
+  let activeShows = 0;
   let mode: 'ollama' | 'localai' | 'ollama-no-tools' | 'generic' = 'ollama';
   const ollamaWithoutTools = ['fixture/chat-model', 'fixture/embedding-model'];
   const server = createServer((request, response) => {
@@ -6524,16 +6525,25 @@ test('OpenAI-compatible discovery checks each model and respects capabilities wi
       if (request.url === '/api/show') {
         const id = (JSON.parse(text) as { model: string }).model;
         showRequests.push(id);
+        if (activeShows === 3) {
+          response.writeHead(429, { 'content-type': 'application/json' });
+          return response.end(JSON.stringify({ error: 'fixture-probe-limit' }));
+        }
+        activeShows++;
         const capabilities =
           mode === 'ollama-no-tools'
             ? [id === ollamaWithoutTools[1] ? 'embedding' : 'completion']
             : id === ids[3] && mode === 'ollama'
               ? ['completion', 'tools']
               : ['completion'];
-        return send({
-          capabilities,
-          ...(mode === 'localai' ? {} : { model_info: {} }),
+        void setTimeout(50).then(() => {
+          activeShows--;
+          send({
+            capabilities,
+            ...(mode === 'localai' ? {} : { model_info: {} }),
+          });
         });
+        return;
       }
       response.writeHead(404);
       response.end();

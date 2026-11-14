@@ -363,54 +363,58 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       z.object({ models: z.array(z.unknown()) }).safeParse(studio).data?.models ?? [],
       lmStudioModelSchema,
     );
-    const models = await Promise.all(
-      listed.map(async (entry) => {
-        const studioModel = studioModels.find((model) => model.key === entry.id);
-        const shown =
-          ollama && !studioModel
-            ? ollamaShowSchema.safeParse(
-                await serverJson('/api/show', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ model: entry.id }),
-                }),
-              )
-            : undefined;
-        const known = studioModel
-          ? lmStudioModel(studioModel)
-          : shown?.success
-            ? ollamaModel(shown.data)
-            : undefined;
-        if (known?.usable === false) return [];
-        const contextWindow =
-          known?.contextWindow ??
-          entry.context_length ??
-          entry.context_window ??
-          entry.max_model_len ??
-          128_000;
-        return [
-          definition({
-            id: entry.id,
-            name: entry.id,
-            api: 'openai-completions',
-            provider: 'compatible',
-            baseUrl: found.url,
-            compat: {
-              supportsStore: false,
-              supportsDeveloperRole: false,
-              maxTokensField: 'max_tokens',
-            },
-            reasoning: known?.reasoning ?? false,
-            thinkingLevelMap: known?.thinkingLevelMap,
-            input: known?.images ? ['text', 'image'] : ['text'],
-            contextWindow,
-            maxTokens: Math.min(32_768, Math.floor(contextWindow / 2)),
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          } as Model<Api>),
-        ];
-      }),
-    );
-    return models.flat();
+    const models: ModelDefinition[] = [];
+    for (let index = 0; index < listed.length; index += 3) {
+      const batch = await Promise.all(
+        listed.slice(index, index + 3).map(async (entry) => {
+          const studioModel = studioModels.find((model) => model.key === entry.id);
+          const shown =
+            ollama && !studioModel
+              ? ollamaShowSchema.safeParse(
+                  await serverJson('/api/show', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: entry.id }),
+                  }),
+                )
+              : undefined;
+          const known = studioModel
+            ? lmStudioModel(studioModel)
+            : shown?.success
+              ? ollamaModel(shown.data)
+              : undefined;
+          if (known?.usable === false) return [];
+          const contextWindow =
+            known?.contextWindow ??
+            entry.context_length ??
+            entry.context_window ??
+            entry.max_model_len ??
+            128_000;
+          return [
+            definition({
+              id: entry.id,
+              name: entry.id,
+              api: 'openai-completions',
+              provider: 'compatible',
+              baseUrl: found.url,
+              compat: {
+                supportsStore: false,
+                supportsDeveloperRole: false,
+                maxTokensField: 'max_tokens',
+              },
+              reasoning: known?.reasoning ?? false,
+              thinkingLevelMap: known?.thinkingLevelMap,
+              input: known?.images ? ['text', 'image'] : ['text'],
+              contextWindow,
+              maxTokens: Math.min(32_768, Math.floor(contextWindow / 2)),
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            } as Model<Api>),
+          ];
+        }),
+      );
+      models.push(...batch.flat());
+    }
+    return models;
   }
   async function cloudResponse(url: string, init: RequestInit, rejected: string) {
     const response = await request(url, {

@@ -61,7 +61,7 @@ Nod reads each Ollama model's details. When the server reports model capabilitie
 
 </Steps>
 
-With LM Studio 0.4 or later, Nod reads each model's details. It skips embedding models and models not trained for tool use, sends images to vision models and uses the context length the model is loaded with, so the model list shows when that's too small. These details also apply when the server offers an Ollama-compatible API.
+With LM Studio 0.4 or later, Nod reads each model's details. It skips embedding models and models not trained for tool use, sends images to vision models and uses the context length the model is loaded with, so the model list shows when that's too small. On a server with both APIs, Nod uses LM Studio details for the models that its model API lists. It uses Ollama details for the other models.
 
 </TabItem>
 <TabItem label="vLLM">
