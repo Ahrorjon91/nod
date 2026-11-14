@@ -6505,12 +6505,18 @@ test('OpenAI-compatible discovery checks past the first three Ollama models and 
   const { port } = server.address() as import('node:net').AddressInfo;
   const credential = { type: 'endpoint' as const, url: `http://127.0.0.1:${port}/v1` };
   const ollama = await createPiModelBackend().catalog('compatible', 'api_key', credential);
-  assert.deepEqual(ollama.map(({ choice }) => choice.id), [ids[3]]);
+  assert.deepEqual(
+    ollama.map(({ choice }) => choice.id),
+    [ids[3]],
+  );
   assert.deepEqual(showRequests, ids);
   mode = 'localai';
   showRequests.length = 0;
   const compatible = await createPiModelBackend().catalog('compatible', 'api_key', credential);
-  assert.deepEqual(compatible.map(({ choice }) => choice.id), ids);
+  assert.deepEqual(
+    compatible.map(({ choice }) => choice.id),
+    ids,
+  );
   assert.deepEqual(showRequests, ids);
   mode = 'ollama-no-tools';
   showRequests.length = 0;

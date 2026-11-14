@@ -385,7 +385,7 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
     const studioModels = studio ? entries(studio, lmStudioModelSchema) : [];
     const models = await Promise.all(
       listed.map(async (entry) => {
-        const shown = ollamaServer ? probed.get(entry.id) ?? (await show(entry.id)) : undefined;
+        const shown = ollamaServer ? (probed.get(entry.id) ?? (await show(entry.id))) : undefined;
         const studioModel = studioModels.find((model) => model.key === entry.id);
         const known = shown?.success
           ? ollamaModel(shown.data)
