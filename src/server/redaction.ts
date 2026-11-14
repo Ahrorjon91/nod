@@ -45,8 +45,8 @@ export function redactSecretText(value: string): string {
       (match, scheme: string, token: string) => {
         if (scheme.toLowerCase() !== 'basic') return hidden;
         const decoded = Buffer.from(token, 'base64');
-        return decoded.toString('base64').replace(/=+$/u, '') === token.replace(/=+$/u, '') &&
-          decoded.includes(58)
+        const encoded = decoded.toString('base64');
+        return decoded.includes(58) && (token === encoded || token === encoded.replace(/=+$/u, ''))
           ? hidden
           : match;
       },

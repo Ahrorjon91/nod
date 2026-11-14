@@ -2560,6 +2560,26 @@ test('server model credentials reject invalid destinations and cloud accounts be
   );
 });
 
+test('secret redaction finishes for long malformed Basic credentials', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  await promisify(execFile)(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      '--input-type=module',
+      '-e',
+      `import { redactSecretText } from ${JSON.stringify(new URL('../src/server/redaction.ts', import.meta.url).href)};
+       const tail = '='.repeat(300_000) + 'a';
+       for (const token of [tail, Buffer.from('synthetic:synthetic').toString('base64') + tail]) {
+         redactSecretText('Basic ' + token);
+       }`,
+    ],
+    { timeout: 5000 },
+  );
+});
+
 test('secret redaction keeps valid tokens when another token is missing', () => {
   const secrets = [' fixture-access-token ', undefined, null, 42] as unknown as string[];
   const text = createTextRedactor(secrets);

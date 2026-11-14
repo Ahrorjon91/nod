@@ -1046,13 +1046,13 @@ test(
       await t.test(
         'connection service waits stop automatic app reads and preserve owner reads',
         async () => {
+          const schedule = await reminder({ prompt: 'Synthetic automatic parent' });
           connectionWait = { until: Date.now() + 120_000, status: 429, code: 'installation_busy' };
           appResult = { id: 'synthetic-draft', message: { id: 'synthetic-message' } };
           const calls = [
             { action: 'SEARCH_TOOLS', args: { query: 'gmail' } },
             { action: 'GMAIL_GET_DRAFT', args: { draft_id: 'synthetic-draft' } },
           ];
-          const schedule = await reminder({ prompt: 'Synthetic automatic parent' });
           try {
             for (const source of ['event', 'schedule'] as const) {
               let parent: string;
