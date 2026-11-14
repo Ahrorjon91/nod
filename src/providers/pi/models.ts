@@ -354,9 +354,28 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       })
         .then((response) => (response.ok ? response.json() : undefined))
         .catch(() => undefined);
-    const ollama = z
+    const ollamaProbe = z
       .object({ version: z.string() })
       .safeParse(await serverJson('/api/version')).success;
+    const show = (id: string) =>
+      ollamaShowSchema.safeParse(
+        serverJson('/api/show', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: id }),
+        }),
+      );
+    const probe = ollamaProbe
+      ? listed.slice(0, 3)
+      : undefined;
+    const probed = new Map(
+      await Promise.all(
+        (probe ?? []).map(async (entry) => [entry.id, await show(entry.id)] as const),
+      ),
+    );
+    const ollama = [...probed.values()].some(
+      (shown) => shown?.success && ollamaModel(shown.data).usable,
+    );
     const studio = ollama
       ? undefined
       : z.object({ models: z.array(z.unknown()) }).safeParse(await serverJson('/api/v1/models'))
@@ -364,15 +383,7 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
     const studioModels = studio ? entries(studio, lmStudioModelSchema) : [];
     const models = await Promise.all(
       listed.map(async (entry) => {
-        const shown = ollama
-          ? ollamaShowSchema.safeParse(
-              await serverJson('/api/show', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: entry.id }),
-              }),
-            )
-          : undefined;
+        const shown = ollama ? probed.get(entry.id) ?? (await show(entry.id)) : undefined;
         const studioModel = studioModels.find((model) => model.key === entry.id);
         const known = shown?.success
           ? ollamaModel(shown.data)
