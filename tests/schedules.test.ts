@@ -6,7 +6,12 @@ import pg from 'pg';
 import type { Job } from 'pg-boss';
 import { z } from 'zod';
 import type { InboundMessage, MessagingTransport } from '../src/ports/messaging.ts';
-import type { Schedule, ScheduleHistory, TaskDetail } from '../src/shared/contracts.ts';
+import type {
+  Schedule,
+  ScheduleHistory,
+  ScheduleRun,
+  TaskDetail,
+} from '../src/shared/contracts.ts';
 import {
   captureOwnerInstructions,
   mergeOwnerInstructions,
@@ -1864,4 +1869,161 @@ test('scheduled controls reconcile pause and delete after a client timeout', asy
   assert.equal(title.value, 'My unsaved title');
   assert.ok(dom.window.document.querySelector('.schedule-editor-dialog'));
   assert.deepEqual(mutations, ['PATCH', 'DELETE', 'PATCH', 'DELETE', 'DELETE', 'PATCH', 'DELETE']);
+});
+
+test('waiting scheduled runs open their pending question without starting another run (LAB-1215)', async (t) => {
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', {
+    url: 'https://nod.example.test/tasks',
+    pretendToBeVisual: true,
+  });
+  const globals = {
+    window: dom.window,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    HTMLElement: dom.window.HTMLElement,
+    Element: dom.window.Element,
+    Node: dom.window.Node,
+    Event: dom.window.Event,
+    CustomEvent: dom.window.CustomEvent,
+    MutationObserver: dom.window.MutationObserver,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  const originals = new Map(
+    Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+  );
+  for (const [key, value] of Object.entries(globals))
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const { act, createElement } = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { pageDataCache } = await import('../src/web/lib/page-data-cache.ts');
+  const { Scheduled } = await import('../src/web/pages/tasks.tsx');
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  t.after(async () => {
+    await act(async () => root.unmount());
+    pageDataCache.clear();
+    dom.window.close();
+    for (const [key, value] of originals)
+      if (value) Object.defineProperty(globalThis, key, value);
+      else Reflect.deleteProperty(globalThis, key);
+  });
+  pageDataCache.clear();
+  const completed: ScheduleRun = {
+    id: randomUUID(),
+    scheduleId: randomUUID(),
+    title: 'Synthetic account report',
+    turnId: randomUUID(),
+    scheduledFor: '2035-10-25T09:00:00.000Z',
+    timeZone: 'UTC',
+    createdAt: '2035-10-25T09:00:00.000Z',
+    status: 'succeeded',
+    error: null,
+    observation: null,
+    messageId: randomUUID(),
+    messagePreview: 'Synthetic report ready.',
+    messageText: 'Synthetic report ready.',
+  };
+  const queued: ScheduleRun = {
+    ...completed,
+    id: randomUUID(),
+    turnId: randomUUID(),
+    scheduledFor: '2035-10-26T09:00:00.000Z',
+    createdAt: '2035-10-26T09:00:00.000Z',
+    status: 'queued',
+    messageId: null,
+    messagePreview: null,
+    messageText: null,
+  };
+  let schedule: Schedule = {
+    id: completed.scheduleId,
+    title: completed.title,
+    prompt: 'Read the report at https://reports.example.test and summarize it in Nod.',
+    kind: 'recurring',
+    cron: '0 9 * * *',
+    runAt: null,
+    timeZone: 'UTC',
+    enabled: true,
+    revision: 1,
+    nextRun: '2035-10-27T09:00:00.000Z',
+    lastRun: completed,
+    activeRun: null,
+    baselineObservation: null,
+    watch: null,
+    monthlyUsd: null,
+  };
+  const historyPath = `/api/schedule-runs?scheduleId=${schedule.id}&limit=10`;
+  let history: ScheduleHistory = { runs: [completed], nextCursor: null };
+  const mutations: string[] = [];
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
+    const path = String(input);
+    const method = options?.method ?? 'GET';
+    if (method !== 'GET') {
+      mutations.push(`${method} ${path}`);
+      assert.equal(method, 'POST');
+      assert.equal(path, `/api/schedules/${schedule.id}/run`);
+      schedule = {
+        ...schedule,
+        lastRun: queued,
+        activeRun: { turnId: queued.turnId, status: 'queued' },
+      };
+      history = { runs: [queued, completed], nextCursor: null };
+      return Response.json({ turnId: queued.turnId, activeRun: schedule.activeRun });
+    }
+    if (path === '/api/schedules') return Response.json([schedule]);
+    if (path === '/api/tasks') return Response.json([]);
+    assert.equal(path, historyPath);
+    return Response.json(history);
+  });
+  const asked: string[] = [];
+  const focused: unknown[] = [];
+  dom.window.addEventListener('nod:focus-message', (event) =>
+    focused.push((event as CustomEvent).detail),
+  );
+  await act(async () =>
+    root.render(createElement(Scheduled, { onAsk: (text) => asked.push(text) })),
+  );
+  const runNow = dom.window.document.querySelector<HTMLButtonElement>(
+    `button[aria-label="Run now for ${schedule.title}"]`,
+  );
+  assert.ok(runNow);
+  await act(async () => runNow.click());
+  const expectedMutations = [`POST /api/schedules/${schedule.id}/run`];
+  assert.deepEqual(mutations, expectedMutations);
+
+  const questionId = randomUUID();
+  const question = 'May I use your saved login for reports.example.test for this report?';
+  const waiting: ScheduleRun = {
+    ...queued,
+    status: 'waiting',
+    messageId: questionId,
+    messagePreview: question,
+    messageText: question,
+  };
+  schedule = {
+    ...schedule,
+    lastRun: waiting,
+    activeRun: { turnId: waiting.turnId, status: 'waiting' },
+  };
+  history = { runs: [waiting, completed], nextCursor: null };
+  await act(async () => {
+    await pageDataCache.refresh('/api/schedules', true);
+    await pageDataCache.refresh(historyPath, true);
+  });
+  const needsInput = dom.window.document.querySelector<HTMLButtonElement>(
+    `button[aria-label="Needs your input for ${schedule.title}"]`,
+  );
+  assert.ok(needsInput);
+  await act(async () => needsInput.click());
+  assert.deepEqual(
+    mutations,
+    expectedMutations,
+    'Opening the question must not start another run.',
+  );
+  assert.deepEqual(asked, [], 'Opening the question must not post a new chat request.');
+  assert.deepEqual(
+    focused,
+    [{ messageId: questionId }],
+    'Needs your input must open the waiting run’s existing question in Chat.',
+  );
 });
