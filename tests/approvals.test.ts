@@ -596,6 +596,11 @@ test('server configuration refuses remote exposure without a valid token and an 
     ' https://nod.example',
     'https://nod.example\n',
     'file:///tmp/nod',
+    'https://nod.example:443/assistant',
+    'https://nod.example:443?token=secret',
+    'https://nod.example:443#token',
+    'https://user:password@nod.example:443',
+    'http://nod.example:80',
   ])
     assert.throws(() => serverNetwork({ NOD_PUBLIC_URL, NOD_AUTH_TOKEN: key }));
   const remote = serverNetwork({
@@ -615,6 +620,16 @@ test('server configuration refuses remote exposure without a valid token and an 
     'http://[::1]:4310',
   ])
     assert.equal(serverNetwork({ NOD_PUBLIC_URL }).publicOrigin, NOD_PUBLIC_URL);
+  for (const NOD_PUBLIC_URL of ['https://nod.example:443', 'https://nod.example:443/']) {
+    const defaultPort = serverNetwork({ NOD_PUBLIC_URL, NOD_AUTH_TOKEN: key });
+    assert.equal(defaultPort.publicOrigin, 'https://nod.example');
+    assert.equal(defaultPort.accessOrigin, 'https://nod.example');
+  }
+  for (const NOD_PUBLIC_URL of ['http://localhost:80', 'http://127.0.0.1:80', 'http://[::1]:80'])
+    assert.equal(
+      serverNetwork({ NOD_PUBLIC_URL }).publicOrigin,
+      NOD_PUBLIC_URL.replace(/:80$/, ''),
+    );
   assert.equal(serverNetwork({}).accessOrigin, undefined);
   assert.equal(serverNetwork({ NOD_DESKTOP: 'true', NOD_AUTH_TOKEN: '' }).authToken, undefined);
 });
