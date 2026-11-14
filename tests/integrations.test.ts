@@ -9589,8 +9589,9 @@ for (const [status, code] of [
           channel: 'C0SYNTHETIC',
           text: 'Synthetic update',
         }),
-        (error: Error & { notRun?: boolean }) => {
+        (error: Error & { notRun?: boolean; upstreamStatus?: number }) => {
           assert.match(error.message, new RegExp(`${code}. HTTP ${status}`));
+          assert.equal(error.upstreamStatus, status);
           assert.equal(error.notRun, true);
           return true;
         },

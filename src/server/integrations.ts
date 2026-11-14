@@ -196,6 +196,8 @@ function browserService(origin: string) {
 function failure(prefix: string, error: unknown) {
   return `${prefix}: ${error instanceof Error ? error.message : String(error)}`;
 }
+const serviceRefusal = z.object({ status: z.union([z.literal(429), z.literal(503)]) });
+const notRunMarker = z.object({ notRun: z.literal(true) });
 function requestFailure(prefix: string, error: unknown) {
   const status = z.object({ status: z.number().int().min(100).max(599) }).safeParse(error);
   return Object.assign(
@@ -430,11 +432,8 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     for (const row of rows) (accounts[row.slug] ??= []).push(row.account_id!);
     const connected = requiredProvider();
     const session = await connected.createSession(ownerId, accounts, signal).catch((error) => {
-      const refused =
-        !(error instanceof IntegrationError) &&
-        z.object({ status: z.union([z.literal(429), z.literal(503)]) }).safeParse(error).success;
-      throw refused
-        ? Object.assign(requestFailure('The app request failed', error), { notRun: true })
+      throw serviceRefusal.safeParse(error).success
+        ? Object.assign(error, { notRun: true })
         : error;
     });
     try {
@@ -1627,7 +1626,10 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
           `${failure('The app request failed', error)} The selected ${known.slug} connection (${known.id}) lacks permissions for this action. Preserve this account and prepared work. Do not retry until permissions change. Ask before switching to browser sign-in unless the user already chose that recovery. The connection service's auth configuration must request the missing permission before reconnection can grant it; its operator may need to update it first. If the user chooses to reconnect, use manage_apps connect ${JSON.stringify({ service: known.slug, connectionId: known.id })}.`,
           403,
         );
-      throw requestFailure('The app request failed', error);
+      const failed = requestFailure('The app request failed', error);
+      throw notRunMarker.safeParse(error).success
+        ? Object.assign(failed, { notRun: true })
+        : failed;
     }
   }
 
