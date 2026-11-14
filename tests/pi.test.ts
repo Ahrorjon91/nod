@@ -6452,7 +6452,12 @@ test('OpenAI-compatible servers get tool models, a system message and one attemp
 test('OpenAI-compatible discovery checks past the first three Ollama models and falls back for LocalAI', async (t) => {
   const { createServer } = await import('node:http');
   const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
-  const ids = ['fixture/no-tools-1', 'fixture/no-tools-2', 'fixture/no-tools-3', 'fixture/tool-model'];
+  const ids = [
+    'fixture/no-tools-1',
+    'fixture/no-tools-2',
+    'fixture/no-tools-3',
+    'fixture/tool-model',
+  ];
   const showRequests: string[] = [];
   let mode: 'ollama' | 'localai' | 'ollama-no-tools' = 'ollama';
   const ollamaWithoutTools = ['fixture/chat-model', 'fixture/embedding-model'];
