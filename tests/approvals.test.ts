@@ -262,17 +262,18 @@ test('a complete schedule approval keeps ordinary text and still hides Basic cre
   };
   await communication.describe(proposal);
   assert.equal(calls, 2);
-  await assert.rejects(
-    communication.describe({
-      ...proposal,
-      details: {
-        scheduleDefinition: {
-          prompt: `Use Basic ${Buffer.from('synthetic-user:synthetic-password').toString('base64')}`,
+  const credential = Buffer.from('synthetic-user:synthetic-password!').toString('base64');
+  for (const token of [credential, credential.replace(/=+$/u, '')]) {
+    await assert.rejects(
+      communication.describe({
+        ...proposal,
+        details: {
+          scheduleDefinition: { prompt: `Use Basic ${token}` },
         },
-      },
-    }),
-    /hidden values/,
-  );
+      }),
+      /hidden values/,
+    );
+  }
   assert.equal(calls, 2);
 });
 
