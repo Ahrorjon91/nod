@@ -45,6 +45,9 @@ const action = (
   input: {
     timeZone: 'UTC',
     ...(text ? words(text) : {}),
+    ...('scheduledInstructions' in extra || 'scheduledApproval' in extra
+      ? { scheduledFor: '2026-11-20T09:00:00Z' }
+      : {}),
     ...extra,
     action: { name, arguments: args },
   },
@@ -2839,12 +2842,16 @@ export async function runDecisionEval(options: {
       await readFile(join(repository, 'src/shared/models.ts'), 'utf8'),
       getSupportedThinkingLevels(smallModel),
     ),
+    selected: await decisionEffort(
+      await readFile(join(repository, 'src/shared/models.ts'), 'utf8'),
+      supportedEfforts,
+    ),
     confirmation: await decisionEffort(
       await readFile(join(repository, 'src/shared/models.ts'), 'utf8'),
       supportedEfforts,
     ),
   };
-  const curator = (arm: 'main' | 'branch' | 'confirmation') => {
+  const curator = (arm: 'main' | 'branch' | 'selected' | 'confirmation') => {
     const selectedModel = arm === 'branch' ? smallModel : model;
     return createPiMemoryCurator({
       provider: options.model.provider,
@@ -2869,10 +2876,12 @@ export async function runDecisionEval(options: {
   const curators = {
     main: curator('main'),
     branch: curator('branch'),
+    selected: curator('selected'),
     confirmation: curator('confirmation'),
   };
   const availableArms = [
     'main-llm',
+    'selected-llm',
     'branch-llm',
     ...(environment.OPENAI_API_KEY ? ['gpt-decisions'] : []),
     ...(environment.OPENROUTER_API_KEY ? ['jev-openrouter'] : []),
@@ -2945,6 +2954,14 @@ export async function runDecisionEval(options: {
       else spent += cost;
     };
     let httpStatus: number | undefined;
+    const reviewPath =
+      arm === 'main-llm'
+        ? 'main'
+        : item.kind === 'valid'
+          ? 'confirmation'
+          : arm === 'selected-llm'
+            ? 'selected'
+            : 'branch';
     const selected = (arm === 'main-llm' ? policies.main[item.kind] : policies.branch[item.kind])!;
     const rules = arm === 'main-llm' ? policies.main.rules : policies.branch.rules;
     let instructions =
@@ -2970,9 +2987,11 @@ export async function runDecisionEval(options: {
       canStart: () => (unpriced ? 'unpriced' : spent >= budgetUnits ? 'budget' : undefined),
       review: async (instructions, input, report) => {
         if (arm.endsWith('-llm'))
-          return curators[
-            arm === 'main-llm' ? 'main' : item.kind === 'valid' ? 'confirmation' : 'branch'
-          ].curate({ task: 'review', instructions, input }, undefined, report);
+          return curators[reviewPath].curate(
+            { task: 'review', instructions, input },
+            undefined,
+            report,
+          );
         const provider = arm === 'gpt-decisions' ? 'openai' : 'openrouter';
         const checker = createDecisionModel({
           resolve: async () => ({
@@ -3029,10 +3048,7 @@ export async function runDecisionEval(options: {
       arm,
       ...(arm.endsWith('-llm')
         ? {
-            reviewEffort:
-              effort[
-                arm === 'main-llm' ? 'main' : item.kind === 'valid' ? 'confirmation' : 'branch'
-              ].effort,
+            reviewEffort: effort[reviewPath].effort,
           }
         : {}),
       case: item.id,
