@@ -1052,12 +1052,23 @@ test(
             { action: 'SEARCH_TOOLS', args: { query: 'gmail' } },
             { action: 'GMAIL_GET_DRAFT', args: { draft_id: 'synthetic-draft' } },
           ];
+          const schedule = await reminder({ prompt: 'Synthetic automatic parent' });
           try {
             for (const source of ['event', 'schedule'] as const) {
-              const parent = await enqueueTurn('Synthetic automatic parent', {
-                source,
-                background: true,
-              });
+              let parent: string;
+              if (source === 'schedule') {
+                const response = await request('POST', `/api/schedules/${schedule.id}/run`, {
+                  requestId: randomUUID(),
+                  expectedRevision: 0,
+                });
+                assert.equal(response.statusCode, 200, response.body);
+                parent = response.json().turnId;
+              } else {
+                parent = await enqueueTurn('Synthetic automatic parent', {
+                  source,
+                  background: true,
+                });
+              }
               await waitFor(parent, 'succeeded');
               for (const call of calls) {
                 const before = appSessions;
@@ -1099,6 +1110,7 @@ test(
           } finally {
             connectionWait = undefined;
             appResult = undefined;
+            await request('DELETE', `/api/schedules/${schedule.id}`);
           }
         },
       );
