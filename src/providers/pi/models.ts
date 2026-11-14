@@ -357,25 +357,25 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
     const ollamaProbe = z
       .object({ version: z.string() })
       .safeParse(await serverJson('/api/version')).success;
-    const show = (id: string) =>
+    const show = async (id: string) =>
       ollamaShowSchema.safeParse(
-        serverJson('/api/show', {
+        await serverJson('/api/show', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ model: id }),
         }),
       );
-    const probe = ollamaProbe
-      ? listed.slice(0, 3)
-      : undefined;
-    const probed = new Map(
-      await Promise.all(
-        (probe ?? []).map(async (entry) => [entry.id, await show(entry.id)] as const),
-      ),
-    );
-    const ollama = [...probed.values()].some(
-      (shown) => shown?.success && ollamaModel(shown.data).usable,
-    );
+    const probed = new Map<string, z.SafeParseReturnType<unknown, z.infer<typeof ollamaShowSchema>>>();
+    let ollama = false;
+    if (ollamaProbe) {
+      for (let index = 0; index < listed.length && !ollama; index += 3) {
+        const batch = await Promise.all(
+          listed.slice(index, index + 3).map(async (entry) => [entry.id, await show(entry.id)] as const),
+        );
+        for (const [id, shown] of batch) probed.set(id, shown);
+        ollama = batch.some(([, shown]) => shown.success && ollamaModel(shown.data).usable);
+      }
+    }
     const studio = ollama
       ? undefined
       : z.object({ models: z.array(z.unknown()) }).safeParse(await serverJson('/api/v1/models'))
