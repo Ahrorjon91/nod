@@ -428,7 +428,15 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     signal?.throwIfAborted();
     const accounts: Partial<Record<Slug, string[]>> = {};
     for (const row of rows) (accounts[row.slug] ??= []).push(row.account_id!);
-    const session = await requiredProvider().createSession(ownerId, accounts, signal);
+    const connected = requiredProvider();
+    const session = await connected.createSession(ownerId, accounts, signal).catch((error) => {
+      const refused =
+        !(error instanceof IntegrationError) &&
+        z.object({ status: z.union([z.literal(429), z.literal(503)]) }).safeParse(error).success;
+      throw refused
+        ? Object.assign(requestFailure('The app request failed', error), { notRun: true })
+        : error;
+    });
     try {
       signal?.throwIfAborted();
       const current = await connectionRows(ownerId);
