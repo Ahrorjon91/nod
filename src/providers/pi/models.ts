@@ -218,7 +218,7 @@ function ollamaModel(show: z.infer<typeof ollamaShowSchema>) {
             }
           : undefined;
   return {
-    usable: show.capabilities.includes('tools'),
+    usable: !show.capabilities.length || show.capabilities.includes('tools'),
     images: show.capabilities.includes('vision'),
     contextWindow: Number.isFinite(contextWindow) ? contextWindow : undefined,
     reasoning: !!thinkingLevelMap,
