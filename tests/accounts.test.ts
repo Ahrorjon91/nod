@@ -6372,8 +6372,7 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
       const saved = await preferences.update(
         { notificationRule: 'Synthetic accepted notification' },
         'agent',
-        rules,
-        client,
+        { expectedRules: rules, client },
       );
       assert.equal(saved.notificationRule, 'Synthetic accepted notification');
       assert.equal((await preferences.get()).notificationRule, 'Synthetic original notification');
@@ -6385,7 +6384,10 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     ]);
     await assert.rejects(
       transaction(async (client) => {
-        await preferences.update({ rules: 'Synthetic rolled-back rules' }, 'agent', rules, client);
+        await preferences.update({ rules: 'Synthetic rolled-back rules' }, 'agent', {
+          expectedRules: rules,
+          client,
+        });
         assert.equal(f.changes().length, 1);
         throw new Error('Synthetic outer preference rollback');
       }, f.database),
@@ -6396,12 +6398,10 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     await assert.rejects(
       transaction(
         (client) =>
-          preferences.update(
-            { notificationRule: 'Synthetic unauthorized notification' },
-            'agent',
-            'Synthetic stale reviewed rules',
+          preferences.update({ notificationRule: 'Synthetic unauthorized notification' }, 'agent', {
+            expectedRules: 'Synthetic stale reviewed rules',
             client,
-          ),
+          }),
         f.database,
       ),
       {
@@ -6412,20 +6412,19 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     assert.equal((await preferences.get()).notificationRule, 'Synthetic accepted notification');
     assert.equal(f.changes().length, 1);
     await assert.rejects(
-      preferences.update(
-        { notificationRule: 'Synthetic stale replacement' },
-        'agent',
-        undefined,
-        undefined,
-        'Synthetic original notification',
-      ),
+      preferences.update({ notificationRule: 'Synthetic stale replacement' }, 'agent', {
+        expectedNotificationRule: 'Synthetic original notification',
+      }),
       { statusCode: 409 },
     );
     assert.equal((await preferences.get()).notificationRule, 'Synthetic accepted notification');
     for (const enabled of [true, false]) {
       f.analytics.setUsageData(f.owner, enabled);
       await transaction(async (client) => {
-        await preferences.update({ proactivePaused: enabled }, 'agent', rules, client);
+        await preferences.update({ proactivePaused: enabled }, 'agent', {
+          expectedRules: rules,
+          client,
+        });
         f.analytics.setUsageData(f.owner, false);
         f.analytics.setUsageData(f.owner, true);
         assert.equal(f.changes().length, 1);
@@ -6434,7 +6433,8 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
       assert.equal(f.changes().length, 1);
     }
     await transaction(
-      (client) => preferences.update({ proactivePaused: true }, 'agent', rules, client),
+      (client) =>
+        preferences.update({ proactivePaused: true }, 'agent', { expectedRules: rules, client }),
       f.database,
     );
     assert.deepEqual(f.changes().slice(1), [

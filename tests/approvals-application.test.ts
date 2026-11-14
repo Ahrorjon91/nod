@@ -2067,6 +2067,21 @@ test(
             [sourceMessage, ownerId, threadId, sourceTurn, text],
           );
           for (const [authority, reason] of [
+            [null, /no saved owner instruction/],
+            [{ messages: [] }, /no saved owner instruction/],
+            [
+              {
+                messages: [
+                  {
+                    id: null,
+                    at: new Date().toISOString(),
+                    text: 'Background only.',
+                    canAuthorize: false,
+                  },
+                ],
+              },
+              /no saved owner instruction/,
+            ],
             [{ messages: [], requiresReplacement: true }, /changes without source records/],
             [
               { messages: [{ id: sourceMessage, at: new Date().toISOString(), text }] },
@@ -2075,7 +2090,7 @@ test(
           ] as const) {
             await pool.query('UPDATE schedules SET authority=$2 WHERE id=$1', [
               schedule.id,
-              JSON.stringify(authority),
+              authority === null ? null : JSON.stringify(authority),
             ]);
             const response = await request('POST', `/api/schedules/${schedule.id}/run`, {
               requestId: randomUUID(),

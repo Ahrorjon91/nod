@@ -836,6 +836,54 @@ test('local file rules match each platform', () => {
   assert.equal(linux.executable('/home/ada/Downloads/notes.txt', 0o644), false);
 });
 
+test('local files require owner evidence for a schedule, including approval-only schedules', async () => {
+  let authority: import('../src/server/owner-instructions.ts').OwnerInstructions | null = null;
+  const pool = {
+    query: async (sql: string) => {
+      if (sql.startsWith('WITH RECURSIVE'))
+        return {
+          rows: [{ id: 'schedule-turn', source: 'schedule', message_id: null, proactive: false }],
+        };
+      if (sql.startsWith('SELECT authority')) return { rows: [{ authority }] };
+      assert.fail('Unexpected source query.');
+    },
+  } as unknown as Pool;
+  const files = createLocalFiles(pool, 'owner', {
+    dataRoot: '/tmp/synthetic-nod',
+    home: '/tmp/synthetic-home',
+  });
+  const turn = { turnId: 'schedule-turn', threadId: 'synthetic-thread' };
+  for (const value of [
+    null,
+    { messages: [] },
+    {
+      messages: [
+        { id: null, at: '2026-11-14T09:00:00Z', text: 'Background only.', canAuthorize: false },
+      ],
+    },
+  ]) {
+    authority = value;
+    await assert.rejects(files.assertStartedByOwner(turn), /work the owner started/);
+  }
+  authority = {
+    messages: [],
+    approvals: [
+      {
+        id: 'synthetic-approval',
+        at: '2026-11-14T09:00:00Z',
+        definition: { prompt: 'Read the synthetic board.' },
+      },
+    ],
+  };
+  await files.assertStartedByOwner(turn);
+  authority = {
+    messages: [{ id: null, at: '2026-11-14T09:00:00Z', text: 'Read the synthetic board.' }],
+  };
+  await files.assertStartedByOwner(turn);
+  authority.requiresReplacement = true;
+  await assert.rejects(files.assertStartedByOwner(turn), /changes without source records/);
+});
+
 test('local files stay in home, skip secrets and kept-out folders, and never overwrite', async () => {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'nod-local-files-')));
   const home = join(base, 'home');

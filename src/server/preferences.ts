@@ -99,10 +99,13 @@ export function createPreferencesStore(pool: Pool, ownerId: string, analytics?: 
     async update(
       raw: unknown,
       actor: SettingActor = 'owner',
-      expectedRules?: string,
-      shared?: PoolClient,
-      expectedNotificationRule?: string,
+      options: {
+        expectedRules?: string;
+        expectedNotificationRule?: string;
+        client?: PoolClient;
+      } = {},
     ): Promise<Preferences> {
+      const { expectedRules, expectedNotificationRule, client: shared } = options;
       const patch = validate(raw);
       const capture = snapshotAnalytics(analytics);
       const save = async (connection: Pick<Pool, 'query'>) => {
@@ -148,6 +151,7 @@ export function createPreferencesStore(pool: Pool, ownerId: string, analytics?: 
             new Error('The saved owner instructions changed. Review them before asking again.'),
             {
               statusCode: 409,
+              notRun: true,
             },
           );
         return result.rows[0] as Preferences;

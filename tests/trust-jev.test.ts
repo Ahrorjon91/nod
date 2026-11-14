@@ -383,6 +383,40 @@ test('date checks include calendar dates, implicit years, clock suffixes and unc
   );
 });
 
+test('scheduled date facts keep multiline terms and the first source after many corrections', async () => {
+  const { trustFacts } = await import('../src/server/trust-facts.ts');
+  const scheduledInstructions = Array.from({ length: 24 }, (_, index) => ({
+    at: `2028-02-${String(index + 1).padStart(2, '0')}T09:00:00Z`,
+    text: index === 0 ? 'Check the report.\nLondon\n2027' : 'Keep the original date.',
+  }));
+  const facts = trustFacts({
+    scheduledInstructions,
+    scheduledApproval: {
+      at: '2028-02-24T09:00:00Z',
+      definition: { prompt: 'Summarize the report.', title: 2099 },
+    },
+    scheduledFor: '2028-02-25T09:00:00Z',
+    action: { name: 'CREATE_EVENT', arguments: { start: '2028-02-26T09:00:00Z' } },
+  }).serverDateFacts;
+  assert.ok(
+    facts.references.some(
+      (reference) =>
+        JSON.stringify((reference as { field: unknown }).field) ===
+        JSON.stringify(['scheduledInstructions', 0, 'at']),
+    ),
+  );
+  assert.ok(
+    facts.comparisons.some(
+      (comparison) =>
+        JSON.stringify((comparison as { referenceField: unknown }).referenceField) ===
+          JSON.stringify(['scheduledInstructions', 0, 'at']) &&
+        (comparison as { timeZone: string }).timeZone === 'Europe/London',
+    ),
+  );
+  assert.ok(Object.hasOwn(facts.monthEnds, 'December 2027'));
+  assert.equal(Object.hasOwn(facts.monthEnds, 'December 2099'), false);
+});
+
 test('date and amount facts preserve zone aliases and complete grouped amounts', async () => {
   const { trustFacts } = await import('../src/server/trust-facts.ts');
   const facts = trustFacts({
@@ -733,15 +767,21 @@ test('relative days use the configured zone and refuse a missing or unlisted zon
                 Object(input.ownerSourceForThisCheck).text,
                 JSON.stringify(scheduledApproval.definition),
               );
-              assert.ok(
-                request.additionalQuestions?.some((question) => question.name === 'owner_clock'),
+              assert.deepEqual(
+                request.additionalQuestions
+                  ?.find((question) => question.name === 'owner_clock')
+                  ?.choices.map((choice) => choice.value),
+                ['none', '15:00'],
               );
             }
             if (source === 'schedule:0') {
               assert.deepEqual(input.scheduledInstructions, scheduledInstructions);
               assert.equal(input.assistantMessageBeforeLatestUserMessage, text);
-              assert.ok(
-                request.additionalQuestions?.some((question) => question.name === 'owner_clock'),
+              assert.deepEqual(
+                request.additionalQuestions
+                  ?.find((question) => question.name === 'owner_clock')
+                  ?.choices.map((choice) => choice.value),
+                ['none', '15:00'],
               );
             }
             return {

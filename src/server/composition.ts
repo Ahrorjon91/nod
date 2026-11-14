@@ -133,7 +133,7 @@ import { lockProactivity } from './locks.ts';
 import { createObservationSources } from './observation-sources.ts';
 import { createTaskObservations } from './task-observations.ts';
 import type { TrustBasis } from './trust-basis.ts';
-import { validateOwnerInstructions } from './owner-instructions.ts';
+import { validateScheduledInstructions } from './owner-instructions.ts';
 import { localArtifacts } from './artifacts.ts';
 import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
 import { createChannels } from './channels.ts';
@@ -1337,7 +1337,10 @@ async function initializeApplication(
               ? transaction(
                   async (client) => {
                     if ((await lockThread(client)).id !== provenance.threadId)
-                      throw new Error('The instruction conversation is no longer active.');
+                      throw Object.assign(
+                        new Error('The instruction conversation is no longer active.'),
+                        { notRun: true },
+                      );
                     return withTurnLock(
                       turnLock,
                       (locked) =>
@@ -1995,8 +1998,8 @@ async function initializeApplication(
       task: tasks.execute,
       startTurn: async (turn) => {
         const origin = await turnOrigin(turn.turnId);
-        if (origin?.scheduleInstruction)
-          await validateOwnerInstructions(pool, ownerId, origin.scheduleInstruction);
+        if (origin?.source === 'schedule')
+          await validateScheduledInstructions(pool, ownerId, origin.scheduleInstruction);
         await tasks.inherit(turn);
       },
       connections: async (...args) => {

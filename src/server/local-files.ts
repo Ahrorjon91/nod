@@ -1,3 +1,8 @@
+import {
+  hasOwnerInstructions,
+  validateOwnerInstructions,
+  type OwnerInstructions,
+} from './owner-instructions.ts';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
@@ -226,17 +231,21 @@ export function createLocalFiles(
         )
       : { rows: [] };
     const root = rows[0];
+    const schedule =
+      root?.source === 'schedule'
+        ? (
+            await database.query<{ authority: OwnerInstructions | null }>(
+              'SELECT authority FROM schedule_runs WHERE turn_id=$1 AND owner_id=$2',
+              [root.id, ownerId],
+            )
+          ).rows[0]
+        : undefined;
     const owned =
       root &&
       !root.proactive &&
-      ((root.source === 'user' && root.message_id) ||
-        (root.source === 'schedule' &&
-          (
-            await database.query(
-              'SELECT 1 FROM schedule_runs WHERE turn_id=$1 AND owner_id=$2 AND authority IS NOT NULL',
-              [root.id, ownerId],
-            )
-          ).rowCount));
+      ((root.source === 'user' && root.message_id) || hasOwnerInstructions(schedule?.authority));
+    if (owned && schedule?.authority)
+      await validateOwnerInstructions(database, ownerId, schedule.authority);
     if (!owned)
       throw new IntegrationError(
         "Local files only open in work the owner started: a message, or a schedule the owner set up. Nod didn't touch any file.",

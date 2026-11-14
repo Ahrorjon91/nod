@@ -1,3 +1,4 @@
+import { scheduledTexts } from './owner-instructions.ts';
 import { z } from 'zod';
 import type {
   DecisionModel,
@@ -417,14 +418,7 @@ export async function checkJevTrust(
     }
     additionalQuestions.push(
       ...jevTimeQuestions(
-        (scheduled
-          ? JSON.stringify({
-              scheduledInstructions: input.scheduledInstructions,
-              scheduledApproval: input.scheduledApproval,
-            })
-          : (ownerText ?? '')) +
-          ' ' +
-          (proposal ?? ''),
+        (scheduled ? scheduledTexts(input).join('\n') : (ownerText ?? '')) + ' ' + (proposal ?? ''),
         dates,
         kind,
       ),
@@ -603,7 +597,9 @@ export async function checkJevTrust(
   };
   Object.assign(features, {
     source_message: Number(String(first.choice).startsWith('message:')),
-    source_schedule: Number(first.choice === 'schedule'),
+    source_schedule: Number(
+      String(first.choice).startsWith('schedule:') || first.choice === 'scheduleApproval',
+    ),
     source_standing: Number(first.choice === 'standing'),
     source_rules: Number(first.choice === 'rules'),
     effect_confidence: first.additional.effect.probability,

@@ -10,6 +10,7 @@ import {
   bareConfirmationAnswer,
   captureOwnerInstructions,
   validateOwnerInstructions,
+  validateScheduledInstructions,
   instructionMessages,
   type InstructionChange,
   type OwnerInstructions,
@@ -80,7 +81,8 @@ export function createTrust(options: {
     const instruction = origin.scheduleInstruction;
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const context = async () => {
-      if (instruction) await validateOwnerInstructions(pool, ownerId, instruction);
+      if (origin.source === 'schedule')
+        await validateScheduledInstructions(pool, ownerId, instruction);
       const preferences = (
         await pool.query<{ notification_rule: string; rules: string; time_zone: string | null }>(
           'SELECT notification_rule,rules,time_zone FROM preferences WHERE owner_id=$1',
@@ -193,12 +195,7 @@ export function createTrust(options: {
           : {}),
         ...(words.scheduledInstructions
           ? {
-              scheduledInstructions: words.scheduledInstructions.map(
-                ({ id, approvalId, replyTo, ...message }) => ({
-                  ...message,
-                  ...(replyTo ? { replyTo: { text: replyTo.text } } : {}),
-                }),
-              ),
+              scheduledInstructions: instructionMessages(instruction!),
             }
           : {}),
         ...(words.scheduledApproval

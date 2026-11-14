@@ -40,7 +40,14 @@ export function environmentSecrets(environment: Record<string, string | undefine
 export function redactSecretText(value: string): string {
   return value
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, hidden)
-    .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9+/_.=:-]+/gi, hidden)
+    .replace(
+      /\b(Bearer|Basic)\s+([A-Za-z0-9+/_.=:-]+)/gi,
+      (match, scheme: string, token: string) => {
+        if (scheme.toLowerCase() !== 'basic') return hidden;
+        const decoded = Buffer.from(token, 'base64');
+        return decoded.toString('base64') === token && decoded.includes(58) ? hidden : match;
+      },
+    )
     .replace(
       /\b(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*:\s*[^\r\n]+/gi,
       hidden,

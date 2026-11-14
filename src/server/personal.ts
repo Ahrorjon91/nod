@@ -151,13 +151,7 @@ export function createPersonalService(dependencies: PersonalDependencies) {
       return { selection: dependencies.models!.view().selection };
     }
     if (action === 'notification_preferences_update') {
-      const result = await preferences.update(
-        args,
-        'agent',
-        options?.expectedRules,
-        options?.client,
-        options?.expectedNotificationRule,
-      );
+      const result = await preferences.update(args, 'agent', options);
       afterCommit(options?.client ?? pool, refresh);
       return result;
     }

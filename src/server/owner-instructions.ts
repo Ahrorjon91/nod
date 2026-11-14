@@ -76,6 +76,46 @@ export function mergeOwnerInstructions(
   };
 }
 
+export function hasOwnerInstructions(
+  evidence: OwnerInstructions | null | undefined,
+): evidence is OwnerInstructions {
+  return Boolean(
+    evidence &&
+    (evidence.approvals?.length ||
+      evidence.messages.some((message) => message.canAuthorize !== false && message.text.trim())),
+  );
+}
+
+export async function validateScheduledInstructions(
+  pool: Pick<Pool, 'query'>,
+  ownerId: string,
+  evidence: OwnerInstructions | null | undefined,
+) {
+  if (evidence) await validateOwnerInstructions(pool, ownerId, evidence);
+  if (!hasOwnerInstructions(evidence))
+    throw Object.assign(
+      new Error(
+        'The schedule has no saved owner instruction. Supply a complete replacement instruction.',
+      ),
+      { notRun: true, code: 'owner_instruction_unavailable' },
+    );
+}
+
+export function scheduledTexts(
+  input: Pick<TrustWords, 'scheduledInstructions' | 'scheduledApproval'>,
+): string[] {
+  return [
+    ...(input.scheduledInstructions ?? []).flatMap((message) => [
+      message.text,
+      message.replyTo?.text,
+      typeof message.fields?.prompt === 'string' ? message.fields.prompt : undefined,
+    ]),
+    typeof input.scheduledApproval?.definition.prompt === 'string'
+      ? input.scheduledApproval.definition.prompt
+      : undefined,
+  ].filter((value): value is string => typeof value === 'string' && Boolean(value));
+}
+
 export async function validateOwnerInstructions(
   pool: Pick<Pool, 'query'>,
   ownerId: string,

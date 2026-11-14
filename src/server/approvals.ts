@@ -187,21 +187,19 @@ async function workOf(
   taskId: string | null,
   schedule: Awaited<ReturnType<typeof scheduleAuthority>>,
 ): Promise<ApprovalWork | undefined> {
-  if (schedule)
+  if (schedule) {
+    const ownerRequest = schedule.authority?.messages
+      .filter((message) => message.canAuthorize !== false)
+      .map((message) => message.text)
+      .filter(Boolean)
+      .join('\n\n');
     return {
       kind: 'schedule',
       title: schedule.title,
-      ...(schedule.authority
-        ? {
-            ownerRequest: schedule.authority.messages
-              .filter((message) => message.canAuthorize !== false)
-              .map((message) => message.text)
-              .filter(Boolean)
-              .join('\n\n'),
-          }
-        : {}),
+      ...(ownerRequest ? { ownerRequest } : {}),
       ...(schedule.kind === 'recurring' ? { waitsForAnswer: true as const } : {}),
     };
+  }
   if (!taskId) return undefined;
   const task = (
     await client.query<{ title: string; request: string | null }>(

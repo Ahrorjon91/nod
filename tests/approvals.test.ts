@@ -239,6 +239,43 @@ test('a complete schedule approval refuses a definition with hidden values', asy
   assert.equal(calls, 0);
 });
 
+test('a complete schedule approval keeps ordinary text and still hides Basic credentials', async () => {
+  let calls = 0;
+  const prompt = 'Prepare a basic daily briefing from https://shop.example.test/payments/';
+  const communication = createCommunication({
+    pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+    ownerId: 'synthetic-owner',
+    review: async (_instructions, input) => {
+      calls++;
+      const request = input as Record<string, any>;
+      assert.equal(request.data.details.scheduleDefinition.prompt, prompt);
+      return request.purpose === 'confirmation_review'
+        ? { valid: true }
+        : { text: 'Save the basic daily briefing schedule for the shop?', action: 'Save schedule' };
+    },
+  });
+  const proposal = {
+    turn: { threadId: 'synthetic-thread', turnId: 'synthetic-turn' },
+    action: 'NOD_schedule_create',
+    args: { prompt },
+    details: { scheduleDefinition: { prompt } },
+  };
+  await communication.describe(proposal);
+  assert.equal(calls, 2);
+  await assert.rejects(
+    communication.describe({
+      ...proposal,
+      details: {
+        scheduleDefinition: {
+          prompt: `Use Basic ${Buffer.from('synthetic-user:synthetic-password').toString('base64')}`,
+        },
+      },
+    }),
+    /hidden values/,
+  );
+  assert.equal(calls, 2);
+});
+
 test('browser upload wording omits the private workspace path', async () => {
   const command = {
     action: 'upload',
@@ -1057,6 +1094,23 @@ test(
         return running(await thread.enqueueTurn(prompt, { source: options.source }));
       const submitted = await thread.submitUserMessage(prompt, [], { channel: options.channel });
       return running(submitted.turnId);
+    };
+    const attachSchedule = async (
+      turn: { turnId: string; threadId: string },
+      instruction = 'Read the synthetic board.',
+    ) => {
+      await db.pool.query(
+        "INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority) VALUES($1,$2,$3,0,$4,'Synthetic schedule',$5,now(),'UTC',$6)",
+        [
+          randomUUID(),
+          ownerId,
+          randomUUID(),
+          randomUUID(),
+          turn.turnId,
+          { messages: [{ id: null, at: new Date().toISOString(), text: instruction }] },
+        ],
+      );
+      return turn;
     };
     const finish = (turnId: string, status = 'waiting') =>
       db.pool.query('UPDATE turns SET status=$2,finished_at=now() WHERE id=$1', [turnId, status]);
@@ -2604,13 +2658,15 @@ test(
           await trust.check(await begin('Check my inbox.'), 'GMAIL_FETCH_EMAILS', {});
           assert.equal(reviews.at(-1)?.standingInstruction, undefined);
           const scheduled = await begin('Synthetic scheduled work', { source: 'schedule' });
-          compareVerdict(
-            await trust.check(scheduled, 'GOOGLECALENDAR_PATCH_EVENT', {
+          const beforeMissing = reviews.length;
+          await assert.rejects(
+            trust.check(scheduled, 'GOOGLECALENDAR_PATCH_EVENT', {
               event_id: 'synthetic-shared',
               start_time: '10:00',
             }),
-            { confirm: true, reason: 'schedule' },
+            /no saved owner instruction/,
           );
+          assert.equal(reviews.length, beforeMissing);
           const instruction = 'Every Monday, move the synthetic standup to 10:00.';
           const authorized = await begin('Synthetic scheduled work', { source: 'schedule' });
           const scheduleId = randomUUID();
@@ -3042,7 +3098,7 @@ test(
           for (const turn of [
             chat,
             await begin('Synthetic event', { source: 'event' }),
-            await begin('Synthetic scheduled work', { source: 'schedule' }),
+            await attachSchedule(await begin('Synthetic scheduled work', { source: 'schedule' })),
           ]) {
             compareVerdict(await trust.check(turn, 'GMAIL_SEND_EMAIL', send), {
               confirm: true,
@@ -3724,7 +3780,9 @@ test(
           const args = { id: randomUUID() };
           const turns = await Promise.all([
             begin('A synthetic event proposes a pause.', { source: 'event' }),
-            begin('A synthetic scheduled check proposes a pause.', { source: 'schedule' }),
+            begin('A synthetic scheduled check proposes a pause.', { source: 'schedule' }).then(
+              attachSchedule,
+            ),
           ]);
           const before = calls.length;
           const results = await Promise.all(

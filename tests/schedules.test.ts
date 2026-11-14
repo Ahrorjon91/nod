@@ -1089,11 +1089,8 @@ test(
               [schedule.id],
             )
           ).rows[0];
-          assert.deepEqual(stored, {
-            delivery_channel: origin.channel,
-            channel_source_id: origin.sourceId,
-            authority: stored.authority,
-          });
+          assert.equal(stored.delivery_channel, origin.channel);
+          assert.equal(stored.channel_source_id, origin.sourceId);
           assert.equal(
             stored.authority.messages.find(
               (message: { id: string }) => message.id === origin.sourceMessageId,
