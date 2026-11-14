@@ -139,6 +139,7 @@ export async function initializeDatabase() {
       confirmation_message_id uuid REFERENCES messages(id) ON DELETE SET NULL,
       result jsonb
     );
+    ALTER TABLE approvals ADD COLUMN IF NOT EXISTS instruction_change jsonb;
     ALTER TABLE approvals ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),
       ADD COLUMN IF NOT EXISTS expected_revision integer,
       ADD COLUMN IF NOT EXISTS details jsonb,

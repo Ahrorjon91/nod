@@ -68,9 +68,13 @@ function local(value: Date, zone: string) {
 
 export function trustFacts(input: TrustInput) {
   const messages = input.userMessages ?? [];
+  const scheduledMessages = input.scheduledInstructions ?? [];
   const texts = [
     ...messages.map((x) => x.text),
-    input.scheduledTaskInstruction,
+    ...scheduledMessages.map((message) =>
+      JSON.stringify({ text: message.text, fields: message.fields, replyTo: message.replyTo }),
+    ),
+    ...(input.scheduledApproval ? [JSON.stringify(input.scheduledApproval.definition)] : []),
     input.standingInstruction,
     input.userRules,
   ].filter((x): x is string => Boolean(x));
@@ -124,6 +128,12 @@ export function trustFacts(input: TrustInput) {
     const facts = explain(message.at);
     if (facts) references.push({ field: ['userMessages', index, 'at'], ...facts });
   }
+  for (const [index, message] of scheduledMessages.entries()) {
+    const facts = explain(message.at);
+    if (facts) references.push({ field: ['scheduledInstructions', index, 'at'], ...facts });
+  }
+  const approved = explain(input.scheduledApproval?.at);
+  if (approved) references.push({ field: ['scheduledApproval', 'at'], ...approved });
   const scheduled = explain(input.scheduledFor);
   if (scheduled) references.push({ field: ['scheduledFor'], ...scheduled });
   const comparisons: object[] = [];
@@ -188,7 +198,7 @@ export function trustFacts(input: TrustInput) {
   }
   sumAmounts(input.action?.arguments, ['action', 'arguments'], 0);
   const years = new Set(texts.flatMap((x) => x.match(/\b(?:19|20|21)\d\d\b/g) ?? []));
-  for (const message of messages) {
+  for (const message of [...messages, ...scheduledMessages]) {
     if (explain(message.at)) years.add(message.at.slice(0, 4));
   }
   if (scheduled) years.add(scheduled.value.slice(0, 4));
@@ -213,7 +223,7 @@ export function trustFacts(input: TrustInput) {
       ...(scheduled && timeZone
         ? {
             scheduleContext: {
-              source: 'scheduledTaskInstruction',
+              source: 'scheduledInstructions',
               ...local(new Date(scheduled.value), timeZone),
             },
           }

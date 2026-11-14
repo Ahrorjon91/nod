@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { InstructionChange } from './owner-instructions.ts';
 import type { PoolClient } from 'pg';
 import type { FastifyInstance } from 'fastify';
 import { afterCommit } from './transaction.ts';
@@ -116,8 +117,9 @@ export function createPersonalService(dependencies: PersonalDependencies) {
       sourceMessageId: string | null;
       turnId?: string;
       expectedRevision?: number;
+      instructionChange?: InstructionChange;
     },
-    options?: { expectedRules?: string; client?: PoolClient },
+    options?: { expectedRules?: string; expectedNotificationRule?: string; client?: PoolClient },
   ) {
     if (action === 'notification_preferences_get') return preferences.get();
     if (action === 'models_get') {
@@ -154,6 +156,7 @@ export function createPersonalService(dependencies: PersonalDependencies) {
         'agent',
         options?.expectedRules,
         options?.client,
+        options?.expectedNotificationRule,
       );
       afterCommit(options?.client ?? pool, refresh);
       return result;
@@ -300,6 +303,7 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     manage,
     recall,
     validateReview,
+    prepareScheduleChange: schedules.prepareChange,
     reviewMemory,
     memoryView,
     registerRoutes,

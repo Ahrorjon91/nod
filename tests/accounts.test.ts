@@ -548,14 +548,23 @@ test('decision trust never calls an LLM for uncertainty, missing results or fail
       assert.fail('Decision checks must not call an LLM.');
     },
   });
-  assert.equal(trustBasis(await review(instructions, input), words, ['message'])?.kind, 'message');
+  assert.equal(
+    trustBasis(await review(instructions, input), withOwnerIds(words, ['message']))?.kind,
+    'message',
+  );
   assert.equal(calls, 0);
   probability = 0.8;
-  assert.equal(trustBasis(await review(instructions, input), words, ['message']), undefined);
+  assert.equal(
+    trustBasis(await review(instructions, input), withOwnerIds(words, ['message'])),
+    undefined,
+  );
   assert.equal(calls, 0);
   choice = 'ask';
   probability = 0.995;
-  assert.equal(trustBasis(await review(instructions, input), words, ['message']), undefined);
+  assert.equal(
+    trustBasis(await review(instructions, input), withOwnerIds(words, ['message'])),
+    undefined,
+  );
   assert.equal(calls, 0);
   fail = true;
   await assert.rejects(review(instructions, input));
@@ -622,9 +631,10 @@ test('uncertain effects cannot authorize a change through confident permission',
     return { run: false };
   };
   assert.equal(
-    trustBasis(await createTrustReview({ decisions, review })('Original policy', input), input, [
-      'message',
-    ]),
+    trustBasis(
+      await createTrustReview({ decisions, review })('Original policy', input),
+      withOwnerIds(input, ['message']),
+    ),
     undefined,
   );
   assert.equal(calls, 0);
@@ -710,7 +720,10 @@ test('batched trust validates all answers, records one request, and refuses conf
       });
       const input = { ...words, action: { name: 'list_projects', arguments: {} } };
       assert.equal(
-        trustBasis(await review('Complete permission policy', input), words, ['message'])?.kind,
+        trustBasis(
+          await review('Complete permission policy', input),
+          withOwnerIds(words, ['message']),
+        )?.kind,
         'read',
       );
       assert.equal(usage.length, 1);
@@ -718,7 +731,10 @@ test('batched trust validates all answers, records one request, and refuses conf
       primary = 0.995;
       conflict = true;
       assert.equal(
-        trustBasis(await review('Complete permission policy', input), words, ['message']),
+        trustBasis(
+          await review('Complete permission policy', input),
+          withOwnerIds(words, ['message']),
+        ),
         undefined,
       );
       assert.equal(usage.length, 2);
@@ -792,7 +808,7 @@ test('pure decision checks bind the evaluated model, preserve target checks and 
   });
   const allowed = () =>
     review('Apply the permission policy.', input).then((answer) =>
-      trustBasis(answer, input, ['message']),
+      trustBasis(answer, withOwnerIds(input, ['message'])),
     );
   assert.equal((await allowed())?.kind, 'message');
   assert.equal(events.length, 1);
@@ -837,7 +853,7 @@ test('pure decision checks bind the evaluated model, preserve target checks and 
 test('trust calendar facts preserve whole inputs and use the local run date across leap days and DST', () => {
   const input = {
     userMessages: [{ at: '2028-02-28T23:30:00Z', text: 'Tomorrow in Madrid.' }],
-    scheduledTaskInstruction: 'Send the report tomorrow.',
+    scheduledInstructions: [{ at: '2026-11-14T00:00:00Z', text: 'Send the report tomorrow.' }],
     scheduledFor: '2028-02-28T23:30:00Z',
     timeZone: 'Europe/Madrid',
     action: {
@@ -903,26 +919,37 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     userRules: 'Ask before deleting files.',
   };
   const decision = trustDecision(words);
-  assert.deepEqual(trustBasis(decision.result({ trust: 'message:0' }), words, ['owner-message']), {
-    kind: 'message',
-    messageId: 'owner-message',
-    quote: 'Send the report to ana@example.test',
-  });
+  assert.deepEqual(
+    trustBasis(decision.result({ trust: 'message:0' }), withOwnerIds(words, ['owner-message'])),
+    {
+      kind: 'message',
+      messageId: 'owner-message',
+      quote: 'Send the report to ana@example.test',
+    },
+  );
   for (const value of ['message:1', 'assistant', 'Send the report', true, null])
     assert.equal(decision.result({ trust: value }), undefined);
   assert.deepEqual(decision.result({ trust: 'rule' }), { run: false, rule: true });
   assert.deepEqual(decision.result({ trust: 'read' }), { run: true, because: 'read' });
   for (const [source, input, kind] of [
-    ['schedule', { scheduledTaskInstruction: 'Send the weekly report.' }, 'schedule'],
+    [
+      'schedule:0',
+      { scheduledInstructions: [{ at: '2026-11-14T00:00:00Z', text: 'Send the weekly report.' }] },
+      'schedule',
+    ],
     ['standing', { standingInstruction: 'Reply to delivery questions.' }, 'standing'],
     ['rules', { userRules: 'Archive delivery notices.' }, 'rule'],
   ] as const) {
     const gate = trustDecision(input);
-    assert.equal(trustBasis(gate.result({ trust: source }), input, [])?.kind, kind);
+    assert.equal(trustBasis(gate.result({ trust: source }), input)?.kind, kind);
   }
   const scheduled = {
-    scheduledTaskInstruction: 'Check it every morning.\n\nMake it cheaper.',
-    scheduleContext: ['Look at the budget folder.', 'Send Lena the report.'],
+    scheduledInstructions: [
+      { at: '2026-11-14T00:00:00Z', text: 'Check it every morning.' },
+      { at: '2026-11-14T00:01:00Z', text: 'Make it cheaper.' },
+      { at: '2026-11-13T00:00:00Z', text: 'Look at the budget folder.', canAuthorize: false },
+      { at: '2026-11-13T00:01:00Z', text: 'Send Lena the report.', canAuthorize: false },
+    ],
   };
   for (const [because, kind] of [
     ['Check it every morning', 'schedule'],
@@ -930,7 +957,7 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     ['Send Lena the report', undefined],
     ['Look at the budget folder', undefined],
   ] as const)
-    assert.equal(trustBasis({ run: true, because }, scheduled, [])?.kind, kind);
+    assert.equal(trustBasis({ run: true, because }, scheduled)?.kind, kind);
   assert.equal(
     trustDecision(scheduled).question.choices.some(({ value }) =>
       String(value).startsWith('message:'),
@@ -6377,10 +6404,24 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
           ),
         f.database,
       ),
-      { statusCode: 409, message: 'Your rules changed. Review them before asking again.' },
+      {
+        statusCode: 409,
+        message: 'The saved owner instructions changed. Review them before asking again.',
+      },
     );
     assert.equal((await preferences.get()).notificationRule, 'Synthetic accepted notification');
     assert.equal(f.changes().length, 1);
+    await assert.rejects(
+      preferences.update(
+        { notificationRule: 'Synthetic stale replacement' },
+        'agent',
+        undefined,
+        undefined,
+        'Synthetic original notification',
+      ),
+      { statusCode: 409 },
+    );
+    assert.equal((await preferences.get()).notificationRule, 'Synthetic accepted notification');
     for (const enabled of [true, false]) {
       f.analytics.setUsageData(f.owner, enabled);
       await transaction(async (client) => {
@@ -6660,3 +6701,12 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     }
   });
 });
+
+function withOwnerIds<
+  T extends { userMessages?: ReadonlyArray<{ at: string; text: string; canAuthorize?: boolean }> },
+>(words: T, ids: readonly string[]) {
+  return {
+    ...words,
+    userMessages: words.userMessages?.map((message, index) => ({ ...message, id: ids[index] })),
+  };
+}

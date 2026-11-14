@@ -1903,6 +1903,60 @@ test(
       );
 
       await t.test(
+        'a schedule approval retains the checked definition and its durable source',
+        async () => {
+          const text = 'Set up a synthetic board check each Monday at 09:00.';
+          const turn = await propose(
+            'schedule_create',
+            {
+              title: 'Synthetic approved board',
+              prompt: 'Read Documents/board/todo.md and summarize it. Never send email.',
+              kind: 'recurring',
+              cron: '0 9 * * 1',
+              timeZone: 'UTC',
+            },
+            undefined,
+            text,
+          );
+          const [approval] = await approvalsFor(turn);
+          assert.equal(approval.instruction_change.before, null);
+          assert.ok(
+            approval.instruction_change.evidence.messages.some(
+              (message: { text: string }) => message.text === text,
+            ),
+          );
+          const review = (fallbackChecks as Array<Record<string, any>>).findLast(
+            (input) => input.action?.name === 'NOD_schedule_create',
+          );
+          assert.deepEqual(review?.instructionChange.after, approval.instruction_change.after);
+          assert.equal(review?.instructionChange.after.watch, null);
+          assert.ok(!JSON.stringify(review).includes(approval.source_message_id));
+          const response = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: approval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(response.statusCode, 200, response.body);
+          await waitFor(response.json().turnId, 'succeeded');
+          const completed = (await approvalsFor(turn))[0];
+          assert.equal(completed.status, 'completed');
+          const schedule = (
+            await pool.query('SELECT authority,prompt,cron FROM schedules WHERE id=$1', [
+              completed.result.id,
+            ])
+          ).rows[0];
+          assert.deepEqual(schedule.authority.messages, []);
+          assert.equal(schedule.authority.approvals.length, 1);
+          assert.equal(schedule.authority.approvals[0].id, approval.id);
+          assert.deepEqual(
+            schedule.authority.approvals[0].definition,
+            approval.instruction_change.after,
+          );
+          assert.equal(schedule.prompt, approval.instruction_change.after.prompt);
+          assert.equal(schedule.cron, '0 9 * * 1');
+        },
+      );
+      await t.test(
         'schedule pause and edit confirmations cannot mutate a revision edited after the question was saved',
         async () => {
           for (const action of ['schedule_pause', 'schedule_update']) {
@@ -1960,12 +2014,20 @@ test(
             await waitFor(confirmed.json().turnId, 'succeeded');
             assert.equal((await approvalsFor(fresh))[0].status, 'completed');
             const applied = (
-              await pool.query('SELECT revision,title,enabled FROM schedules WHERE id=$1', [
-                schedule.id,
-              ])
+              await pool.query(
+                'SELECT revision,title,enabled,authority FROM schedules WHERE id=$1',
+                [schedule.id],
+              )
             ).rows[0];
             assert.equal(applied.revision, saved.revision + 1);
             assert.equal(applied.enabled, action !== 'schedule_pause');
+            assert.deepEqual(applied.authority.approvals ?? [], saved.authority.approvals ?? []);
+            assert.equal(applied.authority.messages.at(-1).approvalId, reviewed.id);
+            assert.deepEqual(
+              applied.authority.messages.at(-1).fields,
+              action === 'schedule_pause' ? { enabled: false } : { title: args.title },
+            );
+
             assert.equal(applied.title, args.title ?? saved.title);
             if (action === 'schedule_pause') {
               const listed = (await request('GET', '/api/schedules'))
@@ -2042,6 +2104,58 @@ test(
       });
 
       await t.test(
+        'unavailable schedule evidence fails before the model and posts the named failure',
+        async () => {
+          const title = 'Synthetic unavailable schedule';
+          const schedule = await reminder({ title });
+          const threadId = (await request('GET', '/api/state')).json().threadId;
+          const sourceTurn = randomUUID();
+          const sourceMessage = randomUUID();
+          const text = 'Read the synthetic board. Never send email.';
+          await pool.query(
+            "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,withdrawn) VALUES($1,$2,$3,$3,'user',$4,'succeeded',true)",
+            [sourceTurn, ownerId, threadId, text],
+          );
+          await pool.query(
+            "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'user',$5)",
+            [sourceMessage, ownerId, threadId, sourceTurn, text],
+          );
+          for (const [authority, reason] of [
+            [{ messages: [], requiresReplacement: true }, /changes without source records/],
+            [
+              { messages: [{ id: sourceMessage, at: new Date().toISOString(), text }] },
+              /withdrawn or unavailable/,
+            ],
+          ] as const) {
+            await pool.query('UPDATE schedules SET authority=$2 WHERE id=$1', [
+              schedule.id,
+              JSON.stringify(authority),
+            ]);
+            const response = await request('POST', `/api/schedules/${schedule.id}/run`, {
+              requestId: randomUUID(),
+              expectedRevision: 0,
+            });
+            assert.equal(response.statusCode, 200, response.body);
+            const turnId = response.json().turnId;
+            await waitFor(turnId, 'failed');
+            assert.equal(prompts.has(turnId), false);
+            const failure = (await pool.query('SELECT error FROM turns WHERE id=$1', [turnId]))
+              .rows[0];
+            assert.match(failure.error, reason);
+            const notices = (
+              await pool.query("SELECT text FROM messages WHERE turn_id=$1 AND role='assistant'", [
+                turnId,
+              ])
+            ).rows;
+            assert.equal(notices.length, 1);
+            assert.ok(notices[0].text.includes(title));
+            assert.match(notices[0].text, reason);
+          }
+          await request('DELETE', `/api/schedules/${schedule.id}`);
+        },
+      );
+
+      await t.test(
         'direct schedule pause or deletion retires an outstanding chat confirmation',
         async () => {
           for (const method of ['PATCH', 'DELETE'] as const) {
@@ -2061,8 +2175,8 @@ test(
                 client,
               });
               await client.query(
-                `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
-                 VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+                `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+                 VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',jsonb_build_object('messages',jsonb_build_array(jsonb_build_object('id',null,'at',now(),'text',$8::text))))`,
                 [
                   randomUUID(),
                   ownerId,
@@ -2402,8 +2516,8 @@ test(
               client,
             });
             await client.query(
-              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
-             VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+             VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',jsonb_build_object('messages',jsonb_build_array(jsonb_build_object('id',null,'at',now(),'text',$8::text))))`,
               [
                 randomUUID(),
                 ownerId,
@@ -3305,8 +3419,8 @@ test(
               client,
             });
             await client.query(
-              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
-               VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+               VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',jsonb_build_object('messages',jsonb_build_array(jsonb_build_object('id',null,'at',now(),'text',$8::text))))`,
               [
                 randomUUID(),
                 ownerId,

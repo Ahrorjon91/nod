@@ -505,6 +505,59 @@ const changedDecisionTerms = {
   reason: 'The date boundary changed.',
 };
 
+test('decision terms bind exact schedule edits, approvals and accepted proposals', () => {
+  const input = {
+    scheduledInstructions: [
+      {
+        text: 'Do that every morning.',
+        fields: { prompt: 'Send only the synthetic summary.' },
+        replyTo: { text: 'Send only the synthetic summary?' },
+      },
+    ],
+    scheduledApproval: { definition: { prompt: 'Send only the synthetic summary.' } },
+    action: { arguments: { body: 'Send only the synthetic summary.' } },
+  };
+  for (const [path, quote] of [
+    ['/scheduledInstructions/0/text', 'Do that every morning.'],
+    ['/scheduledInstructions/0/fields/prompt', 'Send only the synthetic summary.'],
+    ['/scheduledApproval/definition/prompt', 'Send only the synthetic summary.'],
+  ]) {
+    const output = {
+      verdict: 'compatible',
+      reason: 'The summary limit stays in effect.',
+      comparisons: [
+        {
+          owner: { path, quote },
+          action: { path: '/action/arguments/body', quote: 'Send only the synthetic summary.' },
+          ...(path === '/scheduledInstructions/0/text'
+            ? {
+                acceptedProposal: {
+                  path: '/scheduledInstructions/0/replyTo/text',
+                  quote: 'Send only the synthetic summary?',
+                },
+              }
+            : {}),
+          relation: 'preserved',
+          reason: 'The action preserves the summary limit.',
+        },
+      ],
+    };
+    assert.equal(validDecisionTerms(output, input), true);
+    assert.equal(
+      validDecisionTerms(
+        {
+          ...output,
+          comparisons: [
+            { ...output.comparisons[0], owner: { path, quote: 'Send the full synthetic report.' } },
+          ],
+        },
+        input,
+      ),
+      false,
+    );
+  }
+});
+
 test('decision term protocols reject malformed refusals and fabricated anchors without repairing output', () => {
   assert.equal(validDecisionTerms(changedDecisionTerms, decisionTermsInput), true);
   const comparison = changedDecisionTerms.comparisons[0]!;

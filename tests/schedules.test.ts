@@ -8,6 +8,11 @@ import { z } from 'zod';
 import type { InboundMessage, MessagingTransport } from '../src/ports/messaging.ts';
 import type { Schedule, ScheduleHistory, TaskDetail } from '../src/shared/contracts.ts';
 import {
+  captureOwnerInstructions,
+  mergeOwnerInstructions,
+  validateOwnerInstructions,
+} from '../src/server/owner-instructions.ts';
+import {
   readSchedule,
   scheduleExpression,
   scheduleLocalTime,
@@ -175,11 +180,45 @@ test(
         sourceId,
       };
     };
+    const manageRouted = async (
+      action: string,
+      args: Record<string, unknown>,
+      provenance?: { turnId: string; sourceMessageId: string | null },
+    ) => {
+      if (!provenance) return personal.manage(action, args);
+      const turn = (
+        await db.pool.query(
+          "SELECT thread_id,to_jsonb(turns)->>'task_id' AS task_id FROM turns WHERE id=$1",
+          [provenance.turnId],
+        )
+      ).rows[0];
+      const captured =
+        turn && provenance.sourceMessageId
+          ? await captureOwnerInstructions(
+              db.pool,
+              ownerId,
+              turn.thread_id,
+              [provenance.sourceMessageId],
+              turn.task_id,
+              new Date(Date.now() - 86_400_000),
+              provenance.turnId,
+            )
+          : undefined;
+      const prepared = await personal.prepareScheduleChange(action, args);
+      return personal.manage(action, args, {
+        ...provenance,
+        instructionChange: {
+          ...prepared,
+          evidence: captured?.evidence ?? { messages: [] },
+          previousEvidence: 'evidence' in prepared ? prepared.evidence : undefined,
+        },
+      });
+    };
     const createRouted = (
       provenance?: { turnId: string; sourceMessageId: string | null },
       timing: Record<string, unknown> = {},
     ) =>
-      personal.manage(
+      manageRouted(
         'schedule_create',
         {
           title: 'Synthetic reminder',
@@ -1046,16 +1085,21 @@ test(
           const schedule = await createRouted(provenance);
           const stored = (
             await db.pool.query(
-              'SELECT delivery_channel,channel_source_id,authority_instruction,authority_source_message_id FROM schedules WHERE id=$1',
+              'SELECT delivery_channel,channel_source_id,authority FROM schedules WHERE id=$1',
               [schedule.id],
             )
           ).rows[0];
           assert.deepEqual(stored, {
             delivery_channel: origin.channel,
             channel_source_id: origin.sourceId,
-            authority_instruction: 'Remind me in a minute.',
-            authority_source_message_id: origin.sourceMessageId,
+            authority: stored.authority,
           });
+          assert.equal(
+            stored.authority.messages.find(
+              (message: { id: string }) => message.id === origin.sourceMessageId,
+            )?.text,
+            'Remind me in a minute.',
+          );
           const manual = await runNow(schedule);
           assert.equal(manual.statusCode, 200, manual.body);
           const manualTurn = manual.json().turnId;
@@ -1072,14 +1116,12 @@ test(
           );
           assert.deepEqual(
             (
-              await db.pool.query(
-                'SELECT authority_instruction,authority_source_message_id FROM schedule_runs WHERE turn_id=$1',
-                [manualTurn],
-              )
+              await db.pool.query('SELECT authority FROM schedule_runs WHERE turn_id=$1', [
+                manualTurn,
+              ])
             ).rows[0],
             {
-              authority_instruction: 'Remind me in a minute.',
-              authority_source_message_id: origin.sourceMessageId,
+              authority: stored.authority,
             },
           );
           const sameThread = await receive('Remind me in a minute again.');
@@ -1157,66 +1199,265 @@ test(
         },
       );
       await t.test(
-        'a schedule keeps its first instruction, later changes and earlier messages',
+        'schedule changes retain exact owner evidence and bind each run to its revision',
         async () => {
           const withdrawn = await receive('Withdrawn synthetic request.');
           await db.pool.query('UPDATE turns SET withdrawn=true WHERE id=$1', [withdrawn.turnId]);
-          await receive('Look at the synthetic budget folder.');
+          const context = await receive('Look at the synthetic budget folder.');
           const asked = await receive('Check it every morning.');
           const schedule = await createRouted(asked, {
             title: 'Synthetic budget check',
             prompt: 'Check the synthetic budget folder.',
           });
-          const authority = async () =>
-            (
-              await db.pool.query(
-                'SELECT authority_instruction,authority_source_message_id,authority_context FROM schedules WHERE id=$1',
-                [schedule.id],
-              )
-            ).rows[0];
-          const first = await authority();
-          assert.equal(first.authority_instruction, 'Check it every morning.');
+          const evidence = async () =>
+            (await db.pool.query('SELECT authority FROM schedules WHERE id=$1', [schedule.id]))
+              .rows[0].authority;
+          const first = await evidence();
           assert.equal(
-            first.authority_context.earlier.at(-1),
-            'Look at the synthetic budget folder.',
+            first.messages.find((message: { id: string }) => message.id === asked.sourceMessageId)
+              ?.text,
+            'Check it every morning.',
           );
-          assert.ok(first.authority_context.earlier.length <= 5);
-          assert.ok(!first.authority_context.earlier.includes('Withdrawn synthetic request.'));
-          assert.ok(!first.authority_context.earlier.includes('Check it every morning.'));
+          assert.equal(
+            first.messages.find((message: { id: string }) => message.id === context.sourceMessageId)
+              ?.canAuthorize,
+            false,
+          );
+          assert.ok(
+            !first.messages.some(
+              (message: { id: string }) => message.id === withdrawn.sourceMessageId,
+            ),
+          );
           const change = await receive('Make it cheaper.');
           for (const prompt of ['Check the folder cheaply.', 'Check the folder more cheaply.'])
-            await personal.manage('schedule_update', { id: schedule.id, prompt }, change);
-          const changed = await authority();
-          assert.deepEqual(changed, {
-            ...first,
-            authority_context: { ...first.authority_context, changes: ['Make it cheaper.'] },
-          });
+            await manageRouted('schedule_update', { id: schedule.id, prompt }, change);
+          const changed = await evidence();
+          assert.equal(
+            changed.messages.filter(
+              (message: { id: string }) => message.id === change.sourceMessageId,
+            ).length,
+            1,
+          );
+          assert.ok(
+            changed.messages.some(
+              (message: { id: string }) => message.id === asked.sourceMessageId,
+            ),
+          );
           const manual = await runNow(await saved(schedule.id));
           assert.equal(manual.statusCode, 200, manual.body);
-          assert.deepEqual(
-            (
-              await db.pool.query(
-                'SELECT authority_instruction,authority_context FROM schedule_runs WHERE turn_id=$1',
-                [manual.json().turnId],
-              )
-            ).rows[0],
-            {
-              authority_instruction: changed.authority_instruction,
-              authority_context: changed.authority_context,
-            },
+          assert.deepEqual((await turnOrigin(manual.json().turnId))?.scheduleInstruction, changed);
+          for (let index = 0; index < 11; index++) {
+            const update = await receive(`Use synthetic format ${index}.`);
+            await manageRouted(
+              'schedule_update',
+              { id: schedule.id, prompt: `Read the folder with format ${index}.` },
+              update,
+            );
+          }
+          assert.ok(
+            (await evidence()).messages.some(
+              (message: { id: string }) => message.id === asked.sourceMessageId,
+            ),
           );
-          const origin = await turnOrigin(manual.json().turnId);
-          assert.equal(origin?.scheduleInstruction, 'Check it every morning.\n\nMake it cheaper.');
-          assert.deepEqual(origin?.scheduleContext, first.authority_context.earlier);
+          assert.deepEqual((await turnOrigin(manual.json().turnId))?.scheduleInstruction, changed);
+          await db.pool.query("UPDATE turns SET status='succeeded',finished_at=now() WHERE id=$1", [
+            manual.json().turnId,
+          ]);
+          const beforeRestart = await evidence();
+          await personal.initialize({ workers: false });
+          assert.deepEqual(await evidence(), beforeRestart);
+          const timing = await receive('Move it to the next day.');
+          await manageRouted(
+            'schedule_update',
+            { id: schedule.id, runAt: new Date(clock.getTime() + 86_400_000).toISOString() },
+            timing,
+          );
+          assert.ok(
+            (await evidence()).messages.some(
+              (message: { id: string }) => message.id === timing.sourceMessageId,
+            ),
+          );
+          await db.pool.query('UPDATE turns SET withdrawn=true WHERE id=$1', [timing.turnId]);
+          await assert.rejects(
+            validateOwnerInstructions(db.pool, ownerId, await evidence()),
+            /withdrawn or unavailable/,
+          );
           const edited = await request('PATCH', `/api/schedules/${schedule.id}`, {
             prompt: 'Owner-written synthetic prompt.',
           });
           assert.equal(edited.statusCode, 200, edited.body);
-          assert.deepEqual(await authority(), {
-            authority_instruction: 'Owner-written synthetic prompt.',
-            authority_source_message_id: null,
-            authority_context: null,
+          const reset = await evidence();
+          assert.equal(reset.messages.length, 1);
+          assert.equal(reset.messages[0].id, null);
+          assert.equal(reset.messages[0].text, 'Owner-written synthetic prompt.');
+        },
+      );
+      await t.test(
+        'a schedule created in a task retains the allowed earlier chat and exact proposal',
+        async () => {
+          const background = await receive('The synthetic task board is in Documents/board.');
+          const asked = await receive('Check it every morning.');
+          const current = (
+            await db.pool.query('SELECT thread_id FROM turns WHERE id=$1', [asked.turnId])
+          ).rows[0];
+          await db.pool.query("UPDATE turns SET status='running',started_at=now() WHERE id=$1", [
+            asked.turnId,
+          ]);
+          const task = await tasks.execute(
+            { threadId: current.thread_id, turnId: asked.turnId },
+            {
+              action: 'start',
+              title: 'Synthetic board schedule',
+              message: 'Set the synthetic schedule.',
+              doneWhen: 'The schedule exists.',
+              now: 'Set the schedule.',
+            },
+            asked.sourceMessageId,
+          );
+          assert.ok(task && 'id' in task);
+          const started = new Date(Date.now() - 3 * 86_400_000);
+          await db.pool.query('UPDATE tasks SET created_at=$2 WHERE id=$1', [task.id, started]);
+          for (const [source, age] of [
+            [background, 60_000],
+            [asked, 1_000],
+          ] as const)
+            await db.pool.query('UPDATE messages SET created_at=$2 WHERE id=$1', [
+              source.sourceMessageId,
+              new Date(started.getTime() - age),
+            ]);
+          const unrelated = await receive('Send the separate synthetic invoice to Lena.');
+          const child = (await db.pool.query('SELECT id FROM turns WHERE task_id=$1', [task.id]))
+            .rows[0];
+          const schedule = await createRouted(
+            { turnId: child.id, sourceMessageId: asked.sourceMessageId },
+            { title: 'Synthetic task schedule', prompt: 'Read Documents/board.' },
+          );
+          const authority = (
+            await db.pool.query('SELECT authority FROM schedules WHERE id=$1', [schedule.id])
+          ).rows[0].authority;
+          assert.equal(
+            authority.messages.find(
+              (message: { id: string }) => message.id === background.sourceMessageId,
+            )?.canAuthorize,
+            false,
+          );
+          assert.equal(
+            authority.messages.find(
+              (message: { id: string }) => message.id === asked.sourceMessageId,
+            )?.canAuthorize,
+            true,
+          );
+          assert.ok(
+            !authority.messages.some(
+              (message: { id: string }) => message.id === unrelated.sourceMessageId,
+            ),
+          );
+          const proposalId = randomUUID();
+          const proposal = 'Read the synthetic board every Friday?';
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'assistant',$5)",
+            [proposalId, ownerId, current.thread_id, asked.turnId, proposal],
+          );
+          const reply = await receive('Do that every Friday.');
+          await db.pool.query('UPDATE messages SET reply_to_message_id=$2 WHERE id=$1', [
+            reply.sourceMessageId,
+            proposalId,
+          ]);
+          const accepted = await createRouted(reply, {
+            title: 'Synthetic proposal schedule',
+            prompt: 'Read the synthetic board on Friday.',
           });
+          const record = (
+            await db.pool.query('SELECT authority FROM schedules WHERE id=$1', [accepted.id])
+          ).rows[0].authority;
+          assert.deepEqual(
+            record.messages.find((message: { id: string }) => message.id === reply.sourceMessageId)
+              ?.replyTo,
+            { id: proposalId, text: proposal },
+          );
+        },
+      );
+      await t.test(
+        'legacy schedule instructions migrate once without inventing earlier context',
+        async () => {
+          const source = await receive('Read the synthetic legacy board every Friday.');
+          const schedule = await create({
+            title: 'Synthetic legacy evidence',
+            prompt: 'Read the synthetic legacy board.',
+            kind: 'once',
+            runAt: new Date(clock.getTime() + 60_000).toISOString(),
+          });
+          const manual = await runNow(schedule);
+          assert.equal(manual.statusCode, 200, manual.body);
+          await db.pool.query(
+            'ALTER TABLE schedules ADD COLUMN authority_instruction text, ADD COLUMN authority_source_message_id uuid, ADD COLUMN authority_context jsonb; ALTER TABLE schedule_runs ADD COLUMN authority_instruction text, ADD COLUMN authority_source_message_id uuid, ADD COLUMN authority_context jsonb;',
+          );
+          for (const table of ['schedules', 'schedule_runs'])
+            await db.pool.query(
+              `UPDATE ${table} SET authority=NULL,authority_instruction=$2,authority_source_message_id=$3 WHERE ${table === 'schedules' ? 'id' : 'schedule_id'}=$1`,
+              [
+                schedule.id,
+                'Read the synthetic legacy board every Friday.',
+                source.sourceMessageId,
+              ],
+            );
+          const sourceTime = new Date(Date.now() - 3 * 86_400_000).toISOString();
+          await db.pool.query('UPDATE messages SET created_at=$2 WHERE id=$1', [
+            source.sourceMessageId,
+            sourceTime,
+          ]);
+          const incomplete = await create({
+            title: 'Synthetic legacy correction',
+            kind: 'once',
+            runAt: new Date(clock.getTime() + 60_000).toISOString(),
+          });
+          await db.pool.query(
+            'UPDATE schedules SET authority=NULL,authority_instruction=$2,authority_source_message_id=$3,authority_context=$4 WHERE id=$1',
+            [
+              incomplete.id,
+              'Send the synthetic report every Friday.',
+              source.sourceMessageId,
+              JSON.stringify({ changes: ['Only summarize in Nod. Never send email.'] }),
+            ],
+          );
+          await personal.initialize({ workers: false });
+          const migrated = (
+            await db.pool.query('SELECT authority FROM schedules WHERE id=$1', [schedule.id])
+          ).rows[0].authority;
+          assert.equal(migrated.messages.length, 1);
+          assert.equal(migrated.messages[0].id, source.sourceMessageId);
+          assert.equal(new Date(migrated.messages[0].at).toISOString(), sourceTime);
+          assert.equal(migrated.messages[0].text, 'Read the synthetic legacy board every Friday.');
+          const run = (await turnOrigin(manual.json().turnId))?.scheduleInstruction;
+          assert.equal(run?.messages[0]?.id, source.sourceMessageId);
+          assert.equal(run?.messages[0]?.text, migrated.messages[0].text);
+          assert.equal(new Date(run!.messages[0]!.at).toISOString(), sourceTime);
+          const incompleteEvidence = async () =>
+            (await db.pool.query('SELECT authority FROM schedules WHERE id=$1', [incomplete.id]))
+              .rows[0].authority;
+          await assert.rejects(
+            validateOwnerInstructions(db.pool, ownerId, await incompleteEvidence()),
+            /changes without source records/,
+          );
+          const metadata = await request('PATCH', `/api/schedules/${incomplete.id}`, {
+            title: 'Synthetic renamed legacy schedule',
+          });
+          assert.equal(metadata.statusCode, 200, metadata.body);
+          await assert.rejects(
+            validateOwnerInstructions(db.pool, ownerId, await incompleteEvidence()),
+            /changes without source records/,
+          );
+          const replacement = await request('PATCH', `/api/schedules/${incomplete.id}`, {
+            prompt: 'Read the synthetic report. Never send email.',
+          });
+          assert.equal(replacement.statusCode, 200, replacement.body);
+          assert.equal((await runNow(await saved(incomplete.id))).statusCode, 200);
+          await personal.initialize({ workers: false });
+          assert.deepEqual(
+            (await db.pool.query('SELECT authority FROM schedules WHERE id=$1', [schedule.id]))
+              .rows[0].authority,
+            migrated,
+          );
         },
       );
       await t.test('scheduled cache retention follows the actual recurring cadence', async () => {

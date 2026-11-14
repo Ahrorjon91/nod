@@ -101,6 +101,7 @@ export function createPreferencesStore(pool: Pool, ownerId: string, analytics?: 
       actor: SettingActor = 'owner',
       expectedRules?: string,
       shared?: PoolClient,
+      expectedNotificationRule?: string,
     ): Promise<Preferences> {
       const patch = validate(raw);
       const capture = snapshotAnalytics(analytics);
@@ -114,7 +115,7 @@ export function createPreferencesStore(pool: Pool, ownerId: string, analytics?: 
         hour_cycle=COALESCE($12,preferences.hour_cycle),speech_reply=COALESCE($18,preferences.speech_reply),
         speech_voice=CASE WHEN $19 THEN $17 ELSE preferences.speech_voice END,
         proactive_paused=COALESCE($20,preferences.proactive_paused)
-        WHERE $22::text IS NULL OR preferences.rules=$22
+        WHERE ($22::text IS NULL OR preferences.rules=$22) AND ($23::text IS NULL OR preferences.notification_rule=$23)
         RETURNING ${columns}`,
           [
             ownerId,
@@ -139,12 +140,16 @@ export function createPreferencesStore(pool: Pool, ownerId: string, analytics?: 
             patch.proactivePaused ?? null,
             defaultPreferences.proactivePaused,
             expectedRules ?? null,
+            expectedNotificationRule ?? null,
           ],
         );
         if (!result.rows[0])
-          throw Object.assign(new Error('Your rules changed. Review them before asking again.'), {
-            statusCode: 409,
-          });
+          throw Object.assign(
+            new Error('The saved owner instructions changed. Review them before asking again.'),
+            {
+              statusCode: 409,
+            },
+          );
         return result.rows[0] as Preferences;
       };
       if (!analytics) return save(shared ?? pool);

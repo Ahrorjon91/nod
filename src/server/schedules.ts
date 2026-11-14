@@ -1,5 +1,6 @@
 import { afterCommit, transaction as inTransaction } from './transaction.ts';
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { cancellationTransaction } from './db.ts';
 import type { FastifyInstance } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
@@ -13,11 +14,18 @@ import type {
 } from '../shared/contracts.ts';
 import type { enqueueTurn } from './thread.ts';
 import { activeThreadSql } from './history.ts';
-import { waitingTurnSql, withdrawnSql } from './turn-chain.ts';
+import { waitingTurnSql } from './turn-chain.ts';
 import type { WorkConsumers } from './work-admission.ts';
 import type { CaptureAnalytics } from './analytics.ts';
 import { logFailure } from './failure-log.ts';
 import { lockKey } from './locks.ts';
+import {
+  mergeOwnerInstructions,
+  ownerEdit,
+  validateInstructionChange,
+  type OwnerInstructions,
+  type InstructionChange,
+} from './owner-instructions.ts';
 
 const queue = 'scheduled-task';
 const lateAfterMs = 10 * 60_000;
@@ -70,7 +78,7 @@ const historySchema = z
   })
   .strict();
 const columns =
-  'id,title,prompt,kind,cron,run_at AS "runAt",time_zone AS "timeZone",enabled,revision,next_run_at AS "nextRun",job_id AS "jobId",delivery_channel AS "deliveryChannel",channel_source_id AS "channelSourceId",authority_instruction AS "authorityInstruction",authority_source_message_id AS "authoritySourceMessageId",authority_context AS "authorityContext",baseline_observation AS "baselineObservation",watch,watch_marker AS "watchMarker"';
+  'id,title,prompt,kind,cron,run_at AS "runAt",time_zone AS "timeZone",enabled,revision,next_run_at AS "nextRun",job_id AS "jobId",delivery_channel AS "deliveryChannel",channel_source_id AS "channelSourceId",authority,baseline_observation AS "baselineObservation",watch,watch_marker AS "watchMarker"';
 
 export interface ScheduleDependencies {
   analytics?: CaptureAnalytics;
@@ -106,9 +114,7 @@ interface ScheduleRow {
   jobId: string | null;
   deliveryChannel: string;
   channelSourceId: string | null;
-  authorityInstruction: string | null;
-  authoritySourceMessageId: string | null;
-  authorityContext: ScheduleAuthorityContext | null;
+  authority: OwnerInstructions | null;
   baselineObservation: ScheduleObservation | null;
   watch: string[] | null;
   watchMarker: string | null;
@@ -120,15 +126,11 @@ interface ScheduleJob {
   scheduledFor: string;
 }
 
-interface ScheduleAuthorityContext {
-  earlier?: string[];
-  changes?: string[];
-}
-
 interface ScheduleProvenance {
   turnId?: string;
   sourceMessageId: string | null;
   expectedRevision?: number;
+  instructionChange?: InstructionChange;
 }
 
 interface RunRow {
@@ -354,8 +356,8 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       },
     );
     await client.query(
-      `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction,authority_source_message_id,baseline_observation,authority_context)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority,baseline_observation)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [
         randomUUID(),
         ownerId,
@@ -366,10 +368,8 @@ export function createSchedules(dependencies: ScheduleDependencies) {
         turnId,
         scheduledFor,
         row.timeZone,
-        row.authorityInstruction,
-        row.authoritySourceMessageId,
+        row.authority ? JSON.stringify(row.authority) : null,
         row.baselineObservation ? JSON.stringify(row.baselineObservation) : null,
-        row.authorityContext ? JSON.stringify(row.authorityContext) : null,
       ],
     );
     return { turnId };
@@ -499,20 +499,34 @@ export function createSchedules(dependencies: ScheduleDependencies) {
         created_at timestamptz NOT NULL DEFAULT now(), kind text NOT NULL DEFAULT 'recurring',
         run_at timestamptz, revision integer NOT NULL DEFAULT 0, next_run_at timestamptz,
         job_id uuid, delivery_channel text NOT NULL DEFAULT 'web', channel_source_id text,
-        authority_instruction text, authority_source_message_id uuid, baseline_observation jsonb
+        authority jsonb, baseline_observation jsonb
       );
       CREATE TABLE IF NOT EXISTS schedule_runs (
         id uuid PRIMARY KEY, owner_id text NOT NULL, schedule_id uuid NOT NULL,
         schedule_revision integer NOT NULL, job_id uuid UNIQUE NOT NULL,
         title text NOT NULL, turn_id uuid REFERENCES turns(id), scheduled_for timestamptz NOT NULL,
         time_zone text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
-        authority_instruction text, authority_source_message_id uuid,
+        authority jsonb,
         baseline_observation jsonb, observation jsonb, observed_at timestamptz
       );
       ALTER TABLE schedule_runs DROP CONSTRAINT IF EXISTS schedule_runs_schedule_id_schedule_revision_scheduled_for_key;
       ALTER TABLE schedules ADD COLUMN IF NOT EXISTS baseline_observation jsonb;
-      ALTER TABLE schedules ADD COLUMN IF NOT EXISTS authority_context jsonb;
-      ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS authority_context jsonb;
+      ALTER TABLE schedules ADD COLUMN IF NOT EXISTS authority jsonb;
+      ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS authority jsonb;
+      UPDATE schedules s SET authority=jsonb_build_object('messages',jsonb_build_array(jsonb_build_object(
+        'id',to_jsonb(s)->'authority_source_message_id',
+        'at',COALESCE((SELECT m.created_at FROM messages m WHERE m.owner_id=s.owner_id AND m.id::text=to_jsonb(s)->>'authority_source_message_id'),s.created_at),
+        'text',to_jsonb(s)->>'authority_instruction')),
+        'requiresReplacement',COALESCE(jsonb_array_length(to_jsonb(s)->'authority_context'->'changes'),0)>0)
+        WHERE authority IS NULL AND to_jsonb(s)->>'authority_instruction' IS NOT NULL;
+      UPDATE schedule_runs s SET authority=jsonb_build_object('messages',jsonb_build_array(jsonb_build_object(
+        'id',to_jsonb(s)->'authority_source_message_id',
+        'at',COALESCE((SELECT m.created_at FROM messages m WHERE m.owner_id=s.owner_id AND m.id::text=to_jsonb(s)->>'authority_source_message_id'),s.created_at),
+        'text',to_jsonb(s)->>'authority_instruction')),
+        'requiresReplacement',COALESCE(jsonb_array_length(to_jsonb(s)->'authority_context'->'changes'),0)>0)
+        WHERE authority IS NULL AND to_jsonb(s)->>'authority_instruction' IS NOT NULL;
+      ALTER TABLE schedules DROP COLUMN IF EXISTS authority_instruction, DROP COLUMN IF EXISTS authority_source_message_id, DROP COLUMN IF EXISTS authority_context;
+      ALTER TABLE schedule_runs DROP COLUMN IF EXISTS authority_instruction, DROP COLUMN IF EXISTS authority_source_message_id, DROP COLUMN IF EXISTS authority_context;
       ALTER TABLE schedules ADD COLUMN IF NOT EXISTS watch jsonb, ADD COLUMN IF NOT EXISTS watch_marker text;
       ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS baseline_observation jsonb,
         ADD COLUMN IF NOT EXISTS observation jsonb, ADD COLUMN IF NOT EXISTS observed_at timestamptz;
@@ -873,70 +887,80 @@ export function createSchedules(dependencies: ScheduleDependencies) {
 
   async function authority(
     client: PoolClient,
-    prompt: string,
-    provenance?: { turnId?: string; sourceMessageId: string | null },
-  ): Promise<{
-    instruction: string | null;
-    sourceMessageId: string | null;
-    context: ScheduleAuthorityContext | null;
-  }> {
-    if (!provenance) return { instruction: prompt, sourceMessageId: null, context: null };
-    if (!provenance.sourceMessageId)
-      return { instruction: null, sourceMessageId: null, context: null };
-    const offered = (message: string) => `EXISTS(
-           SELECT 1 FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
-           WHERE offer.owner_id=${message}.owner_id AND offer.thread_id=${message}.thread_id AND offer.suggestions IS NOT NULL AND task->>'title'=${message}.text
-         )`;
-    const taskOf = (message: string) =>
-      `(SELECT max(to_jsonb(u)->>'task_id') FROM turns u WHERE u.owner_id=${message}.owner_id AND (u.id=${message}.turn_id OR u.message_id=${message}.id))`;
-    const row = (
-      await client.query<{ text: string; offered: boolean; earlier: string[] }>(
-        `SELECT m.text,${offered('m')} AS offered,
-           ARRAY(SELECT before.text FROM (
-             SELECT e.text,e.created_at,e.id FROM messages e
-             WHERE e.owner_id=m.owner_id AND e.thread_id=m.thread_id AND e.role='user' AND e.text<>''
-               AND length(e.text)<=4000 AND e.approval_answer IS NULL AND e.hidden_at IS NULL
-               AND (e.created_at,e.id)<(m.created_at,m.id) AND e.created_at>m.created_at - interval '24 hours'
-               AND NOT ${withdrawnSql('e')} AND NOT ${offered('e')}
-               AND NOT EXISTS (SELECT 1 FROM turns r WHERE r.owner_id=e.owner_id AND r.message_id=e.id
-                 AND r.source_id LIKE 'reaction-reply:%')
-               AND ${taskOf('e')} IS NOT DISTINCT FROM ${taskOf('m')}
-             ORDER BY e.created_at DESC,e.id DESC LIMIT 5) before
-             ORDER BY before.created_at,before.id) AS earlier
-         FROM messages m WHERE m.id=$1 AND m.owner_id=$2 AND m.role='user' AND ($3::uuid IS NULL OR m.turn_id=$3)
-         FOR SHARE OF m`,
-        [provenance.sourceMessageId, ownerId, provenance.turnId ?? null],
-      )
-    ).rows[0];
-    if (!row) throw invalid('The schedule instruction is unavailable.');
+    input: Record<string, unknown>,
+    provenance?: ScheduleProvenance,
+  ): Promise<OwnerInstructions | null> {
+    if (!provenance) return ownerEdit(input);
+    if (provenance.instructionChange) {
+      await validateInstructionChange(client, ownerId, provenance.instructionChange);
+      return provenance.instructionChange.evidence;
+    }
+    throw Object.assign(
+      new Error('The schedule change has no checked owner instruction. Ask for this change again.'),
+      { notRun: true },
+    );
+  }
+
+  function definition(row: {
+    title: string;
+    prompt: string;
+    kind: 'once' | 'recurring';
+    timeZone: string;
+    cron?: string | null;
+    runAt?: Date | string | null;
+    enabled?: boolean;
+    watch?: string[] | null;
+  }): Record<string, unknown> {
     return {
-      instruction: row.offered ? null : row.text,
-      sourceMessageId: provenance.sourceMessageId,
-      context: !row.offered && row.earlier.length ? { earlier: row.earlier } : null,
+      title: row.title,
+      prompt: row.prompt,
+      kind: row.kind,
+      cron: row.cron ?? null,
+      runAt: row.runAt instanceof Date ? row.runAt.toISOString() : (row.runAt ?? null),
+      timeZone: row.timeZone,
+      enabled: row.enabled ?? true,
+      watch: row.watch ?? null,
     };
   }
 
-  function amended(
-    previous: ScheduleRow,
-    fresh: Awaited<ReturnType<typeof authority>>,
-    provenance?: ScheduleProvenance,
-  ) {
-    const changes = previous.authorityContext?.changes ?? [];
-    if (!provenance || !fresh.instruction || !previous.authorityInstruction || changes.length >= 10)
-      return fresh;
-    const kept = {
-      instruction: previous.authorityInstruction,
-      sourceMessageId: previous.authoritySourceMessageId,
-    };
-    if (
-      fresh.sourceMessageId === previous.authoritySourceMessageId ||
-      fresh.instruction === (changes.at(-1) ?? previous.authorityInstruction)
-    )
-      return { ...kept, context: previous.authorityContext };
+  async function prepareChange(action: string, args: Record<string, unknown>) {
+    if (action === 'schedule_create') {
+      const input = validateCreate(args);
+      return { input, before: null, changes: input, after: definition(input) };
+    }
+    const { id, ...fields } = args;
+    const input =
+      action === 'schedule_pause' || action === 'schedule_cancel'
+        ? { enabled: false }
+        : updateSchema.parse(fields);
+    const previous = await read(z.uuid().parse(id));
     return {
-      ...kept,
-      context: { ...previous.authorityContext, changes: [...changes, fresh.instruction] },
+      input:
+        action === 'schedule_pause' || action === 'schedule_cancel'
+          ? { id: String(id) }
+          : { id: String(id), ...input },
+      evidence: previous.authority ?? { messages: [] },
+      before: definition(previous),
+      changes: input,
+      after: definition(updateValue(previous, input)),
+      revision: previous.revision,
     };
+  }
+
+  function assertChange(
+    provenance: ScheduleProvenance | undefined,
+    next: Parameters<typeof definition>[0],
+  ) {
+    if (
+      provenance?.instructionChange &&
+      !isDeepStrictEqual(provenance.instructionChange.after, definition(next))
+    )
+      throw Object.assign(
+        new Error(
+          'The proposed schedule differs from the schedule that was checked. The change did not run.',
+        ),
+        { notRun: true },
+      );
   }
 
   async function duplicate(
@@ -978,13 +1002,14 @@ export function createSchedules(dependencies: ScheduleDependencies) {
     const created = await transaction(async (client) => {
       const source = await sourceProvenance(client, provenance);
       const route = await deliveryRoute(client, source);
-      const authorized = await authority(client, input.prompt, source);
+      assertChange(provenance, input);
+      const authorized = await authority(client, input, provenance);
       const existing = provenance && (await duplicate(client, input, route));
       if (existing) return { row: existing, existing: true };
       const saved = (
         await client.query<ScheduleRow>(
-          `INSERT INTO schedules(id,owner_id,title,prompt,kind,cron,run_at,time_zone,delivery_channel,channel_source_id,authority_instruction,authority_source_message_id,baseline_observation,watch,authority_context)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING ${columns}`,
+          `INSERT INTO schedules(id,owner_id,title,prompt,kind,cron,run_at,time_zone,delivery_channel,channel_source_id,authority,baseline_observation,watch)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING ${columns}`,
           [
             randomUUID(),
             ownerId,
@@ -996,13 +1021,11 @@ export function createSchedules(dependencies: ScheduleDependencies) {
             input.timeZone,
             route.channel,
             route.sourceId,
-            authorized.instruction,
-            authorized.sourceMessageId,
+            authorized ? JSON.stringify(authorized) : null,
             input.baselineObservation
               ? JSON.stringify({ ...input.baselineObservation, checkedAt: now().toISOString() })
               : null,
             input.watch ? JSON.stringify(input.watch) : null,
-            authorized.context ? JSON.stringify(authorized.context) : null,
           ],
         )
       ).rows[0]!;
@@ -1045,26 +1068,26 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       ).rows[0];
       if (!previous) throw Object.assign(new Error('Schedule not found.'), { statusCode: 404 });
       assertRevision(previous, provenance?.expectedRevision ?? expectedRevision);
+      if (!previous.enabled && input.enabled === false && Object.keys(input).length === 1)
+        return previous;
       const next = updateValue(previous, input);
+      if (provenance) await sourceProvenance(client, provenance);
+      assertChange(provenance, next);
+      const fresh = await authority(client, input, provenance);
       const authorized =
-        input.prompt === undefined
-          ? {
-              instruction: previous.authorityInstruction,
-              sourceMessageId: previous.authoritySourceMessageId,
-              context: previous.authorityContext,
-            }
-          : amended(
-              previous,
-              await authority(client, input.prompt, await sourceProvenance(client, provenance)),
-              provenance,
-            );
+        (!provenance && input.prompt !== undefined) ||
+        provenance?.instructionChange?.replaceInstruction
+          ? fresh
+          : fresh
+            ? mergeOwnerInstructions(previous.authority, fresh)
+            : previous.authority;
       await cancelPending(client, previous);
       const saved = (
         await client.query<ScheduleRow>(
           `UPDATE schedules SET title=$3,prompt=$4,kind=$5,cron=$6,run_at=$7,time_zone=$8,
-             enabled=$9,authority_instruction=$10,authority_source_message_id=$11,
-             baseline_observation=COALESCE($12::jsonb,baseline_observation),
-             watch=CASE WHEN $13 THEN $14::jsonb ELSE watch END,authority_context=$15::jsonb,revision=revision+1 WHERE id=$1 AND owner_id=$2 RETURNING ${columns}`,
+             enabled=$9,authority=$10::jsonb,
+             baseline_observation=COALESCE($11::jsonb,baseline_observation),
+             watch=CASE WHEN $12 THEN $13::jsonb ELSE watch END,revision=revision+1 WHERE id=$1 AND owner_id=$2 RETURNING ${columns}`,
           [
             id,
             ownerId,
@@ -1075,14 +1098,12 @@ export function createSchedules(dependencies: ScheduleDependencies) {
             next.runAt ?? null,
             next.timeZone,
             next.enabled,
-            authorized.instruction,
-            authorized.sourceMessageId,
+            authorized ? JSON.stringify(authorized) : null,
             input.baselineObservation
               ? JSON.stringify({ ...input.baselineObservation, checkedAt: now().toISOString() })
               : null,
             'watch' in input,
             input.watch ? JSON.stringify(input.watch) : null,
-            authorized.context ? JSON.stringify(authorized.context) : null,
           ],
         )
       ).rows[0]!;
@@ -1187,6 +1208,7 @@ export function createSchedules(dependencies: ScheduleDependencies) {
     registerRoutes,
     validateCreate,
     validateUpdate,
+    prepareChange,
     recordObservation,
   };
 }

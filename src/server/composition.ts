@@ -1,3 +1,4 @@
+import { transaction } from './transaction.ts';
 import { mkdir } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
@@ -132,6 +133,7 @@ import { lockProactivity } from './locks.ts';
 import { createObservationSources } from './observation-sources.ts';
 import { createTaskObservations } from './task-observations.ts';
 import type { TrustBasis } from './trust-basis.ts';
+import { validateOwnerInstructions } from './owner-instructions.ts';
 import { localArtifacts } from './artifacts.ts';
 import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
 import { createChannels } from './channels.ts';
@@ -1332,13 +1334,33 @@ async function initializeApplication(
           : action === 'NOD_limits_update'
             ? withTurnLock(turnLock, (client) => ledger.setLimits(args, 'agent', client))
             : scheduleWrite
-              ? withTurnLock(turnLock, (client) =>
-                  personal.manage(action.slice('NOD_'.length), args, provenance, { client }),
+              ? transaction(
+                  async (client) => {
+                    if ((await lockThread(client)).id !== provenance.threadId)
+                      throw new Error('The instruction conversation is no longer active.');
+                    return withTurnLock(
+                      turnLock,
+                      (locked) =>
+                        personal.manage(action.slice('NOD_'.length), args, provenance, {
+                          client: locked,
+                        }),
+                      client,
+                    );
+                  },
+                  pool,
+                  provenance.signal,
                 )
               : lockedWrite
                 ? withTurnLock(turnLock, (client) =>
                     personal.manage(action.slice('NOD_'.length), args, provenance, {
                       client,
+                      ...(provenance.details?.currentNotificationRule === undefined
+                        ? {}
+                        : {
+                            expectedNotificationRule: String(
+                              provenance.details.currentNotificationRule,
+                            ),
+                          }),
                       ...(provenance.details?.currentRules === undefined
                         ? {}
                         : { expectedRules: String(provenance.details.currentRules) }),
@@ -1971,7 +1993,12 @@ async function initializeApplication(
       settleTask: tasks.settle,
       taskLedger: tasks.read,
       task: tasks.execute,
-      startTurn: tasks.inherit,
+      startTurn: async (turn) => {
+        const origin = await turnOrigin(turn.turnId);
+        if (origin?.scheduleInstruction)
+          await validateOwnerInstructions(pool, ownerId, origin.scheduleInstruction);
+        await tasks.inherit(turn);
+      },
       connections: async (...args) => {
         const result = await integrations.manageConnections(...args);
         if (!('url' in result) || !('name' in result) || typeof result.name !== 'string')
@@ -2137,21 +2164,14 @@ async function initializeApplication(
             throw new Error(
               'A scheduled run cannot create schedules. Do the work this schedule asks for in this run instead.',
             );
-          const input = await personal.validateReview(action, args);
-          const schedule =
-            action === 'schedule_pause' || action === 'schedule_update'
-              ? await personal.getSchedule(String(input.id))
-              : undefined;
-          if (action === 'schedule_pause' && schedule && !schedule.enabled) return schedule;
-          const current = schedule
-            ? {
-                title: schedule.title,
-                prompt: schedule.prompt,
-                cron: schedule.cron,
-                runAt: schedule.runAt,
-                timeZone: schedule.timeZone,
-              }
+          const prepared = action.startsWith('schedule_')
+            ? await personal.prepareScheduleChange(action, args)
             : undefined;
+          const input: Record<string, unknown> =
+            prepared?.input ?? (await personal.validateReview(action, args));
+          const current = prepared?.before ?? undefined;
+          if (action === 'schedule_pause' && current?.enabled === false)
+            return personal.getSchedule(String(input.id));
           const preferences =
             action === 'notification_preferences_update'
               ? await triage.getPreferences()
@@ -2169,29 +2189,36 @@ async function initializeApplication(
                 model: connection.models.find((item) => item.id === input.modelId)!.name,
               }
             : undefined;
-          const verdict = await trust.check(turn, `NOD_${action}`, {
-            ...input,
-            ...(targetModel ? { targetModel } : {}),
-            ...(current ? { currentSchedule: current } : {}),
-            ...(rule === undefined ? {} : { currentNotificationRule: rule }),
-            ...(rules === undefined ? {} : { currentRules: rules }),
-          });
+          const verdict = await trust.check(
+            turn,
+            `NOD_${action}`,
+            {
+              ...input,
+              ...(targetModel ? { targetModel } : {}),
+              ...(current ? { currentSchedule: current } : {}),
+              ...(rule === undefined ? {} : { currentNotificationRule: rule }),
+              ...(rules === undefined ? {} : { currentRules: rules }),
+            },
+            undefined,
+            prepared,
+          );
           return approvals.request(turn, `NOD_${action}`, input, {
             ...provenance,
             allowed: !verdict.confirm,
             ...(verdict.confirm ? {} : { basis: verdict.basis }),
             expectedChatRevision: verdict.chatRevision,
             admit,
-            expectedRevision: schedule?.revision,
-            validate: schedule
+            instructionChange: verdict.instructionChange,
+            expectedRevision: prepared?.revision,
+            validate: prepared?.before
               ? async (client) => {
                   const current = (
                     await client.query(
                       'SELECT revision FROM schedules WHERE id=$1 AND owner_id=$2 FOR SHARE',
-                      [schedule.id, ownerId],
+                      [input.id, ownerId],
                     )
                   ).rows[0];
-                  if (current?.revision !== schedule.revision)
+                  if (current?.revision !== prepared.revision)
                     throw Object.assign(
                       new Error('The schedule changed. Review it before asking again.'),
                       { statusCode: 409 },

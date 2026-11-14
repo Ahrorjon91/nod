@@ -233,7 +233,7 @@ export function createLocalFiles(
         (root.source === 'schedule' &&
           (
             await database.query(
-              'SELECT 1 FROM schedule_runs WHERE turn_id=$1 AND owner_id=$2 AND authority_instruction IS NOT NULL',
+              'SELECT 1 FROM schedule_runs WHERE turn_id=$1 AND owner_id=$2 AND authority IS NOT NULL',
               [root.id, ownerId],
             )
           ).rowCount));
