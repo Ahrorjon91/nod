@@ -12,7 +12,8 @@ overrides:
   fast-uri@4.2.1: 4.2.3
   ip-address@10.7.2: 10.7.4
   hono@4.13.9: 4.13.13
-  '@earendil-works/pi-coding-agent>undici': 8.12.3
+  '@earendil-works/pi-coding-agent>undici': 8.12.4
+  set-cookie-parser@<2.7.3: 2.7.3
   sharp: 0.35.5
 allowBuilds:
   agent-browser: true
