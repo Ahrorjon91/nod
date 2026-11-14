@@ -182,7 +182,7 @@ const levels = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 let endpointConnections: Dispatcher1Wrapper | undefined;
 const keyless = 'nod-no-key';
 const ollamaShowSchema = z.object({
-  capabilities: z.array(z.string()).catch([]),
+  capabilities: z.array(z.string()).optional().catch(undefined),
   model_info: z.record(z.string(), z.unknown()).catch({}),
   parameters: z.string().catch(''),
   thinking: z
@@ -200,7 +200,7 @@ function ollamaModel(show: z.infer<typeof ollamaShowSchema>) {
   const values = show.thinking?.values;
   const named = levels.filter((level) => values?.includes(level));
   const thinkingLevelMap =
-    !show.capabilities.includes('thinking') || !values
+    !show.capabilities?.includes('thinking') || !values
       ? undefined
       : named.length
         ? {
@@ -218,8 +218,8 @@ function ollamaModel(show: z.infer<typeof ollamaShowSchema>) {
             }
           : undefined;
   return {
-    usable: show.capabilities.includes('tools'),
-    images: show.capabilities.includes('vision'),
+    usable: show.capabilities?.includes('tools'),
+    images: show.capabilities?.includes('vision'),
     contextWindow: Number.isFinite(contextWindow) ? contextWindow : undefined,
     reasoning: !!thinkingLevelMap,
     thinkingLevelMap,
@@ -379,7 +379,7 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
           : studioModel
             ? lmStudioModel(studioModel)
             : undefined;
-        if (known && !known.usable) return [];
+        if (known?.usable === false) return [];
         const contextWindow =
           known?.contextWindow ??
           entry.context_length ??

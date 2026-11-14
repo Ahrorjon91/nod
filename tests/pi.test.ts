@@ -6279,6 +6279,8 @@ test('OpenAI-compatible servers get tool models, a system message and one attemp
       parameters: 'num_ctx 65536',
       thinking: { values: ['low', 'medium', 'high'] },
     },
+    'fixture-unknown': { model_info: { 'llama.context_length': 32768 } },
+    'fixture-empty': { capabilities: [], model_info: {} },
     'fixture-chat:1b': { capabilities: ['completion'], model_info: {} },
     'fixture-embed': { capabilities: ['embedding'], model_info: {} },
   };
@@ -6326,6 +6328,13 @@ test('OpenAI-compatible servers get tool models, a system message and one attemp
         efforts: ['low', 'medium', 'high'],
         images: true,
         contextWindow: 65536,
+      },
+      {
+        id: 'fixture-unknown',
+        name: 'fixture-unknown',
+        efforts: ['off'],
+        images: false,
+        contextWindow: 32768,
       },
     ],
   );

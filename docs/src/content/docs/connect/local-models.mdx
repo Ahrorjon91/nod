@@ -134,6 +134,8 @@ Use an OpenAI-compatible connection for other hosted services that offer this AP
 
 Nod lists every model such a service returns, including ones that can't chat. Pick a chat model that supports tools.
 
+If the server offers Ollama model details, Nod uses its capability list to filter models. An empty list, or a list without tool support, excludes the model. A missing list leaves tool support unknown, so Nod lists the model.
+
 ## What changes with these connections
 
 | Area                | With a local or OpenAI-compatible model                                                                                                                                                                                                                                                         |
