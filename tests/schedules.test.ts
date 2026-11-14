@@ -924,15 +924,18 @@ test(
               questionMessageId: status === 'waiting' ? firstQuestion : null,
             });
           }
-          const resumed = randomUUID();
-          await db.pool.query(
-            `INSERT INTO turns(id,owner_id,thread_id,source,prompt,session_id,parent_turn_id,background,status,started_at)
-             SELECT $1,owner_id,thread_id,'resume','Synthetic answer.',id,id,true,'queued',now() FROM turns WHERE id=$2`,
-            [resumed, first],
-          );
+          const resumed = await thread.enqueueTurn('Synthetic answer.', {
+            source: 'resume',
+            sessionId: first!,
+            parentTurnId: first!,
+            background: true,
+          });
           const resumedQuestion = await question(resumed, 'Enter the synthetic verification code.');
           for (const status of ['queued', 'running', 'waiting'] as const) {
-            await db.pool.query('UPDATE turns SET status=$2 WHERE id=$1', [resumed, status]);
+            await db.pool.query(
+              `UPDATE turns SET status=$2,started_at=CASE WHEN $2='queued' THEN NULL ELSE now() END WHERE id=$1`,
+              [resumed, status],
+            );
             assert.deepEqual(await active(), {
               turnId: resumed,
               status,
