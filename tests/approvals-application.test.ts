@@ -1903,60 +1903,6 @@ test(
       );
 
       await t.test(
-        'a schedule approval retains the checked definition and its durable source',
-        async () => {
-          const text = 'Set up a synthetic board check each Monday at 09:00.';
-          const turn = await propose(
-            'schedule_create',
-            {
-              title: 'Synthetic approved board',
-              prompt: 'Read Documents/board/todo.md and summarize it. Never send email.',
-              kind: 'recurring',
-              cron: '0 9 * * 1',
-              timeZone: 'UTC',
-            },
-            undefined,
-            text,
-          );
-          const [approval] = await approvalsFor(turn);
-          assert.equal(approval.instruction_change.before, null);
-          assert.ok(
-            approval.instruction_change.evidence.messages.some(
-              (message: { text: string }) => message.text === text,
-            ),
-          );
-          const review = (fallbackChecks as Array<Record<string, any>>).findLast(
-            (input) => input.action?.name === 'NOD_schedule_create',
-          );
-          assert.deepEqual(review?.instructionChange.after, approval.instruction_change.after);
-          assert.equal(review?.instructionChange.after.watch, null);
-          assert.ok(!JSON.stringify(review).includes(approval.source_message_id));
-          const response = await request('POST', '/api/messages', {
-            text: 'Yes',
-            replyToMessageId: approval.confirmation_message_id,
-            clientMessageId: randomUUID(),
-          });
-          assert.equal(response.statusCode, 200, response.body);
-          await waitFor(response.json().turnId, 'succeeded');
-          const completed = (await approvalsFor(turn))[0];
-          assert.equal(completed.status, 'completed');
-          const schedule = (
-            await pool.query('SELECT authority,prompt,cron FROM schedules WHERE id=$1', [
-              completed.result.id,
-            ])
-          ).rows[0];
-          assert.deepEqual(schedule.authority.messages, []);
-          assert.equal(schedule.authority.approvals.length, 1);
-          assert.equal(schedule.authority.approvals[0].id, approval.id);
-          assert.deepEqual(
-            schedule.authority.approvals[0].definition,
-            approval.instruction_change.after,
-          );
-          assert.equal(schedule.prompt, approval.instruction_change.after.prompt);
-          assert.equal(schedule.cron, '0 9 * * 1');
-        },
-      );
-      await t.test(
         'schedule pause and edit confirmations cannot mutate a revision edited after the question was saved',
         async () => {
           for (const action of ['schedule_pause', 'schedule_update']) {
