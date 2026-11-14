@@ -832,7 +832,7 @@ export function createLedger({
          EXISTS(SELECT 1 FROM turn_events e WHERE e.turn_id=u.id AND e.type='source_screened') AS screened,
          (SELECT json_agg(json_build_object('action',a.action,'target',a.target,'basis',a.basis,'said',m.id IS NOT NULL,
              'whole',regexp_replace(lower(m.text),'[^[:alnum:]]+','','g')=regexp_replace(lower(a.basis->>'quote'),'[^[:alnum:]]+','','g')) ORDER BY a.created_at)
-           FROM app_actions a LEFT JOIN messages m ON a.basis->>'kind'='message'
+           FROM app_actions a LEFT JOIN messages m ON a.basis->>'kind' IN ('message','schedule')
              AND m.owner_id=$1 AND m.id=(a.basis->>'messageId')::uuid
            WHERE a.turn_id=u.id AND a.owner_id=$1) AS actions
        FROM turns u
@@ -922,7 +922,7 @@ export function createLedger({
          SELECT a.turn_id,a.created_at,'action',NULL,a.action,a.target,a.basis,m.id IS NOT NULL,
            COALESCE(regexp_replace(lower(m.text),'[^[:alnum:]]+','','g')=regexp_replace(lower(a.basis->>'quote'),'[^[:alnum:]]+','','g'),false),
            NULL,NULL,a.parent_run_id IS NOT NULL,a.id::text,NULL
-         FROM app_actions a LEFT JOIN messages m ON a.basis->>'kind'='message'
+         FROM app_actions a LEFT JOIN messages m ON a.basis->>'kind' IN ('message','schedule')
            AND m.owner_id=$1 AND m.id=(a.basis->>'messageId')::uuid
          WHERE a.owner_id=$1 AND a.turn_id=ANY($2::uuid[])
          UNION ALL

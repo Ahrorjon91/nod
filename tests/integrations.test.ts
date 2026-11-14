@@ -9915,6 +9915,36 @@ test(
           .entries.map((entry: TrustEntry) => entry.id),
         [scheduled],
       );
+      const scheduleSignIn = randomUUID();
+      const scheduleBasis = {
+        kind: 'schedule',
+        messageId: said,
+        quote: 'Tell Sam we take the quote',
+      };
+      await pool.query(
+        "INSERT INTO vault_activity(id,owner_id,action,origin,item_kind,task,reason,basis) VALUES($1,'owner','sign_in','https://shop.example.test','login','Synthetic schedule','said_yes',$2)",
+        [scheduleSignIn, scheduleBasis],
+      );
+      const vaultPages = [
+        () => vaultAccess.within(null, null, null),
+        () => vaultAccess.ascending(null, null, null, 100),
+        () => vaultAccess.activity({}),
+      ];
+      for (const read of vaultPages)
+        assert.deepEqual(
+          (await read()).entries.find((entry) => entry.id === scheduleSignIn)?.because,
+          { kind: 'schedule', text: scheduleBasis.quote },
+        );
+      await pool.query('UPDATE vault_activity SET basis=$2 WHERE id=$1', [
+        scheduleSignIn,
+        { ...scheduleBasis, messageId: foreignSaid },
+      ]);
+      for (const read of vaultPages)
+        assert.equal(
+          (await read()).entries.find((entry) => entry.id === scheduleSignIn)?.because,
+          undefined,
+        );
+      await pool.query('DELETE FROM vault_activity WHERE id=$1', [scheduleSignIn]);
       await pool.query(
         `INSERT INTO vault_activity(id,owner_id,action,origin,item_kind,task,reason,amount_minor,currency) VALUES
           ($1,'owner','card','https://shop.example.test','card','=HYPERLINK("https://attacker.example.test")','said_yes',1200,'EUR'),

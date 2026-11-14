@@ -1046,6 +1046,7 @@ test(
       await t.test(
         'connection service waits stop automatic app reads and preserve owner reads',
         async () => {
+          const schedule = await reminder({ prompt: 'Synthetic automatic parent' });
           connectionWait = { until: Date.now() + 120_000, status: 429, code: 'installation_busy' };
           appResult = { id: 'synthetic-draft', message: { id: 'synthetic-message' } };
           const calls = [
@@ -1054,10 +1055,20 @@ test(
           ];
           try {
             for (const source of ['event', 'schedule'] as const) {
-              const parent = await enqueueTurn('Synthetic automatic parent', {
-                source,
-                background: true,
-              });
+              let parent: string;
+              if (source === 'schedule') {
+                const response = await request('POST', `/api/schedules/${schedule.id}/run`, {
+                  requestId: randomUUID(),
+                  expectedRevision: 0,
+                });
+                assert.equal(response.statusCode, 200, response.body);
+                parent = response.json().turnId;
+              } else {
+                parent = await enqueueTurn('Synthetic automatic parent', {
+                  source,
+                  background: true,
+                });
+              }
               await waitFor(parent, 'succeeded');
               for (const call of calls) {
                 const before = appSessions;
@@ -1099,6 +1110,7 @@ test(
           } finally {
             connectionWait = undefined;
             appResult = undefined;
+            await request('DELETE', `/api/schedules/${schedule.id}`);
           }
         },
       );
@@ -2025,12 +2037,20 @@ test(
             await waitFor(confirmed.json().turnId, 'succeeded');
             assert.equal((await approvalsFor(fresh))[0].status, 'completed');
             const applied = (
-              await pool.query('SELECT revision,title,enabled FROM schedules WHERE id=$1', [
-                schedule.id,
-              ])
+              await pool.query(
+                'SELECT revision,title,enabled,authority FROM schedules WHERE id=$1',
+                [schedule.id],
+              )
             ).rows[0];
             assert.equal(applied.revision, saved.revision + 1);
             assert.equal(applied.enabled, action !== 'schedule_pause');
+            assert.deepEqual(applied.authority.approvals ?? [], saved.authority.approvals ?? []);
+            assert.equal(applied.authority.messages.at(-1).approvalId, reviewed.id);
+            assert.deepEqual(
+              applied.authority.messages.at(-1).fields,
+              action === 'schedule_pause' ? { enabled: false } : { title: args.title },
+            );
+
             assert.equal(applied.title, args.title ?? saved.title);
             if (action === 'schedule_pause') {
               const listed = (await request('GET', '/api/schedules'))
@@ -2107,6 +2127,73 @@ test(
       });
 
       await t.test(
+        'unavailable schedule evidence fails before the model and posts the named failure',
+        async () => {
+          const title = 'Synthetic unavailable schedule';
+          const schedule = await reminder({ title });
+          const threadId = (await request('GET', '/api/state')).json().threadId;
+          const sourceTurn = randomUUID();
+          const sourceMessage = randomUUID();
+          const text = 'Read the synthetic board. Never send email.';
+          await pool.query(
+            "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,withdrawn) VALUES($1,$2,$3,$3,'user',$4,'succeeded',true)",
+            [sourceTurn, ownerId, threadId, text],
+          );
+          await pool.query(
+            "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'user',$5)",
+            [sourceMessage, ownerId, threadId, sourceTurn, text],
+          );
+          for (const [authority, reason] of [
+            [null, /no saved owner instruction/],
+            [{ messages: [] }, /no saved owner instruction/],
+            [
+              {
+                messages: [
+                  {
+                    id: null,
+                    at: new Date().toISOString(),
+                    text: 'Background only.',
+                    canAuthorize: false,
+                  },
+                ],
+              },
+              /no saved owner instruction/,
+            ],
+            [{ messages: [], requiresReplacement: true }, /changes without source records/],
+            [
+              { messages: [{ id: sourceMessage, at: new Date().toISOString(), text }] },
+              /withdrawn or unavailable/,
+            ],
+          ] as const) {
+            await pool.query('UPDATE schedules SET authority=$2 WHERE id=$1', [
+              schedule.id,
+              authority === null ? null : JSON.stringify(authority),
+            ]);
+            const response = await request('POST', `/api/schedules/${schedule.id}/run`, {
+              requestId: randomUUID(),
+              expectedRevision: 0,
+            });
+            assert.equal(response.statusCode, 200, response.body);
+            const turnId = response.json().turnId;
+            await waitFor(turnId, 'failed');
+            assert.equal(prompts.has(turnId), false);
+            const failure = (await pool.query('SELECT error FROM turns WHERE id=$1', [turnId]))
+              .rows[0];
+            assert.match(failure.error, reason);
+            const notices = (
+              await pool.query("SELECT text FROM messages WHERE turn_id=$1 AND role='assistant'", [
+                turnId,
+              ])
+            ).rows;
+            assert.equal(notices.length, 1);
+            assert.ok(notices[0].text.includes(title));
+            assert.match(notices[0].text, reason);
+          }
+          await request('DELETE', `/api/schedules/${schedule.id}`);
+        },
+      );
+
+      await t.test(
         'direct schedule pause or deletion retires an outstanding chat confirmation',
         async () => {
           for (const method of ['PATCH', 'DELETE'] as const) {
@@ -2126,8 +2213,8 @@ test(
                 client,
               });
               await client.query(
-                `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
-                 VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+                `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+                 VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',jsonb_build_object('messages',jsonb_build_array(jsonb_build_object('id',null,'at',now(),'text',$8::text))))`,
                 [
                   randomUUID(),
                   ownerId,
@@ -2467,8 +2554,8 @@ test(
               client,
             });
             await client.query(
-              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
-             VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+             VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',jsonb_build_object('messages',jsonb_build_array(jsonb_build_object('id',null,'at',now(),'text',$8::text))))`,
               [
                 randomUUID(),
                 ownerId,
@@ -3370,8 +3457,8 @@ test(
               client,
             });
             await client.query(
-              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
-               VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+               VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',jsonb_build_object('messages',jsonb_build_array(jsonb_build_object('id',null,'at',now(),'text',$8::text))))`,
               [
                 randomUUID(),
                 ownerId,
