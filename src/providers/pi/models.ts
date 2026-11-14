@@ -183,7 +183,7 @@ let endpointConnections: Dispatcher1Wrapper | undefined;
 const keyless = 'nod-no-key';
 const ollamaShowSchema = z.object({
   capabilities: z.array(z.string()).optional().catch(undefined),
-  model_info: z.record(z.string(), z.unknown()),
+  model_info: z.record(z.string(), z.unknown()).catch({}),
   parameters: z.string().catch(''),
   thinking: z
     .object({ values: z.array(z.union([z.string(), z.boolean()])) })
@@ -200,7 +200,7 @@ function ollamaModel(show: z.infer<typeof ollamaShowSchema>) {
   const values = show.thinking?.values;
   const named = levels.filter((level) => values?.includes(level));
   const thinkingLevelMap =
-    !show.capabilities?.includes('thinking') || !values
+    show.capabilities?.includes('thinking') === false || !values
       ? undefined
       : named.length
         ? {
@@ -354,43 +354,32 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       })
         .then((response) => (response.ok ? response.json() : undefined))
         .catch(() => undefined);
-    const ollamaProbe = z
-      .object({ version: z.string() })
-      .safeParse(await serverJson('/api/version')).success;
-    const show = async (id: string) =>
-      ollamaShowSchema.safeParse(
-        await serverJson('/api/show', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: id }),
-        }),
-      );
-    const probed = new Map<string, Awaited<ReturnType<typeof show>>>();
-    let ollamaServer = false;
-    if (ollamaProbe) {
-      for (let index = 0; index < listed.length && !ollamaServer; index += 3) {
-        const batch = await Promise.all(
-          listed
-            .slice(index, index + 3)
-            .map(async (entry) => [entry.id, await show(entry.id)] as const),
-        );
-        for (const [id, shown] of batch) probed.set(id, shown);
-        ollamaServer = batch.some(([, shown]) => shown.success);
-      }
-    }
-    const studio = ollamaServer
-      ? undefined
-      : z.object({ models: z.array(z.unknown()) }).safeParse(await serverJson('/api/v1/models'))
-          .data?.models;
-    const studioModels = studio ? entries(studio, lmStudioModelSchema) : [];
+    const [version, studio] = await Promise.all([
+      serverJson('/api/version'),
+      serverJson('/api/v1/models'),
+    ]);
+    const ollama = z.object({ version: z.string() }).safeParse(version).success;
+    const studioModels = entries(
+      z.object({ models: z.array(z.unknown()) }).safeParse(studio).data?.models ?? [],
+      lmStudioModelSchema,
+    );
     const models = await Promise.all(
       listed.map(async (entry) => {
-        const shown = ollamaServer ? (probed.get(entry.id) ?? (await show(entry.id))) : undefined;
         const studioModel = studioModels.find((model) => model.key === entry.id);
-        const known = shown?.success
-          ? ollamaModel(shown.data)
-          : studioModel
-            ? lmStudioModel(studioModel)
+        const shown =
+          ollama && !studioModel
+            ? ollamaShowSchema.safeParse(
+                await serverJson('/api/show', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ model: entry.id }),
+                }),
+              )
+            : undefined;
+        const known = studioModel
+          ? lmStudioModel(studioModel)
+          : shown?.success
+            ? ollamaModel(shown.data)
             : undefined;
         if (known?.usable === false) return [];
         const contextWindow =

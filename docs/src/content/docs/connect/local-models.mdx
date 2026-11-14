@@ -61,7 +61,7 @@ Nod reads each Ollama model's details. When the server reports model capabilitie
 
 </Steps>
 
-With LM Studio 0.4 or later, Nod reads each model's details. It skips embedding models and models not trained for tool use, sends images to vision models and uses the context length the model is loaded with, so the model list shows when that's too small.
+With LM Studio 0.4 or later, Nod reads each model's details. It skips embedding models and models not trained for tool use, sends images to vision models and uses the context length the model is loaded with, so the model list shows when that's too small. These details also apply when the server offers an Ollama-compatible API.
 
 </TabItem>
 <TabItem label="vLLM">
@@ -134,7 +134,7 @@ Use an OpenAI-compatible connection for other hosted services that offer this AP
 
 Without model details, Nod lists every model the service returns, including ones that cannot chat. Pick a chat model that supports tools.
 
-If the server offers Ollama model details, Nod uses its capability list to filter models. An empty list, or a list without tool support, excludes the model. A missing list leaves tool support unknown, so Nod lists the model.
+If the server offers Ollama model details, Nod uses its capability list to filter models, even when other details are missing. An empty list, or a list without tool support, excludes the model. A missing or invalid list leaves tool support unknown, so Nod lists the model.
 
 ## What changes with these connections
 

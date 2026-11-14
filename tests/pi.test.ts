@@ -3881,6 +3881,10 @@ test('a long tool call does not send model requests without usage records', asyn
               capabilities: ['completion', 'tools'],
               model_info: { 'llama.context_length': 200000 },
             });
+          if (request.url !== '/v1/chat/completions') {
+            response.writeHead(404);
+            return response.end();
+          }
           requests++;
           const body = JSON.parse(Buffer.concat(parts).toString());
           if (body.max_tokens === 1 || body.max_completion_tokens === 1) {
@@ -4113,6 +4117,10 @@ test('owner context stays out of the system prompt and compaction summaries and 
           capabilities: ['completion', 'tools'],
           model_info: { 'llama.context_length': 20_000 },
         });
+      if (request.url !== '/v1/chat/completions') {
+        response.writeHead(404);
+        return response.end();
+      }
       bodies.push(JSON.parse(Buffer.concat(parts).toString()));
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.end(
@@ -6279,10 +6287,19 @@ test('OpenAI-compatible servers get tool models, a system message and one attemp
       parameters: 'num_ctx 65536',
       thinking: { values: ['low', 'medium', 'high'] },
     },
-    'fixture-unknown': { model_info: { 'llama.context_length': 32768 } },
-    'fixture-empty': { capabilities: [], model_info: {} },
-    'fixture-chat:1b': { capabilities: ['completion'], model_info: {} },
-    'fixture-embed': { capabilities: ['embedding'], model_info: {} },
+    'fixture-unknown': {
+      model_info: { 'llama.context_length': 32768 },
+      thinking: { values: [false, true] },
+    },
+    'fixture-no-details': {},
+    'fixture-invalid': { capabilities: null, model_info: { 'llama.context_length': 16384 } },
+    'fixture-tools-only': {
+      capabilities: ['tools', 'vision'],
+      thinking: { values: [false, true] },
+    },
+    'fixture-empty': { capabilities: [] },
+    'fixture-chat:1b': { capabilities: ['completion'] },
+    'fixture-embed': { capabilities: ['embedding'] },
   };
   const bodies: Record<string, unknown>[] = [];
   const headers: (string | undefined)[] = [];
@@ -6332,9 +6349,30 @@ test('OpenAI-compatible servers get tool models, a system message and one attemp
       {
         id: 'fixture-unknown',
         name: 'fixture-unknown',
-        efforts: ['off'],
+        efforts: ['off', 'high'],
         images: false,
         contextWindow: 32768,
+      },
+      {
+        id: 'fixture-no-details',
+        name: 'fixture-no-details',
+        efforts: ['off'],
+        images: false,
+        contextWindow: 128_000,
+      },
+      {
+        id: 'fixture-invalid',
+        name: 'fixture-invalid',
+        efforts: ['off'],
+        images: false,
+        contextWindow: 16384,
+      },
+      {
+        id: 'fixture-tools-only',
+        name: 'fixture-tools-only',
+        efforts: ['off'],
+        images: true,
+        contextWindow: 128_000,
       },
     ],
   );
@@ -6458,7 +6496,7 @@ test('OpenAI-compatible servers get tool models, a system message and one attemp
   );
 });
 
-test('OpenAI-compatible discovery checks past the first three Ollama models and falls back for LocalAI', async (t) => {
+test('OpenAI-compatible discovery checks each model and respects capabilities without model details', async (t) => {
   const { createServer } = await import('node:http');
   const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
   const ids = [
@@ -6468,7 +6506,7 @@ test('OpenAI-compatible discovery checks past the first three Ollama models and 
     'fixture/tool-model',
   ];
   const showRequests: string[] = [];
-  let mode: 'ollama' | 'localai' | 'ollama-no-tools' = 'ollama';
+  let mode: 'ollama' | 'localai' | 'ollama-no-tools' | 'generic' = 'ollama';
   const ollamaWithoutTools = ['fixture/chat-model', 'fixture/embedding-model'];
   const server = createServer((request, response) => {
     let text = '';
@@ -6482,7 +6520,7 @@ test('OpenAI-compatible discovery checks past the first three Ollama models and 
         return send({
           data: (mode === 'ollama-no-tools' ? ollamaWithoutTools : ids).map((id) => ({ id })),
         });
-      if (request.url === '/api/version') return send({ version: 'fixture' });
+      if (request.url === '/api/version' && mode !== 'generic') return send({ version: 'fixture' });
       if (request.url === '/api/show') {
         const id = (JSON.parse(text) as { model: string }).model;
         showRequests.push(id);
@@ -6497,14 +6535,6 @@ test('OpenAI-compatible discovery checks past the first three Ollama models and 
           ...(mode === 'localai' ? {} : { model_info: {} }),
         });
       }
-      if (request.url === '/api/v1/models' && mode === 'ollama')
-        return send({
-          models: ids.map((key) => ({
-            key,
-            type: 'llm',
-            capabilities: { trained_for_tool_use: key === ids[3] },
-          })),
-        });
       response.writeHead(404);
       response.end();
     });
@@ -6522,22 +6552,37 @@ test('OpenAI-compatible discovery checks past the first three Ollama models and 
   mode = 'localai';
   showRequests.length = 0;
   const compatible = await createPiModelBackend().catalog('compatible', 'api_key', credential);
-  assert.deepEqual(
-    compatible.map(({ choice }) => choice.id),
-    ids,
-  );
+  assert.deepEqual(compatible, []);
   assert.deepEqual(showRequests, ids);
   mode = 'ollama-no-tools';
   showRequests.length = 0;
   const unusable = await createPiModelBackend().catalog('compatible', 'api_key', credential);
   assert.deepEqual(unusable, []);
   assert.deepEqual(showRequests, ollamaWithoutTools);
+  mode = 'generic';
+  showRequests.length = 0;
+  const generic = await createPiModelBackend().catalog('compatible', 'api_key', credential);
+  assert.deepEqual(
+    generic.map(({ choice }) => choice.id),
+    ids,
+  );
+  assert.deepEqual(showRequests, []);
 });
 
 test('LM Studio servers list tool-trained chat models with their loaded context and vision', async (t) => {
   const { createServer } = await import('node:http');
   const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
+  let ollamaVersion = false;
   const server = createServer((request, response) => {
+    if (ollamaVersion && (request.url === '/api/version' || request.url === '/api/show')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify(
+          request.url === '/api/version' ? { version: 'fixture' } : { model_info: {} },
+        ),
+      );
+      return;
+    }
     const body =
       request.url === '/v1/models'
         ? {
@@ -6591,6 +6636,12 @@ test('LM Studio servers list tool-trained chat models with their loaded context 
       ['fixture/unlisted', false, 128_000, `http://127.0.0.1:${port}/v1`],
     ],
   );
+  ollamaVersion = true;
+  const aliased = await createPiModelBackend().catalog('compatible', 'api_key', {
+    type: 'endpoint',
+    url: `http://127.0.0.1:${port}`,
+  });
+  assert.deepEqual(aliased, definitions);
 });
 
 test('native provider discovery uses owned keys, bounded Google pagination and tool-capable account models', async () => {
@@ -9232,6 +9283,7 @@ test('Ollama models with on or off thinking complete tasks without a named effor
       const path = new URL(request.url).pathname;
       if (path === '/v1/models') return Response.json({ data: [{ id: 'qwen3:8b' }] });
       if (path === '/api/version') return Response.json({ version: 'fixture' });
+      if (path === '/api/v1/models') return new Response(null, { status: 404 });
       if (path === '/api/show')
         return Response.json({
           capabilities: ['completion', 'tools', 'thinking'],
