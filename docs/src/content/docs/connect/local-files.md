@@ -14,6 +14,7 @@ Open chat in the desktop app and tell Nod what to do. You do not need to add a f
 - "List the files in my Downloads folder."
 - "Read invoice.pdf in Downloads and summarize it."
 - "Save this report as report.md in Documents."
+- "Show me the screenshot on my Desktop." Nod copies it into its workspace and attaches it to the reply, so you can open its preview.
 
 If Nod asks for confirmation, review the file path and proposed action before you approve it.
 
