@@ -45,7 +45,7 @@ Another program uses port `4310`. Set another `PORT` in `.env` and [apply the co
 
 ### This host is not permitted.
 
-Nod answers only at the address in `NOD_PUBLIC_URL`, which the Docker setup always sets (by default to `http://localhost:4310`). Any other address gets this error. That includes `127.0.0.1` and `localhost` after you set an HTTPS address.
+When `NOD_PUBLIC_URL` is set, Nod answers only at that address. The Docker setup always sets it (by default to `http://localhost:4310`). Any other address gets this error. That includes `127.0.0.1` and `localhost` after you set an HTTPS address.
 
 Open Nod at that exact address. To use another one, change `NOD_PUBLIC_URL` and [apply the configuration](/deploy/configuration/#apply-configuration-changes). Nod accepts one address at a time.
 
