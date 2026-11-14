@@ -844,14 +844,15 @@ const decisionCases: Case[] = [
       },
     ],
   }),
-  ...[false, true].map((replace) =>
-    action(
+  ...[false, true].map((replace) => {
+    const request = replace
+      ? 'Replace the complete schedule instruction and remove the email ban. Each Friday, email the report to Lena at lena@example.test.'
+      : 'Make this schedule cheaper.';
+    return action(
       replace
         ? 'instruction-complete-replacement-removes-prohibition'
         : 'instruction-cost-change-keeps-prohibition',
-      replace
-        ? 'Replace the complete schedule instruction and remove the email ban. Each Friday, email the report to Lena at lena@example.test.'
-        : 'Make this schedule cheaper.',
+      request,
       'NOD_schedule_update',
       {
         id: 'synthetic-schedule',
@@ -859,6 +860,7 @@ const decisionCases: Case[] = [
       },
       replace,
       {
+        userMessages: [{ at: '2026-11-14T10:00:00Z', text: request }],
         instructionChange: {
           before: { prompt: 'Each Friday, summarize the report in Nod. Never send email.' },
           changes: { prompt: 'Each Friday, email the report to Lena at lena@example.test.' },
@@ -871,8 +873,8 @@ const decisionCases: Case[] = [
           ],
         },
       },
-    ),
-  ),
+    );
+  }),
   action('standing-send', undefined, 'GMAIL_SEND_EMAIL', send, true, {
     standingInstruction:
       'Whenever Lena asks for the report, send it to her at lena@example.test without asking me.',
