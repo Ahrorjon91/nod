@@ -2945,6 +2945,74 @@ test(
           assert.equal((await personal.getSchedule(id)).title, 'Synthetic race');
         },
       );
+      await t.test('a queued task correction refuses a prepared schedule write', async (t) => {
+        const parent = await begin('Read the synthetic board each Friday. Never send email.');
+        t.after(() => finish(parent.turnId, 'cancelled'));
+        const task = (await tasks.execute(
+          parent,
+          {
+            action: 'start',
+            title: 'Synthetic schedule task',
+            message: 'Set up the synthetic board check.',
+            doneWhen: 'The schedule is saved.',
+            now: 'Prepare the schedule.',
+          },
+          (await row(parent.turnId)).message_id,
+        )) as { id: string };
+        t.after(async () => {
+          await db.pool.query(
+            "UPDATE turns SET task_id=NULL,status='cancelled',finished_at=now() WHERE task_id=$1",
+            [task.id],
+          );
+          await db.pool.query('DELETE FROM tasks WHERE id=$1', [task.id]);
+        });
+        await finish(parent.turnId, 'succeeded');
+        const worker = await running(
+          (
+            await db.pool.query("SELECT id FROM turns WHERE task_id=$1 AND source='task'", [
+              task.id,
+            ])
+          ).rows[0].id,
+        );
+        await tasks.inherit(worker);
+        const args = {
+          title: 'Synthetic queued correction',
+          prompt: 'Read the synthetic board. Never send email.',
+          kind: 'recurring',
+          cron: '0 9 * * 5',
+          timeZone: 'UTC',
+        };
+        aligned = true;
+        const verdict = await trust.check(
+          worker,
+          'NOD_schedule_create',
+          args,
+          undefined,
+          await personal.prepareScheduleChange('schedule_create', args),
+        );
+        assert.equal(verdict.confirm, false);
+        assert.equal(verdict.instructionChange?.task?.id, task.id);
+        const update = await begin('Do not create a schedule. Only summarize the board now.');
+        t.after(() => finish(update.turnId, 'cancelled'));
+        await tasks.execute(
+          update,
+          { action: 'reply', ids: [task.id] },
+          (await row(update.turnId)).message_id,
+        );
+        const before = calls.length;
+        await assert.rejects(
+          approvals.request(worker, 'NOD_schedule_create', args, {
+            allowed: true,
+            instructionChange: verdict.instructionChange,
+          }),
+          /owner changed this task/,
+        );
+        assert.equal(calls.length, before);
+        assert.deepEqual(
+          (await db.pool.query('SELECT id FROM approvals WHERE turn_id=$1', [worker.turnId])).rows,
+          [],
+        );
+      });
       await t.test(
         'owner rules reach the checker in chat, scheduled and background work, only owners with rules get the rules prompt, and only a real rule is named as the reason to ask',
         async () => {
