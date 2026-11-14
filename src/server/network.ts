@@ -37,6 +37,6 @@ export function serverNetwork(environment: Record<string, string | undefined>) {
     host,
     publicOrigin: url.origin,
     authToken,
-    accessOrigin: environment.NOD_PUBLIC_URL !== undefined || authToken ? url.origin : undefined,
+    accessOrigin: environment.NOD_PUBLIC_URL !== undefined ? url.origin : undefined,
   };
 }

@@ -631,6 +631,7 @@ test('server configuration refuses remote exposure without a valid token and an 
       NOD_PUBLIC_URL.replace(/:80$/, ''),
     );
   assert.equal(serverNetwork({}).accessOrigin, undefined);
+  assert.equal(serverNetwork({ NOD_AUTH_TOKEN: key }).accessOrigin, undefined);
   assert.equal(serverNetwork({ NOD_DESKTOP: 'true', NOD_AUTH_TOKEN: '' }).authToken, undefined);
 });
 
@@ -742,6 +743,20 @@ test('remote access authenticates cookies and bearer clients only on the configu
     assert.equal((await rotated.inject({ url: '/api/fixture', headers })).statusCode, 401);
 });
 
+test('a server token alone keeps every local address and still refuses a foreign Host', async (t) => {
+  const key = randomBytes(32).toString('base64url');
+  const network = serverNetwork({ NOD_AUTH_TOKEN: key });
+  const app = Fastify({ trustProxy: false });
+  t.after(() => app.close());
+  registerLocalAccess(app, network.port, { key, origin: network.accessOrigin, bearer: true });
+  app.get('/api/privacy', async () => ({ content: null }));
+  for (const host of ['localhost:4310', '127.0.0.1:4310', '[::1]:4310'])
+    assert.equal((await app.inject({ url: '/api/privacy', headers: { host } })).statusCode, 200);
+  assert.equal(
+    (await app.inject({ url: '/api/privacy', headers: { host: 'nod.example' } })).statusCode,
+    403,
+  );
+});
 test('localhost access requires the owner key and rejects foreign Host, Origin and cross-site requests', async () => {
   const root = await mkdtemp(join(tmpdir(), 'nod-access-'));
   const app = Fastify();
