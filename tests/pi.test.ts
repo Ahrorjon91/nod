@@ -6470,7 +6470,7 @@ test('OpenAI-compatible discovery checks past the first three Ollama models and 
         showRequests.push(id);
         return send({ capabilities: id === ids[3] && !localAI ? ['completion', 'tools'] : ['completion'] });
       }
-      if (request.url === '/api/v1/models')
+      if (request.url === '/api/v1/models' && !localAI)
         return send({
           models: ids.map((key) => ({
             key,
