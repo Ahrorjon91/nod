@@ -6,10 +6,16 @@ import { join, resolve } from 'node:path';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { InMemoryCredentialStore, type AssistantMessage } from '@earendil-works/pi-ai';
+import {
+  InMemoryCredentialStore,
+  isContextOverflow,
+  isRecoverableLength,
+  type AssistantMessage,
+} from '@earendil-works/pi-ai';
 import { Agent as Connections, Dispatcher1Wrapper, buildConnector } from 'undici';
 import { Compile } from 'typebox/compile';
 import {
+  compact,
   estimateTokens,
   createAgentSession,
   createCodemodeExtension,
@@ -376,6 +382,8 @@ function completeAssistantMessages(pi: ExtensionAPI) {
     if (complete !== message) return { message: complete };
   });
 }
+
+const tokenRateLimit = /\b(?:tokens? per (?:minute|day)|[tr]p[md])\b/i;
 
 const imageOutputExtensions: Record<string, string> = {
   'image/png': 'png',
@@ -791,6 +799,65 @@ export function createPiAgent(options: {
             : []),
           ownerContextCopies(input.ownerContext),
           (pi: ExtensionAPI) =>
+            pi.on('session_before_compact', async ({ preparation, customInstructions, signal }) => {
+              const target = session.model ?? model;
+              try {
+                return {
+                  compaction: await compact(
+                    preparation,
+                    target,
+                    undefined,
+                    undefined,
+                    customInstructions,
+                    signal,
+                    session.thinkingLevel,
+                    session.agent.streamFunction,
+                    undefined,
+                    settings.getRetrySettings(),
+                  ),
+                };
+              } catch (error) {
+                if (signal.aborted) return { cancel: true };
+                const message = error instanceof Error ? error.message : String(error);
+                if (
+                  tokenRateLimit.test(message) ||
+                  !isContextOverflow({
+                    stopReason: 'error',
+                    errorMessage: message,
+                    provider: target.provider,
+                  } as AssistantMessage)
+                ) {
+                  compaction!.error = `Compaction failed: ${message}`;
+                  return { cancel: true };
+                }
+                const request = preparation.turnPrefixMessages
+                  .flatMap((message) => {
+                    if (
+                      message.role !== 'user' &&
+                      (message.role !== 'custom' || message.customType !== 'nod-audio-input')
+                    )
+                      return [];
+                    return [
+                      typeof message.content === 'string'
+                        ? message.content
+                        : message.content
+                            .flatMap((part) => (part.type === 'text' ? [part.text] : []))
+                            .join('\n'),
+                    ];
+                  })
+                  .join('\n\n');
+                return {
+                  compaction: {
+                    summary:
+                      'Earlier context remains in the saved transcript. Use history_search for earlier owner instructions and action results. Do not infer missing facts or repeat completed or uncertain actions.' +
+                      (request ? `\n\nOwner input before the retained work:\n${request}` : ''),
+                    firstKeptEntryId: preparation.firstKeptEntryId,
+                    tokensBefore: preparation.tokensBefore,
+                  },
+                };
+              }
+            }),
+          (pi: ExtensionAPI) =>
             pi.on('cache_warming_decision', async () => {
               try {
                 await access?.prepareRequest?.(connection?.textModel?.id ?? model.id, true);
@@ -925,7 +992,7 @@ export function createPiAgent(options: {
         cwd: input.workspace.path,
         agentDir: directory,
         modelRuntime: runtime,
-        model: { ...model, contextWindow: budget.window },
+        model: { ...model, contextWindow: budget.window, maxTokens: budget.output },
         thinkingLevel: access?.effort ?? 'high',
         tools: [
           ...tools
@@ -985,7 +1052,7 @@ export function createPiAgent(options: {
       };
       let textBlock: number | undefined;
       let thinking = { index: -1, text: '', scanned: 0 };
-      let compaction: { id: string; started: number } | undefined;
+      let compaction: { id: string; started: number; error?: string } | undefined;
       const auxiliarySeen = new Set(manager.getEntries().map((entry) => entry.id));
       const observeUsage = createPiUsageTracker({
         sessionId: manager.getSessionId(),
@@ -998,29 +1065,32 @@ export function createPiAgent(options: {
           ),
       });
       const unsubscribe = session.subscribe((event) => {
-        if (event.type === 'compaction_end' && event.errorMessage)
-          input.onEvent({
-            type: 'error',
-            message: `${model.provider} / ${model.id}: ${event.errorMessage}`,
-          });
         if (event.type === 'compaction_start')
           compaction = { id: randomUUID(), started: performance.now() };
-        if (event.type === 'compaction_end' && compaction) {
+        if (event.type === 'compaction_end') {
+          settings.applyOverrides({ compaction: { keepRecentTokens: budget.recent } });
           const target = readsNativeAudio(model) ? (connection?.textModel ?? model) : model;
-          input.onEvent({
-            type: 'provider_usage',
-            usage: {
-              id: compaction.id,
-              provider: target.provider,
-              category: 'agent',
-              operation: 'compaction',
-              model: target.id,
-              turnId: input.turnId,
-              status: event.aborted ? 'cancelled' : event.errorMessage ? 'failed' : 'succeeded',
-              durationMs: performance.now() - compaction.started,
-              ...piUsageMetrics(event.result?.usage),
-            },
-          });
+          const error = compaction?.error ?? event.errorMessage;
+          if (error)
+            input.onEvent({
+              type: 'error',
+              message: `${target.provider} / ${target.id}: ${error}`,
+            });
+          if (compaction)
+            input.onEvent({
+              type: 'provider_usage',
+              usage: {
+                id: compaction.id,
+                provider: target.provider,
+                category: 'agent',
+                operation: 'compaction',
+                model: target.id,
+                turnId: input.turnId,
+                status: error ? 'failed' : event.aborted ? 'cancelled' : 'succeeded',
+                durationMs: performance.now() - compaction.started,
+                ...piUsageMetrics(event.result?.usage),
+              },
+            });
           compaction = undefined;
         }
         if (
@@ -1088,6 +1158,16 @@ export function createPiAgent(options: {
           }
         }
         if (event.type === 'message_end' && event.message.role === 'assistant') {
+          if (
+            event.message.stopReason === 'error' &&
+            tokenRateLimit.test(event.message.errorMessage ?? '')
+          )
+            settings.applyOverrides({ compaction: { enabled: false } });
+          else if (
+            isContextOverflow(event.message, budget.window) ||
+            isRecoverableLength(event.message, budget.output)
+          )
+            settings.applyOverrides({ compaction: { keepRecentTokens: 0 } });
           const usage = observeUsage(event.message);
           if (usage) input.onEvent(usage);
           if (event.message.stopReason === 'error')
@@ -1157,12 +1237,18 @@ export function createPiAgent(options: {
               { customType: ownerContextType, content: owner, display: false },
               prior.length ? undefined : { deliverAs: 'nextTurn' },
             );
-          if (audio && readsNativeAudio(model))
-            await session.sendCustomMessage(audioMessage(text, images, audio), {
-              triggerTurn: true,
+          try {
+            if (audio && readsNativeAudio(model))
+              await session.sendCustomMessage(audioMessage(text, images, audio), {
+                triggerTurn: true,
+              });
+            else await session.prompt(text, { images, expandPromptTemplates: false });
+          } finally {
+            settings.applyOverrides({
+              compaction: { enabled: true, keepRecentTokens: budget.recent },
             });
-          else await session.prompt(text, { images, expandPromptTemplates: false });
-          if (dropFailedInput(manager)) session.refreshContext();
+            if (dropFailedInput(manager)) session.refreshContext();
+          }
         },
         async abort() {
           await session.abort();

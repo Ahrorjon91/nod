@@ -4370,7 +4370,12 @@ test('Pi compacts at its threshold with the selected model settings', async (t) 
   assert.ok(answered > compactions[0]);
 });
 
-async function contextRecoveryServer(toolCalls = 0, callsPerStep = 1, overflowStep = 0) {
+async function contextRecoveryServer(
+  toolCalls = 0,
+  callsPerStep = 1,
+  overflowStep = 0,
+  summaryOverflow = false,
+) {
   const { createServer } = await import('node:http');
   const chunk = (value: object) => `data: ${JSON.stringify(value)}\n\n`;
   const bodies: Array<{ model: string; messages: unknown[]; tools?: unknown[] }> = [];
@@ -4387,7 +4392,7 @@ async function contextRecoveryServer(toolCalls = 0, callsPerStep = 1, overflowSt
       bodies.push(body);
       const summarizing = summary(body);
       const step = summarizing ? 0 : ++agentRequests;
-      if (step === overflowStep) {
+      if (step === overflowStep || (summarizing && summaryOverflow)) {
         response.writeHead(400, { 'content-type': 'application/json' });
         response.end(
           JSON.stringify({
@@ -4454,86 +4459,102 @@ async function contextRecoveryServer(toolCalls = 0, callsPerStep = 1, overflowSt
 }
 
 test('a provider-reported mid-turn context overflow compacts without repeating tools', async (t) => {
-  const { bodies, summary, url, close } = await contextRecoveryServer(7, 1, 8);
-  t.after(close);
-  const access = smallContextAccess('compatible', 'fixture-context', 131_072);
-  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
-  access.definition.spec = { ...access.definition.spec, baseUrl: url };
-  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-tool-overflow-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const sessionId = randomUUID();
-  const events: AgentEvent[] = [];
-  let toolCalls = 0;
-  const agent = createPiAgent({
-    provider: 'compatible',
-    sessionRoot: directory,
-    resolve: async () => access,
-  });
-  t.after(() => agent.dispose());
-  const session = await agent.open({
-    ...fakeExecution(sessionId),
-    restricted: true,
-    systemPrompt: 'Synthetic fixture instructions.',
-    workspace: recordingWorkspace().workspace,
-    runTool: async (_name, _params, run) => run(),
-    tools: [
-      {
-        name: 'inspect_fixture',
-        description: 'Inspect the synthetic fixture.',
-        parameters: Type.Object({}),
-        execute: async () => ({
-          content: [
-            {
-              type: 'text',
-              text: 'Synthetic tool result ' + ++toolCalls + ': ' + 'filler words '.repeat(4_615),
-            },
-          ],
+  for (const variant of ['summary', 'summary-overflow', 'short-history'] as const)
+    await t.test(variant, async (t) => {
+      const count = variant === 'short-history' ? 1 : 7;
+      const { bodies, summary, url, close } = await contextRecoveryServer(
+        count,
+        1,
+        count + 1,
+        variant === 'summary-overflow',
+      );
+      t.after(close);
+      const access = smallContextAccess('compatible', 'fixture-context', 131_072);
+      access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+      access.definition.spec = { ...access.definition.spec, baseUrl: url };
+      const directory = await mkdtemp(join(tmpdir(), 'nod-pi-tool-overflow-'));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const sessionId = randomUUID();
+      const events: AgentEvent[] = [];
+      let toolCalls = 0;
+      const agent = createPiAgent({
+        provider: 'compatible',
+        sessionRoot: directory,
+        resolve: async () => access,
+      });
+      t.after(() => agent.dispose());
+      const session = await agent.open({
+        ...fakeExecution(sessionId),
+        restricted: true,
+        systemPrompt: 'Synthetic fixture instructions.',
+        workspace: recordingWorkspace().workspace,
+        runTool: async (_name, _params, run) => run(),
+        tools: [
+          {
+            name: 'inspect_fixture',
+            description: 'Inspect the synthetic fixture.',
+            parameters: Type.Object({}),
+            execute: async () => ({
+              content: [
+                {
+                  type: 'text',
+                  text:
+                    'Synthetic tool result ' +
+                    ++toolCalls +
+                    ': ' +
+                    'filler words '.repeat(variant === 'short-history' ? 1 : 4_615),
+                },
+              ],
+            }),
+          },
+        ],
+        shouldStop: () => false,
+        onEvent: (event) => events.push(event),
+      });
+      await session.prompt('Inspect the synthetic fixture.', []);
+      await session.dispose();
+      assert.equal(toolCalls, count);
+      assert.deepEqual(
+        events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
+        ['Synthetic answer'],
+        JSON.stringify({
+          errors: events.flatMap((event) => (event.type === 'error' ? [event.message] : [])),
+          requests: bodies.filter((body) => !summary(body)).length,
         }),
-      },
-    ],
-    shouldStop: () => false,
-    onEvent: (event) => events.push(event),
-  });
-  await session.prompt('Inspect the synthetic fixture.', []);
-  await session.dispose();
-  assert.equal(toolCalls, 7);
-  assert.deepEqual(
-    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
-    ['Synthetic answer'],
-    JSON.stringify({
-      errors: events.flatMap((event) => (event.type === 'error' ? [event.message] : [])),
-      requests: bodies.filter((body) => !summary(body)).length,
-    }),
-  );
-  assert.ok(
-    events.some(
-      (event) =>
-        event.type === 'provider_usage' &&
-        event.usage.operation === 'compaction' &&
-        event.usage.status === 'succeeded',
-    ),
-  );
-  const summaryRequest = bodies.find(summary);
-  assert.ok(summaryRequest);
-  assert.ok(JSON.stringify(summaryRequest.messages).includes('Inspect the synthetic fixture.'));
-  const answer = bodies.findLast((body) => !summary(body));
-  assert.ok(answer);
-  const sent = JSON.stringify(answer.messages);
-  assert.ok(sent.includes('Inspect the synthetic fixture.'));
-  assert.ok(sent.includes('Synthetic tool result 7:'));
-  assert.ok(!sent.includes('Synthetic tool result 1:'));
-  const restored = openLocalSession(join(directory, sessionId));
-  assert.ok(restored.getEntries().some((entry) => entry.type === 'compaction'));
-  assert.ok(
-    restored
-      .getEntries()
-      .some(
-        (entry) =>
-          entry.type === 'message' &&
-          entry.message.role === 'toolResult' &&
-          JSON.stringify(entry.message.content).includes('Synthetic tool result 1:'),
-      ),
-  );
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === 'provider_usage' &&
+            event.usage.operation === 'compaction' &&
+            event.usage.status === 'succeeded',
+        ),
+      );
+      assert.equal(bodies.filter(summary).length, 1);
+      const summaryRequest = bodies.find(summary);
+      assert.ok(summaryRequest);
+      assert.ok(JSON.stringify(summaryRequest.messages).includes('Inspect the synthetic fixture.'));
+      const answer = bodies.findLast((body) => !summary(body));
+      assert.ok(answer);
+      const sent = JSON.stringify(answer.messages);
+      assert.ok(sent.includes('Inspect the synthetic fixture.'));
+      if (count > 1) {
+        assert.ok(sent.includes(`Synthetic tool result ${count}:`));
+        assert.ok(!sent.includes('Synthetic tool result 1:'));
+      }
+      const restored = openLocalSession(join(directory, sessionId));
+      assert.ok(restored.getEntries().some((entry) => entry.type === 'compaction'));
+      assert.ok(
+        restored
+          .getEntries()
+          .some(
+            (entry) =>
+              entry.type === 'message' &&
+              entry.message.role === 'toolResult' &&
+              JSON.stringify(entry.message.content).includes('Synthetic tool result 1:'),
+          ),
+      );
+    });
 });
 
 test('a dense single tool result stays within the model context', async (t) => {
@@ -4700,9 +4721,14 @@ test('parallel tool results share the remaining model context', async (t) => {
 });
 
 test('Pi recovers saved tool history across final deliveries, waits and model changes', async (t) => {
-  for (const ending of ['final', 'waiting', 'switched'] as const)
+  for (const ending of ['final', 'waiting', 'switched', 'switched-summary-overflow'] as const)
     await t.test(ending, async (t) => {
-      const { bodies, summary, url, close } = await contextRecoveryServer(0, 1, 1);
+      const { bodies, summary, url, close } = await contextRecoveryServer(
+        0,
+        1,
+        1,
+        ending === 'switched-summary-overflow',
+      );
       t.after(close);
       const access = smallContextAccess('compatible', 'fixture-context', 272_000);
       access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
@@ -4713,7 +4739,7 @@ test('Pi recovers saved tool history across final deliveries, waits and model ch
       const saved = join(directory, sessionId);
       await mkdir(saved);
       const manager = openLocalSession(saved);
-      const model = ending === 'switched' ? 'fixture-previous' : 'fixture-context';
+      const model = ending.startsWith('switched') ? 'fixture-previous' : 'fixture-context';
       const message = {
         ...fauxAssistantMessage(''),
         model,
@@ -4840,107 +4866,160 @@ test('Pi recovers saved tool history across final deliveries, waits and model ch
     });
 });
 
-test('Pi reports a failed summary once and preserves its specific cause', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-summary-failure-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const sessionId = randomUUID();
-  const saved = join(directory, sessionId);
-  await mkdir(saved);
-  const manager = openLocalSession(saved);
-  for (const count of [40_000, 80_000]) {
-    manager.appendMessage({
-      role: 'user',
-      content: 'Synthetic earlier records: ' + 'data '.repeat(count),
-      timestamp: 1,
-    });
-    manager.appendMessage(fauxAssistantMessage('Earlier work finished.'));
-  }
-  const access = smallContextAccess('compatible', 'fixture-context', 272_000);
-  const requests: string[] = [];
-  const events: AgentEvent[] = [];
-  const agent = createPiAgent({
-    provider: 'compatible',
-    sessionRoot: directory,
-    resolve: async () => access,
-    createSession: async (options) => {
-      const result = await createAgentSession(options);
-      result.session.agent.streamFunction = (model, context) => {
-        const summarizing =
-          JSON.stringify(context.messages).includes('<conversation>') ||
-          JSON.stringify(context.messages).includes('## Original Request');
-        requests.push(summarizing ? 'summary' : 'agent');
-        const message = {
-          ...fauxAssistantMessage(summarizing ? 'Partial summary.' : ''),
-          model: model.id,
-          provider: model.provider,
-          api: model.api,
-        };
-        const stream = createAssistantMessageEventStream();
-        stream.push(
-          summarizing
-            ? {
+test('Pi stops failed or aborted summaries without a second request', async (t) => {
+  for (const failure of ['output-limit', 'token-rate', 'aborted'] as const)
+    await t.test(failure, async (t) => {
+      const directory = await mkdtemp(join(tmpdir(), 'nod-pi-summary-failure-'));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const sessionId = randomUUID();
+      const saved = join(directory, sessionId);
+      await mkdir(saved);
+      const manager = openLocalSession(saved);
+      for (const count of [40_000, 80_000]) {
+        manager.appendMessage({
+          role: 'user',
+          content: 'Synthetic earlier records: ' + 'data '.repeat(count),
+          timestamp: 1,
+        });
+        manager.appendMessage(fauxAssistantMessage('Earlier work finished.'));
+      }
+      const access = smallContextAccess('compatible', 'fixture-context', 272_000);
+      const requests: string[] = [];
+      const events: AgentEvent[] = [];
+      let failing = true;
+      const agent = createPiAgent({
+        provider: 'compatible',
+        sessionRoot: directory,
+        resolve: async () => access,
+        createSession: async (options) => {
+          const result = await createAgentSession(options);
+          result.session.agent.streamFunction = (model, context, options) => {
+            options?.signal?.throwIfAborted();
+            const summarizing =
+              JSON.stringify(context.messages).includes('<conversation>') ||
+              JSON.stringify(context.messages).includes('## Original Request');
+            requests.push(summarizing ? 'summary' : 'agent');
+            const message = {
+              ...fauxAssistantMessage(summarizing ? 'Partial summary.' : ''),
+              model: model.id,
+              provider: model.provider,
+              api: model.api,
+            };
+            const stream = createAssistantMessageEventStream();
+            if (!failing) {
+              assert.ok(
+                !JSON.stringify(context.messages).includes('Continue the synthetic request.'),
+              );
+              stream.push({
                 type: 'done',
-                reason: 'length',
-                message: { ...message, stopReason: 'length' },
-              }
-            : {
-                type: 'error',
-                reason: 'error',
-                error: {
-                  ...message,
-                  stopReason: 'error',
-                  errorMessage: 'Context length exceeded: Synthetic request.',
-                },
-              },
+                reason: 'stop',
+                message: { ...message, content: [{ type: 'text', text: 'Fresh answer.' }] },
+              });
+              return stream;
+            }
+            if (summarizing && failure === 'aborted') {
+              assert.ok(options?.signal);
+              options.signal.addEventListener('abort', () => {
+                stream.push({
+                  type: 'error',
+                  reason: 'aborted',
+                  error: { ...message, stopReason: 'aborted' },
+                });
+              });
+              queueMicrotask(() => void result.session.abort());
+              return stream;
+            }
+            stream.push(
+              summarizing && failure === 'token-rate'
+                ? {
+                    type: 'error',
+                    reason: 'error',
+                    error: {
+                      ...message,
+                      stopReason: 'error',
+                      errorMessage:
+                        '413 request_too_large: tokens per minute (TPM): Limit 6000, Requested 12000',
+                    },
+                  }
+                : summarizing
+                  ? {
+                      type: 'done',
+                      reason: 'length',
+                      message: { ...message, stopReason: 'length' },
+                    }
+                  : {
+                      type: 'error',
+                      reason: 'error',
+                      error: {
+                        ...message,
+                        stopReason: 'error',
+                        errorMessage: 'Context length exceeded: Synthetic request.',
+                      },
+                    },
+            );
+            return stream;
+          };
+          return result;
+        },
+      });
+      t.after(() => agent.dispose());
+      const open = () =>
+        agent.open({
+          ...fakeExecution(sessionId),
+          restricted: true,
+          systemPrompt: 'Synthetic instructions.',
+          workspace: recordingWorkspace().workspace,
+          runTool: async (_name, _params, run) => run(),
+          tools: [],
+          shouldStop: () => false,
+          onEvent: (event) => events.push(event),
+        });
+      const session = await open();
+      t.after(() => session.dispose());
+      await session.prompt('Continue the synthetic request.', []);
+      assert.deepEqual(requests, ['agent', 'summary']);
+      assert.equal(dropFailedInput(openLocalSession(saved)), false);
+      assert.ok(
+        openLocalSession(saved)
+          .getEntries()
+          .some(
+            (entry) =>
+              entry.type === 'message' &&
+              entry.message.role === 'user' &&
+              JSON.stringify(entry.message.content).includes('Continue the synthetic request.'),
+          ),
+      );
+      assert.ok(
+        !JSON.stringify(openLocalSession(saved).buildSessionContext().messages).includes(
+          'Continue the synthetic request.',
+        ),
+      );
+      if (failure !== 'aborted')
+        assert.match(
+          events.filter((event) => event.type === 'error').at(-1)!.message,
+          failure === 'output-limit' ? /summary is incomplete/ : /tokens per minute.*Limit 6000/,
         );
-        return stream;
-      };
-      return result;
-    },
-  });
-  t.after(() => agent.dispose());
-  const session = await agent.open({
-    ...fakeExecution(sessionId),
-    restricted: true,
-    systemPrompt: 'Synthetic instructions.',
-    workspace: recordingWorkspace().workspace,
-    runTool: async (_name, _params, run) => run(),
-    tools: [],
-    shouldStop: () => false,
-    onEvent: (event) => events.push(event),
-  });
-  t.after(() => session.dispose());
-  await session.prompt('Continue the synthetic request.', []);
-  assert.deepEqual(requests, ['agent', 'summary']);
-  assert.equal(dropFailedInput(openLocalSession(saved)), false);
-  assert.ok(
-    openLocalSession(saved)
-      .getEntries()
-      .some(
-        (entry) =>
-          entry.type === 'message' &&
-          entry.message.role === 'user' &&
-          JSON.stringify(entry.message.content).includes('Continue the synthetic request.'),
-      ),
-  );
-  assert.ok(
-    !JSON.stringify(openLocalSession(saved).buildSessionContext().messages).includes(
-      'Continue the synthetic request.',
-    ),
-  );
-  assert.match(
-    events.filter((event) => event.type === 'error').at(-1)!.message,
-    /summary is incomplete/,
-  );
-  assert.ok(
-    events.some(
-      (event) =>
-        event.type === 'provider_usage' &&
-        event.usage.operation === 'compaction' &&
-        event.usage.status === 'failed',
-    ),
-  );
-  assert.ok(!events.some((event) => event.type === 'final'));
+      assert.ok(
+        !openLocalSession(saved)
+          .getEntries()
+          .some((entry) => entry.type === 'compaction'),
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === 'provider_usage' &&
+            event.usage.operation === 'compaction' &&
+            event.usage.status === (failure === 'aborted' ? 'cancelled' : 'failed'),
+        ),
+      );
+      assert.ok(!events.some((event) => event.type === 'final'));
+      await session.dispose();
+      failing = false;
+      const fresh = await open();
+      t.after(() => fresh.dispose());
+      await fresh.prompt('Answer only this fresh request.', []);
+      assert.equal(events.findLast((event) => event.type === 'final')?.text, 'Fresh answer.');
+    });
 });
 
 test('inactive deferred tool schemas do not block a small-window pending request', async (t) => {
@@ -5572,6 +5651,7 @@ test('full 32k Pi sessions distinguish context exhaustion from output truncation
   const exhausted = [];
   for (const prompt of ['yes', 'continue', 'continue'])
     exhausted.push(await turn('fixture-full-context', prompt));
+  assert.ok(bodies.some((body) => !body.tools?.length));
   assert.equal(scripts.length, 1);
   assert.ok(scripts[0].includes('fixture-list-calendars'));
   for (const attempt of exhausted)
@@ -7210,6 +7290,7 @@ test('the Pi transcript keeps model changes for the next turn and leaves backgro
     const failed = await open();
     await failed.prompt('Synthetic switched provider failure', []);
     await failed.dispose();
+    assert.equal(requests.length, 5);
     assert.equal(requests[4].provider, 'anthropic');
     assert.match(errors.at(-1) ?? '', /^anthropic \/ claude-opus-5-5: 413 Request too large/);
     assert.doesNotMatch(errors.at(-1) ?? '', /openai/);
