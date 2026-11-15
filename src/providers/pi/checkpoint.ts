@@ -171,9 +171,14 @@ function rebaseSession(source: SessionManager, next: SessionManager) {
 }
 
 export function dropFailedInput(manager: SessionManager) {
-  const entries = manager.buildSessionProjection().entries;
-  const stops = entries.map(({ messages }) => {
-    const message = messages.find((item) => item.role === 'assistant');
+  const projection = new Map(
+    manager.buildSessionProjection().entries.map((entry) => [entry.sourceEntry.id, entry.messages]),
+  );
+  const entries = manager.getBranch();
+  const stops = entries.map((entry) => {
+    const message =
+      projection.get(entry.id)?.find((item) => item.role === 'assistant') ??
+      (entry.type === 'message' ? entry.message : undefined);
     return message?.role === 'assistant' ? message.stopReason : undefined;
   });
   const failed = stops.lastIndexOf('error');
@@ -181,15 +186,19 @@ export function dropFailedInput(manager: SessionManager) {
     (stop) => stop === 'stop' || stop === 'toolUse' || stop === 'length',
   );
   if (failed <= answered) return false;
-  for (const { sourceEntry, messages } of entries.slice(answered + 1, failed + 1))
+  let changed = false;
+  for (const entry of entries.slice(answered + 1, failed + 1))
     if (
-      messages.some((message) =>
-        ['user', 'custom', 'toolResult', 'assistant'].includes(message.role),
-      )
-    )
-      manager.appendContextEdit(sourceEntry.id, null);
-  closeInterruptedCalls(manager);
-  return true;
+      (entry.type === 'message' || entry.type === 'custom_message') &&
+      projection
+        .get(entry.id)
+        ?.some((message) => ['user', 'custom', 'toolResult', 'assistant'].includes(message.role))
+    ) {
+      manager.appendContextEdit(entry.id, null);
+      changed = true;
+    }
+  if (changed) closeInterruptedCalls(manager);
+  return changed;
 }
 
 export function closeInterruptedCalls(manager: SessionManager) {

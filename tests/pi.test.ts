@@ -29,7 +29,11 @@ import {
   type RuntimeContext,
 } from '../src/ports/agent.ts';
 import type { WorkspaceExecOptions, WorkspaceSession } from '../src/ports/computer.ts';
-import { openLocalSession, readPiSessionEntries } from '../src/providers/pi/checkpoint.ts';
+import {
+  dropFailedInput,
+  openLocalSession,
+  readPiSessionEntries,
+} from '../src/providers/pi/checkpoint.ts';
 import { createPiAgent } from '../src/providers/pi/index.ts';
 import { createPiMemoryCurator } from '../src/providers/pi/memory-curator.ts';
 import { createPiUsageTracker } from '../src/providers/pi/usage.ts';
@@ -144,7 +148,7 @@ test('models and routers complete tool discovery inside the endpoint context', a
         }
       }
       const guide = 'Synthetic MCP guide: inspect the selected account before reading its records.';
-      const earlier = 'Synthetic earlier session content. '.repeat(2000);
+      const earlier = 'Synthetic earlier session content. '.repeat(100);
       if (id === 'fixture-resumed' || id === 'fixture-followup') {
         const saved = join(directory, 'sessions/fixture');
         await mkdir(saved, { recursive: true });
@@ -163,6 +167,7 @@ test('models and routers complete tool discovery inside the endpoint context', a
       const access = smallContextAccess(provider, id, window);
       let requests = 0;
       let summaries = 0;
+      let rejections = 0;
       const bodies: Record<string, any>[] = [];
       const requestBudgets: number[] = [];
       const documentation =
@@ -207,11 +212,17 @@ test('models and routers complete tool discovery inside the endpoint context', a
         );
         const input = Math.ceil(text.length / 3.5) + images * 1200;
         requestBudgets.push(input + (body.max_tokens ?? body.max_completion_tokens ?? 0));
-        if (input + (body.max_tokens ?? body.max_completion_tokens ?? 0) > limit)
+        if (input + (body.max_tokens ?? body.max_completion_tokens ?? 0) > limit) {
+          rejections++;
           return Response.json(
-            { error: { message: `Synthetic endpoint context is ${limit} tokens.` } },
+            {
+              error: {
+                message: `Context length exceeded: Synthetic endpoint context is ${limit} tokens.`,
+              },
+            },
             { status: 400 },
           );
+        }
         assert.ok(!JSON.stringify(body).includes('fixture-small-key'));
         assert.equal(body.model, id);
         const summarizing = !body.tools?.length;
@@ -243,7 +254,6 @@ test('models and routers complete tool discovery inside the endpoint context', a
           }
           if (id === 'fixture-resumed' && requests === 0) {
             assert.ok(JSON.stringify(body).includes('Synthetic retained recent turn.'));
-            assert.ok(!JSON.stringify(body).includes(earlier));
           }
         }
         const call = summarizing ? undefined : calls[requests++];
@@ -408,7 +418,7 @@ test('models and routers complete tool discovery inside the endpoint context', a
         }),
       );
       assert.equal(requests, calls.length + 1);
-      assert.equal(bodies.length, calls.length + 1 + summaries);
+      assert.equal(bodies.length, calls.length + 1 + summaries + rejections);
       assert.deepEqual(
         started,
         id === 'fixture-docs-small'
@@ -428,7 +438,7 @@ test('models and routers complete tool discovery inside the endpoint context', a
             prompt: 'Oversized current request. '.repeat(5000),
           }),
         );
-        assert.equal(bodies.length, before);
+        assert.ok(bodies.length > before);
         assert.equal(published.length, 1);
       }
     });
@@ -4239,12 +4249,13 @@ test('owner context stays out of the system prompt and compaction summaries and 
   assert.equal(recorded[0].metadata.session_id, execution.sessionId);
 });
 
-test('a turn that crosses the compaction line answers first, then compacts at the lowest effort', async (t) => {
+test('Pi compacts at its threshold with the selected model settings', async (t) => {
   const { createServer } = await import('node:http');
   const chunk = (value: object) => `data: ${JSON.stringify(value)}\n\n`;
   const bodies: Array<{ messages: unknown[]; reasoning_effort?: string }> = [];
   const summary = (body: (typeof bodies)[number]) =>
-    JSON.stringify(body.messages).includes('<conversation>');
+    JSON.stringify(body.messages).includes('<conversation>') ||
+    JSON.stringify(body.messages).includes('## Original Request');
   let agentRequests = 0;
   const server = createServer((request, response) => {
     const parts: Buffer[] = [];
@@ -4344,10 +4355,10 @@ test('a turn that crosses the compaction line answers first, then compacts at th
     await session.dispose();
   }
 
-  assert.deepEqual(bodies.map(summary), [false, false, false, false, true]);
+  assert.deepEqual(bodies.map(summary), [false, false, false, true, false]);
   assert.deepEqual(
     bodies.map((body) => body.reasoning_effort),
-    ['high', 'high', 'high', 'high', 'low'],
+    ['high', 'high', 'high', 'high', 'high'],
   );
   const answered = events.findIndex(
     (event) => event.type === 'final' && event.text === 'Synthetic answer 4',
@@ -4356,7 +4367,7 @@ test('a turn that crosses the compaction line answers first, then compacts at th
     event.type === 'provider_usage' && event.usage.operation === 'compaction' ? [index] : [],
   );
   assert.equal(compactions.length, 1);
-  assert.ok(answered >= 0 && answered < compactions[0]);
+  assert.ok(answered > compactions[0]);
 });
 
 async function contextRecoveryServer(toolCalls = 0, callsPerStep = 1, overflowStep = 0) {
@@ -4365,7 +4376,8 @@ async function contextRecoveryServer(toolCalls = 0, callsPerStep = 1, overflowSt
   const bodies: Array<{ model: string; messages: unknown[]; tools?: unknown[] }> = [];
   const summary = (body: (typeof bodies)[number]) =>
     (toolCalls > 0 && !body.tools?.length) ||
-    JSON.stringify(body.messages).includes('<conversation>');
+    JSON.stringify(body.messages).includes('<conversation>') ||
+    JSON.stringify(body.messages).includes('## Original Request');
   let agentRequests = 0;
   const server = createServer((request, response) => {
     const parts: Buffer[] = [];
@@ -4578,7 +4590,7 @@ test('a dense single tool result stays within the model context', async (t) => {
   assert.ok(!JSON.stringify(answer.messages).includes('漢'.repeat(65_536)));
 });
 
-test('a completed dense turn reduces room for the next tool result', async (t) => {
+test('large tool results stay in workspace after a completed turn', async (t) => {
   const { bodies, summary, url, close } = await contextRecoveryServer(1);
   t.after(close);
   const access = smallContextAccess('compatible', 'fixture-context', 131_072);
@@ -4687,209 +4699,165 @@ test('parallel tool results share the remaining model context', async (t) => {
   assert.equal(JSON.stringify(answer.messages).match(/workspaceFile/g)?.length, 2);
 });
 
-async function smallerModelRecoveryCase(t: TestContext, oldTurns: number, largeWindow: number) {
-  const { bodies, summary, url, close } = await contextRecoveryServer();
-  t.after(close);
-  const large = smallContextAccess('compatible', 'fixture-large', largeWindow);
-  const small = smallContextAccess('compatible', 'fixture-small', 131_072);
-  for (const access of [large, small]) {
-    access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
-    access.definition.spec = { ...access.definition.spec, baseUrl: url };
-  }
-  let selected = large;
-  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-smaller-context-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const sessionRoot = join(directory, 'sessions');
-  const sessionId = randomUUID();
-  const sessionDirectory = join(sessionRoot, sessionId);
-  const events: AgentEvent[] = [];
-  const agent = createPiAgent({
-    provider: 'compatible',
-    sessionRoot,
-    resolve: async () => selected,
-  });
-  t.after(() => agent.dispose());
-  const turn = async (prompt: string) => {
-    const session = await agent.open({
-      ...fakeExecution(sessionId),
-      restricted: true,
-      systemPrompt: 'Synthetic fixture instructions.',
-      workspace: recordingWorkspace().workspace,
-      runTool: async (_name, _params, run) => run(),
-      tools: [],
-      shouldStop: () => false,
-      onEvent: (event) => events.push(event),
+test('Pi recovers saved tool history across final deliveries, waits and model changes', async (t) => {
+  for (const ending of ['final', 'waiting', 'switched'] as const)
+    await t.test(ending, async (t) => {
+      const { bodies, summary, url, close } = await contextRecoveryServer(0, 1, 1);
+      t.after(close);
+      const access = smallContextAccess('compatible', 'fixture-context', 272_000);
+      access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+      access.definition.spec = { ...access.definition.spec, baseUrl: url };
+      const directory = await mkdtemp(join(tmpdir(), 'nod-pi-native-recovery-'));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const sessionId = randomUUID();
+      const saved = join(directory, sessionId);
+      await mkdir(saved);
+      const manager = openLocalSession(saved);
+      const model = ending === 'switched' ? 'fixture-previous' : 'fixture-context';
+      const message = {
+        ...fauxAssistantMessage(''),
+        model,
+        provider: 'compatible',
+        api: 'openai-completions' as const,
+        usage: {
+          input: 151_233,
+          output: 30,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 151_263,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      };
+      manager.appendMessage({ role: 'user', content: 'Earlier synthetic request.', timestamp: 1 });
+      manager.appendMessage({
+        ...message,
+        content: [{ type: 'text', text: 'Earlier work finished.' }],
+      });
+      manager.appendMessage({
+        role: 'user',
+        content: 'Review the synthetic records.',
+        timestamp: 2,
+      });
+      for (let index = 0; index < 40; index++) {
+        manager.appendMessage({
+          ...message,
+          stopReason: 'toolUse',
+          content: [{ type: 'toolCall', id: `read-${index}`, name: 'read_fixture', arguments: {} }],
+        });
+        manager.appendMessage({
+          role: 'toolResult',
+          toolCallId: `read-${index}`,
+          toolName: 'read_fixture',
+          content: [
+            { type: 'text', text: `Synthetic record ${index}: ` + 'record data '.repeat(1800) },
+          ],
+          isError: false,
+          timestamp: index + 3,
+        });
+      }
+      const name = ending === 'waiting' ? 'sign_in' : 'send_message';
+      manager.appendMessage({
+        ...message,
+        stopReason: 'toolUse',
+        content: [
+          {
+            type: 'toolCall',
+            id: 'last-call',
+            name,
+            arguments: { intent: 'final', text: 'Complete.' },
+          },
+        ],
+      });
+      manager.appendMessage({
+        role: 'toolResult',
+        toolCallId: 'last-call',
+        toolName: name,
+        content: [
+          {
+            type: 'text',
+            text: ending === 'waiting' ? 'Waiting for private entry.' : '{"delivered":true}',
+          },
+        ],
+        isError: false,
+        timestamp: Date.now(),
+      });
+      assert.ok(
+        Buffer.byteLength(JSON.stringify(manager.buildSessionContext().messages)) / 3 > 272_000,
+      );
+      let toolCalls = 0;
+      const events: AgentEvent[] = [];
+      const agent = createPiAgent({
+        provider: 'compatible',
+        sessionRoot: directory,
+        resolve: async () => access,
+      });
+      t.after(() => agent.dispose());
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const session = await agent.open({
+          ...fakeExecution(sessionId),
+          restricted: true,
+          systemPrompt:
+            'Use the current owner instruction. Check uncertain actions before repeating them.',
+          workspace: recordingWorkspace().workspace,
+          runTool: async (_name, _params, run) => {
+            toolCalls++;
+            return run();
+          },
+          tools: [],
+          shouldStop: () => false,
+          onEvent: (event) => events.push(event),
+        });
+        await session.prompt('Reply OK.', []);
+        await session.dispose();
+      }
+      assert.equal(toolCalls, 0);
+      assert.deepEqual(
+        events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
+        ['Synthetic answer', 'Synthetic answer'],
+      );
+      assert.ok(
+        events.some(
+          (event) =>
+            event.type === 'provider_usage' &&
+            event.usage.operation === 'compaction' &&
+            event.usage.status === 'succeeded',
+        ),
+      );
+      assert.ok(bodies.some(summary));
+      const final = bodies.findLast((body) => !summary(body));
+      assert.ok(JSON.stringify(final).includes('Reply OK.'));
+      assert.ok(!JSON.stringify(final).includes('Synthetic record 0:'));
+      assert.ok(
+        openLocalSession(saved)
+          .getEntries()
+          .some(
+            (entry) =>
+              entry.type === 'message' &&
+              entry.message.role === 'toolResult' &&
+              JSON.stringify(entry.message.content).includes('Synthetic record 0:'),
+          ),
+      );
     });
-    await session.prompt(prompt, []);
-    await session.dispose();
-  };
-  for (let index = 0; index < oldTurns; index++)
-    await turn(
-      `${index === 0 ? 'Older' : 'Additional'} synthetic history: ${'filler words '.repeat(30_000)}`,
-    );
-  assert.deepEqual(
-    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
-    Array(oldTurns).fill('Synthetic answer'),
-  );
-  events.length = 0;
-  const before = Buffer.byteLength(
-    JSON.stringify(openLocalSession(sessionDirectory).buildSessionContext().messages),
-  );
-  selected = small;
-  await turn('Continue the current synthetic request.');
-  assert.deepEqual(
-    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
-    ['Synthetic answer'],
-    JSON.stringify({
-      errors: events.flatMap((event) => (event.type === 'error' ? [event.message] : [])),
-      requests: bodies.filter((body) => body.model === 'fixture-small').length,
-      compactions: events.flatMap((event) =>
-        event.type === 'provider_usage' && event.usage.operation === 'compaction'
-          ? [event.usage.status]
-          : [],
-      ),
-    }),
-  );
-  const request = bodies.findLast((body) => body.model === 'fixture-small' && !summary(body));
-  assert.ok(request);
-  assert.ok(JSON.stringify(request.messages).includes('Continue the current synthetic request.'));
-  assert.ok(!JSON.stringify(request.messages).includes('Older synthetic history:'));
-  const restored = openLocalSession(sessionDirectory);
-  const after = Buffer.byteLength(JSON.stringify(restored.buildSessionContext().messages));
-  assert.ok(after < before);
-  assert.ok(
-    restored
-      .getEntries()
-      .some((entry) => entry.type === 'compaction' && entry.summary.includes('history_search')),
-  );
-  assert.ok(
-    restored
-      .getEntries()
-      .some(
-        (entry) =>
-          entry.type === 'message' &&
-          entry.message.role === 'user' &&
-          JSON.stringify(entry.message.content).includes('Older synthetic history:'),
-      ),
-  );
-  assert.ok(
-    JSON.stringify(restored.buildSessionContext().messages).includes(
-      'Continue the current synthetic request.',
-    ),
-  );
-  return events.flatMap((event) =>
-    event.type === 'provider_usage' && event.usage.operation === 'compaction'
-      ? [event.usage.status]
-      : [],
-  );
-}
-
-test('a smaller model recovers a saved context with no Pi compaction cut point', async (t) => {
-  await smallerModelRecoveryCase(t, 1, 300_000);
 });
 
-test('a smaller model recovers when its Pi summary request exceeds context', async (t) => {
-  const compactions = await smallerModelRecoveryCase(t, 2, 1_000_000);
-  assert.deepEqual(compactions, ['succeeded']);
-});
-
-test('a summary overflow keeps the owner request when Pi cuts inside an unfinished turn', async (t) => {
-  const { bodies, summary, url, close } = await contextRecoveryServer();
-  t.after(close);
-  const access = smallContextAccess('compatible', 'fixture-context', 131_072);
-  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
-  access.definition.spec = { ...access.definition.spec, baseUrl: url };
-  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-split-summary-'));
+test('Pi reports a failed summary once and preserves its specific cause', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-summary-failure-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const sessionRoot = join(directory, 'sessions');
   const sessionId = randomUUID();
-  const sessionDirectory = join(sessionRoot, sessionId);
-  await mkdir(sessionDirectory, { recursive: true });
-  const manager = openLocalSession(sessionDirectory);
-  manager.appendMessage({
-    role: 'user',
-    content: 'Older synthetic context: ' + 'old '.repeat(120_000),
-    timestamp: 1,
-  });
-  manager.appendMessage(fauxAssistantMessage('Earlier work ended.'));
-  const current = 'Current synthetic owner request: ' + 'current '.repeat(10_000);
-  const currentId = manager.appendMessage({ role: 'user', content: current, timestamp: 2 });
-  for (const [index, text] of ['result '.repeat(20_000), 'tail '.repeat(15_000)].entries()) {
-    const id = `read-${index}`;
+  const saved = join(directory, sessionId);
+  await mkdir(saved);
+  const manager = openLocalSession(saved);
+  for (const count of [40_000, 80_000]) {
     manager.appendMessage({
-      ...fauxAssistantMessage(''),
-      stopReason: 'toolUse',
-      content: [{ type: 'toolCall', id, name: 'read', arguments: { path: 'synthetic.txt' } }],
+      role: 'user',
+      content: 'Synthetic earlier records: ' + 'data '.repeat(count),
+      timestamp: 1,
     });
-    manager.appendMessage({
-      role: 'toolResult',
-      toolCallId: id,
-      toolName: 'read',
-      content: [{ type: 'text', text }],
-      isError: false,
-      timestamp: index + 3,
-    });
+    manager.appendMessage(fauxAssistantMessage('Earlier work finished.'));
   }
+  const access = smallContextAccess('compatible', 'fixture-context', 272_000);
+  const requests: string[] = [];
   const events: AgentEvent[] = [];
-  const agent = createPiAgent({
-    provider: 'compatible',
-    sessionRoot,
-    resolve: async () => access,
-  });
-  t.after(() => agent.dispose());
-  const session = await agent.open({
-    ...fakeExecution(sessionId),
-    restricted: true,
-    systemPrompt: 'Synthetic fixture instructions.',
-    workspace: recordingWorkspace().workspace,
-    runTool: async (_name, _params, run) => run(),
-    tools: [],
-    shouldStop: () => false,
-    onEvent: (event) => events.push(event),
-  });
-  t.after(() => session.dispose());
-  await session.prompt('Continue the current synthetic request.', []);
-  assert.deepEqual(
-    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
-    ['Synthetic answer'],
-    JSON.stringify(events.flatMap((event) => (event.type === 'error' ? [event.message] : []))),
-  );
-  const request = bodies.findLast((body) => !summary(body));
-  assert.ok(request);
-  const sent = JSON.stringify(request.messages);
-  assert.ok(sent.includes(current));
-  assert.ok(sent.includes('Continue the current synthetic request.'));
-  assert.ok(!sent.includes('Older synthetic context:'));
-  const restored = openLocalSession(sessionDirectory);
-  const checkpoints = restored.getEntries().filter((entry) => entry.type === 'compaction');
-  const checkpoint = checkpoints.at(-1);
-  assert.ok(checkpoint);
-  assert.match(checkpoint.summary, /history_search/);
-  assert.equal(checkpoint.firstKeptEntryId, currentId);
-});
-
-test('Pi overflow recovery checkpoints when its summary also exceeds context', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-overflow-summary-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const sessionId = randomUUID();
-  const sessionDirectory = join(directory, sessionId);
-  await mkdir(sessionDirectory);
-  const manager = openLocalSession(sessionDirectory);
-  manager.appendMessage({
-    role: 'user',
-    content: 'Earlier synthetic history: ' + 'old '.repeat(40_000),
-    timestamp: 1,
-  });
-  manager.appendMessage(fauxAssistantMessage('Earlier work ended.'));
-  manager.appendMessage({
-    role: 'user',
-    content: 'Additional synthetic history: ' + 'mid '.repeat(40_000),
-    timestamp: 2,
-  });
-  manager.appendMessage(fauxAssistantMessage('Additional work ended.'));
-  const access = smallContextAccess('compatible', 'fixture-context', 131_072);
-  let requests = 0;
-  let summaries = 0;
   const agent = createPiAgent({
     provider: 'compatible',
     sessionRoot: directory,
@@ -4897,28 +4865,33 @@ test('Pi overflow recovery checkpoints when its summary also exceeds context', a
     createSession: async (options) => {
       const result = await createAgentSession(options);
       result.session.agent.streamFunction = (model, context) => {
-        const summarizing = JSON.stringify(context.messages).includes('<conversation>');
+        const summarizing =
+          JSON.stringify(context.messages).includes('<conversation>') ||
+          JSON.stringify(context.messages).includes('## Original Request');
+        requests.push(summarizing ? 'summary' : 'agent');
         const message = {
-          ...fauxAssistantMessage('Synthetic answer'),
-          provider: model.provider,
+          ...fauxAssistantMessage(summarizing ? 'Partial summary.' : ''),
           model: model.id,
+          provider: model.provider,
           api: model.api,
         };
         const stream = createAssistantMessageEventStream();
-        if (summarizing) summaries++;
-        else requests++;
         stream.push(
-          summarizing || requests === 1
+          summarizing
             ? {
+                type: 'done',
+                reason: 'length',
+                message: { ...message, stopReason: 'length' },
+              }
+            : {
                 type: 'error',
                 reason: 'error',
                 error: {
                   ...message,
                   stopReason: 'error',
-                  errorMessage: 'Context length exceeded: Synthetic fixture request.',
+                  errorMessage: 'Context length exceeded: Synthetic request.',
                 },
-              }
-            : { type: 'done', reason: 'stop', message },
+              },
         );
         return stream;
       };
@@ -4926,11 +4899,10 @@ test('Pi overflow recovery checkpoints when its summary also exceeds context', a
     },
   });
   t.after(() => agent.dispose());
-  const events: AgentEvent[] = [];
   const session = await agent.open({
     ...fakeExecution(sessionId),
     restricted: true,
-    systemPrompt: 'Synthetic fixture instructions.',
+    systemPrompt: 'Synthetic instructions.',
     workspace: recordingWorkspace().workspace,
     runTool: async (_name, _params, run) => run(),
     tools: [],
@@ -4939,269 +4911,36 @@ test('Pi overflow recovery checkpoints when its summary also exceeds context', a
   });
   t.after(() => session.dispose());
   await session.prompt('Continue the synthetic request.', []);
-  assert.equal(requests, 2);
-  assert.ok(summaries >= 1);
-  assert.deepEqual(
-    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
-    ['Synthetic answer'],
-    JSON.stringify(events.flatMap((event) => (event.type === 'error' ? [event.message] : []))),
-  );
+  assert.deepEqual(requests, ['agent', 'summary']);
+  assert.equal(dropFailedInput(openLocalSession(saved)), false);
   assert.ok(
-    openLocalSession(sessionDirectory)
-      .getEntries()
-      .some((entry) => entry.type === 'compaction' && entry.summary.includes('history_search')),
-  );
-});
-
-test('an oversized pending user input stays available without repeated checkpoints', async (t) => {
-  const { bodies, url, close } = await contextRecoveryServer();
-  t.after(close);
-  const access = smallContextAccess('compatible', 'fixture-small', 131_072);
-  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
-  access.definition.spec = { ...access.definition.spec, baseUrl: url };
-  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-pending-context-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const sessionRoot = join(directory, 'sessions');
-  const sessionId = randomUUID();
-  const sessionDirectory = join(sessionRoot, sessionId);
-  await mkdir(sessionDirectory, { recursive: true });
-  const pending = 'Pending synthetic input: ' + 'filler words '.repeat(35_000);
-  openLocalSession(sessionDirectory).appendMessage({
-    role: 'user',
-    content: pending,
-    timestamp: Date.now() - 1000,
-  });
-  const agent = createPiAgent({
-    provider: 'compatible',
-    sessionRoot,
-    resolve: async () => access,
-  });
-  t.after(() => agent.dispose());
-  const checkpoints: number[] = [];
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const events: AgentEvent[] = [];
-    let session: Awaited<ReturnType<typeof agent.open>> | undefined;
-    let thrown: string | undefined;
-    try {
-      session = await agent.open({
-        ...fakeExecution(sessionId),
-        restricted: true,
-        systemPrompt: 'Synthetic fixture instructions.',
-        workspace: recordingWorkspace().workspace,
-        runTool: async (_name, _params, run) => run(),
-        tools: [],
-        shouldStop: () => false,
-        onEvent: (event) => events.push(event),
-      });
-      await session.prompt('Short synthetic follow-up.', []);
-    } catch (error) {
-      thrown = error instanceof Error ? error.message : String(error);
-    } finally {
-      await session?.dispose();
-    }
-    const failures = [
-      ...(thrown ? [thrown] : []),
-      ...events.flatMap((event) => (event.type === 'error' ? [event.message] : [])),
-    ];
-    assert.ok(
-      failures.some((message) => /does not fit.*context|context.*too large/i.test(message)),
-      JSON.stringify({
-        attempt,
-        failures,
-        bodies: bodies.length,
-        finals: events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
-        checkpoints: openLocalSession(sessionDirectory)
-          .getEntries()
-          .filter((entry) => entry.type === 'compaction').length,
-      }),
-    );
-    assert.ok(!events.some((event) => event.type === 'final'));
-    assert.equal(bodies.length, 0);
-    const restored = openLocalSession(sessionDirectory);
-    assert.ok(
-      restored
-        .getEntries()
-        .some(
-          (entry) =>
-            entry.type === 'message' &&
-            entry.message.role === 'user' &&
-            JSON.stringify(entry.message.content).includes('Pending synthetic input:'),
-        ),
-    );
-    assert.ok(
-      restored
-        .buildSessionContext()
-        .messages.some(
-          (message) =>
-            message.role === 'user' &&
-            JSON.stringify(message.content).includes('Pending synthetic input:'),
-        ),
-    );
-    checkpoints.push(restored.getEntries().filter((entry) => entry.type === 'compaction').length);
-  }
-  assert.equal(checkpoints[1], checkpoints[0]);
-});
-
-test('a fresh prompt recovers after an oversized earlier turn ended at length', async (t) => {
-  const { bodies, summary, url, close } = await contextRecoveryServer();
-  t.after(close);
-  const access = smallContextAccess('compatible', 'fixture-small', 131_072);
-  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
-  access.definition.spec = { ...access.definition.spec, baseUrl: url };
-  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-length-context-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const sessionRoot = join(directory, 'sessions');
-  const sessionId = randomUUID();
-  const sessionDirectory = join(sessionRoot, sessionId);
-  await mkdir(sessionDirectory, { recursive: true });
-  const timestamp = Date.now() - 1000;
-  const history = openLocalSession(sessionDirectory);
-  history.appendMessage({
-    role: 'user',
-    content: 'Older synthetic request: ' + 'filler words '.repeat(35_000),
-    timestamp,
-  });
-  history.appendMessage({
-    role: 'assistant',
-    api: 'openai-completions',
-    provider: 'compatible',
-    model: 'fixture-large',
-    timestamp: timestamp + 1,
-    stopReason: 'length',
-    content: [{ type: 'text', text: 'Earlier partial answer.' }],
-    usage: {
-      input: 150_000,
-      output: 1,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 150_001,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-  });
-  const events: AgentEvent[] = [];
-  const agent = createPiAgent({
-    provider: 'compatible',
-    sessionRoot,
-    resolve: async () => access,
-  });
-  t.after(() => agent.dispose());
-  const session = await agent.open({
-    ...fakeExecution(sessionId),
-    restricted: true,
-    systemPrompt: 'Synthetic fixture instructions.',
-    workspace: recordingWorkspace().workspace,
-    runTool: async (_name, _params, run) => run(),
-    tools: [],
-    shouldStop: () => false,
-    onEvent: (event) => events.push(event),
-  });
-  t.after(() => session.dispose());
-  await session.prompt('Fresh synthetic follow-up.', []);
-  assert.deepEqual(
-    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
-    ['Synthetic answer'],
-  );
-  assert.ok(!events.some((event) => event.type === 'error'));
-  const request = bodies.findLast((body) => !summary(body));
-  assert.ok(request);
-  assert.ok(JSON.stringify(request.messages).includes('Fresh synthetic follow-up.'));
-  assert.ok(!JSON.stringify(request.messages).includes('Older synthetic request:'));
-  const restored = openLocalSession(sessionDirectory);
-  assert.ok(restored.getEntries().some((entry) => entry.type === 'compaction'));
-  assert.ok(
-    restored
+    openLocalSession(saved)
       .getEntries()
       .some(
         (entry) =>
           entry.type === 'message' &&
           entry.message.role === 'user' &&
-          JSON.stringify(entry.message.content).includes('Older synthetic request:'),
+          JSON.stringify(entry.message.content).includes('Continue the synthetic request.'),
       ),
   );
-});
-
-test('full tool schemas trigger a checkpoint before an oversized model request', async (t) => {
-  const { bodies, url, close } = await contextRecoveryServer();
-  t.after(close);
-  const access = smallContextAccess('compatible', 'fixture-context', 131_072);
-  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
-  access.definition.spec = { ...access.definition.spec, baseUrl: url };
-  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-tool-overhead-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const sessionId = randomUUID();
-  const sessionDirectory = join(directory, sessionId);
-  await mkdir(sessionDirectory);
-  const timestamp = Date.now() - 1000;
-  const history = openLocalSession(sessionDirectory);
-  history.appendMessage({
-    role: 'user',
-    content: 'Older synthetic history: ' + 'filler words '.repeat(27_000),
-    timestamp,
-  });
-  history.appendMessage({
-    role: 'assistant',
-    api: 'openai-completions',
-    provider: 'compatible',
-    model: 'fixture-context',
-    timestamp: timestamp + 1,
-    stopReason: 'stop',
-    content: [{ type: 'text', text: 'Earlier synthetic answer.' }],
-    usage: {
-      input: 87_500,
-      output: 10,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 87_510,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-  });
-  const events: AgentEvent[] = [];
-  const agent = createPiAgent({
-    provider: 'compatible',
-    sessionRoot: directory,
-    resolve: async () => access,
-  });
-  t.after(() => agent.dispose());
-  const session = await agent.open({
-    ...fakeExecution(sessionId),
-    systemPrompt: 'Synthetic fixture instructions.',
-    workspace: recordingWorkspace().workspace,
-    runTool: async (_name, _params, run) => run(),
-    tools: [
-      {
-        name: 'synthetic_schema',
-        description: 'Synthetic schema '.repeat(2500),
-        eager: true,
-        parameters: Type.Object({ path: Type.String() }),
-        execute: async () => ({ content: [{ type: 'text', text: 'Synthetic tool result.' }] }),
-      },
-    ],
-    shouldStop: () => false,
-    onEvent: (event) => events.push(event),
-  });
-  await session.prompt('Short synthetic follow-up.', []);
-  await session.dispose();
-  assert.deepEqual(
-    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
-    ['Synthetic answer'],
-  );
-  assert.ok(!events.some((event) => event.type === 'error'));
-  assert.equal(bodies.length, 1);
-  assert.ok((bodies[0]!.tools?.length ?? 0) > 0);
-  assert.ok(JSON.stringify(bodies[0]!.messages).includes('Short synthetic follow-up.'));
-  assert.ok(!JSON.stringify(bodies[0]!.messages).includes('Older synthetic history:'));
-  const restored = openLocalSession(sessionDirectory);
-  assert.ok(restored.getEntries().some((entry) => entry.type === 'compaction'));
   assert.ok(
-    restored
-      .getEntries()
-      .some(
-        (entry) =>
-          entry.type === 'message' &&
-          entry.message.role === 'user' &&
-          JSON.stringify(entry.message.content).includes('Older synthetic history:'),
-      ),
+    !JSON.stringify(openLocalSession(saved).buildSessionContext().messages).includes(
+      'Continue the synthetic request.',
+    ),
   );
+  assert.match(
+    events.filter((event) => event.type === 'error').at(-1)!.message,
+    /summary is incomplete/,
+  );
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === 'provider_usage' &&
+        event.usage.operation === 'compaction' &&
+        event.usage.status === 'failed',
+    ),
+  );
+  assert.ok(!events.some((event) => event.type === 'final'));
 });
 
 test('inactive deferred tool schemas do not block a small-window pending request', async (t) => {
@@ -7973,35 +7712,6 @@ test('restricted Pi sessions load no sandbox, web, or code tools', async () => {
   }
 });
 
-test('the chat prompt leaves room for an image in a small context window', async () => {
-  const { modelContextBudget, estimateModelTokens } = await import('../src/providers/pi/models.ts');
-  const { systemPrompt, coreSkills } = await import('../src/runtime/prompt.ts');
-  const { createSkillLibrary } = await import('../src/providers/pi/skills.ts');
-  const skills = createSkillLibrary(join(process.cwd(), 'src/runtime/skills'), coreSkills);
-  const budget = modelContextBudget({
-    provider: 'compatible',
-    id: 'fixture-small',
-    contextWindow: 8192,
-    maxTokens: 4096,
-  });
-  const prompt = systemPrompt({ ...sandbox.workspace, path: '/workspace/fixture' }, skills);
-  const room = (content: unknown) =>
-    budget.window -
-    estimateModelTokens({
-      messages: [
-        { role: 'system', content: prompt },
-        { role: 'user', content },
-      ],
-      tools: [],
-    }) -
-    budget.margin;
-  assert.ok(room('Synthetic request.') >= 128, 'the prompt must fit a small text-only window');
-  assert.ok(
-    room([{ type: 'image', data: 'fixture', mimeType: 'image/png' }]) >= 128,
-    'the prompt must leave room for an image in a small window',
-  );
-});
-
 test('native audio reaches the selected Pi model with tools and survives a reopened session', async (t) => {
   const { createServer } = await import('node:http');
   const bodies: Array<{
@@ -8037,9 +7747,12 @@ test('native audio reaches the selected Pi model with tools and survives a reope
           ((body as { max_tokens?: number }).max_tokens ?? 0) >
           8192
       ) {
-        contractRejections++;
         response.writeHead(400, { 'content-type': 'application/json' });
-        response.end(JSON.stringify({ error: { message: 'The text companion context is full.' } }));
+        response.end(
+          JSON.stringify({
+            error: { message: 'Context length exceeded: The text companion context is full.' },
+          }),
+        );
         return;
       }
       if (
@@ -8463,7 +8176,13 @@ test('native audio reaches the selected Pi model with tools and survives a reope
     await reopenedPending.prompt('Continue with the queued recordings.', []);
     await reopenedPending.dispose();
     const expectedIds = ['edited', 'deleted'].includes(change) ? pendingIds.slice(1) : pendingIds;
-    assert.equal(bodies.length, beforeReopen + 1);
+    const resumedRequests = bodies.slice(beforeReopen);
+    assert.equal(resumedRequests.filter((body) => audio(body).length > 0).length, 1);
+    assert.ok(
+      resumedRequests
+        .slice(0, -1)
+        .every((body) => body.model === 'fixture-text-model' && audio(body).length === 0),
+    );
     assert.equal(audio(bodies.at(-1)!).length, expectedIds.length);
     assert.deepEqual(new Set(readIds.slice(beforeReadIds)), new Set(expectedIds));
     const submitted = JSON.stringify(bodies.at(-1));
@@ -9085,7 +8804,7 @@ function reply(content: Record<string, unknown>, finish = 'stop') {
   );
 }
 
-test('model requests refuse oversized payloads before dispatch and retain transport causes', async (t) => {
+test('model requests reach the provider and retain transport causes', async (t) => {
   const original = globalThis.fetch;
   t.after(() => {
     globalThis.fetch = original;
@@ -9105,9 +8824,8 @@ test('model requests refuse oversized payloads before dispatch and retain transp
       messages: [{ role: 'user', content: 'Synthetic text '.repeat(window), timestamp: 1 }],
     });
     assert.equal(oversized.stopReason, 'error');
-    assert.match(oversized.errorMessage ?? '', new RegExp(`${window}-token context`));
-    assert.equal(calls, 0);
-    assert.equal(requestFacts(oversized)!.requestPhase, 'prepare');
+    assert.match(oversized.errorMessage ?? '', /ECONNRESET/);
+    assert.equal(requestFacts(oversized)!.requestPhase, 'request');
   }
   for (const [index, provider] of (['compatible', 'openrouter'] as const).entries()) {
     const { runtime, model } = await createPiModelRuntime(
@@ -9117,7 +8835,7 @@ test('model requests refuse oversized payloads before dispatch and retain transp
       messages: [{ role: 'user', content: 'Read synthetic data.', timestamp: 1 }],
     });
     assert.equal(failed.stopReason, 'error');
-    assert.equal(calls, index + 1);
+    assert.equal(calls, index + 3);
     assert.match(failed.errorMessage ?? '', /transport cause: ECONNRESET/);
     assert.match(failed.errorMessage ?? '', /request phase: request/);
   }
