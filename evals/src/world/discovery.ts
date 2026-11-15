@@ -275,7 +275,7 @@ export function discoveryCase(kind: DiscoveryCase) {
                 : `Assess the first reply before task selection. It recommends a concrete useful task, names its result and why it helps, and gives a focused way to start. More choices are appropriate when requested. ${draft || schedule ? 'It uses the real unanswered Cedar question, after checking its thread, instead of a generic capability list or the already answered Willow request.' : 'It gives work the owner can start with supplied text, a file or public information, naming a small input needed. It does not require a new app connection or tell them only to connect and ask again.'} ${kind === 'blocked' ? 'It states that email could not be checked, without treating failed access as an empty inbox or inventing account content.' : kind === 'empty' ? 'It does not invent email or urgent work in the empty mailbox.' : kind === 'rules' ? 'It respects the rule against reading Gmail and makes no claims about mailbox content.' : ''} A connection-only message, broad capability list or only an open-ended question fails.`,
           { failure: 'incomplete' },
         ),
-        ...(draft
+        ...(draft || greeting
           ? [
               check(
                 'selected-reply-is-saved-in-the-right-thread',
@@ -283,16 +283,23 @@ export function discoveryCase(kind: DiscoveryCase) {
                   const drafts = run.apps?.gmail?.drafts() ?? [];
                   return {
                     pass:
-                      drafts.length === 1 &&
-                      drafts[0].threadId === 'cedar' &&
-                      addresses(drafts[0].to).length === 1 &&
-                      addresses(drafts[0].to)[0] === client &&
-                      addresses(drafts[0].cc).length === 0,
+                      (!draft || drafts.length === 1) &&
+                      drafts.every(
+                        (item) =>
+                          item.threadId === 'cedar' &&
+                          addresses(item.to).length === 1 &&
+                          addresses(item.to)[0] === client &&
+                          addresses(item.cc).length === 0,
+                      ),
                     evidence: `${drafts.length} drafts; threads: ${drafts.map((item) => item.threadId).join(', ')}.`,
                   };
                 },
                 { failure: 'incomplete' },
               ),
+            ]
+          : []),
+        ...(draft
+          ? [
               judge(
                 'selected-reply-is-delivered-and-correct',
                 'After the owner selects the offered reply, Nod delivers its full text or shares an accessible file containing it. The reply answers Mira: EUR 2400 covers three screens. Any mention of an extra screen agrees with EUR 400. The saved draft agrees with the delivered text. A promise, task card or statement that a draft exists without inspectable text fails. It does not ask the owner to restate the known task or invent missing terms.',

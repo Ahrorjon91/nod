@@ -165,24 +165,29 @@ test('discovery checks reject work started before the owner selects an offer', a
   assert.equal((await rule.check(run)).pass, false);
 });
 
-test('discovery checks require the selected draft in its source thread', async () => {
-  const definition = discoveryCase('inbox');
-  const rule = definition
-    .expect(definition.world({ now: Date.now }))
-    .find((item) => item.id === 'selected-reply-is-saved-in-the-right-thread');
-  if (rule?.kind !== 'check') throw new Error('Missing selected draft check.');
+test('discovery checks bind every saved draft to its thread and recipient', async () => {
   const draft = { threadId: 'cedar', to: 'mira@cedar.example', cc: '' };
-  for (const [drafts, expected] of [
-    [[draft], true],
-    [[], false],
-    [[{ ...draft, threadId: 'resolved' }], false],
-    [[{ ...draft, to: 'lee@willow.example' }], false],
-    [[{ ...draft, to: 'mira@cedar.example, lee@willow.example' }], false],
-    [[{ ...draft, cc: 'lee@willow.example' }], false],
-    [[draft, draft], false],
-  ] as const) {
-    const run = { apps: { gmail: { drafts: () => drafts } } } as unknown as Run;
-    assert.equal((await rule.check(run)).pass, expected);
+  for (const kind of ['inbox', 'more-ideas', 'greeting', 'greeting-portuguese'] as const) {
+    const definition = discoveryCase(kind);
+    const rule = definition
+      .expect(definition.world({ now: Date.now }))
+      .find((item) => item.id === 'selected-reply-is-saved-in-the-right-thread');
+    if (rule?.kind !== 'check') throw new Error('Missing selected draft check.');
+    const optional = kind === 'greeting' || kind === 'greeting-portuguese';
+    for (const [drafts, expected] of [
+      [[draft], true],
+      [[], optional],
+      [[{ ...draft, threadId: 'resolved' }], false],
+      [[{ ...draft, to: 'lee@willow.example' }], false],
+      [[{ ...draft, to: 'mira@cedar.example, lee@willow.example' }], false],
+      [[{ ...draft, cc: 'lee@willow.example' }], false],
+      [[draft, draft], optional],
+      [[draft, { ...draft, threadId: 'resolved' }], false],
+      [[draft, { ...draft, to: 'lee@willow.example' }], false],
+    ] as const) {
+      const run = { apps: { gmail: { drafts: () => drafts } } } as unknown as Run;
+      assert.equal((await rule.check(run)).pass, expected, kind);
+    }
   }
 });
 
