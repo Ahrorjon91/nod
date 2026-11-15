@@ -163,6 +163,11 @@ export interface ModelConnection {
   models: ModelChoice[];
   managed: boolean;
   keyEnding?: string;
+  issue?: ModelIssue;
+}
+
+export interface ModelIssue {
+  reason: string;
 }
 
 export interface ModelsResponse {

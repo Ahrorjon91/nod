@@ -725,6 +725,7 @@ export function createPiAgent(options: {
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
+        retry: { baseDelayMs: 4000 },
         ...(access?.provider === 'compatible' ? { httpIdleTimeoutMs: localModelSilenceMs } : {}),
       });
       const extensionLoader = new DefaultResourceLoader({

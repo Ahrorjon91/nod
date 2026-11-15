@@ -5925,6 +5925,56 @@ test('OpenAI cache boundaries cover shared instructions and keep task paths outs
   assert.equal(bodies.length, 4);
 });
 
+test('a model request with no response times out for a retry, while a stop stays a cancellation', async (t) => {
+  const { createPiModelBackend, createPiModelRuntime, modelFirstEventMs } =
+    await import('../src/providers/pi/models.ts');
+  const { isRetryableAssistantError } = await import('@earendil-works/pi-ai');
+  const backend = createPiModelBackend({
+    fetch: async () => {
+      throw new Error('No live catalog request is allowed.');
+    },
+  });
+  const definition = (await backend.catalog('openai', 'api_key')).find(
+    ({ choice }) => choice.id === 'gpt-6.1-sol',
+  )!;
+  const { runtime, model } = await createPiModelRuntime({
+    provider: 'openai',
+    method: 'api_key',
+    definition,
+    effort: 'low',
+    read: async () => ({ type: 'api_key', key: 'fixture-key' }),
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const silent = async (stop?: AbortController) => {
+    let sent!: () => void;
+    const requested = new Promise<void>((resolve) => (sent = resolve));
+    const result = runtime.completeSimple(
+      model,
+      { messages: [{ role: 'user', content: 'Synthetic request', timestamp: 1 }] },
+      {
+        signal: stop?.signal,
+        fetch: (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(Object.assign(new Error('Synthetic abort'), { name: 'AbortError' })),
+            );
+            sent();
+          }),
+      },
+    );
+    await requested;
+    if (stop) stop.abort();
+    else t.mock.timers.tick(modelFirstEventMs);
+    return result;
+  };
+  const timedOut = await silent();
+  assert.equal(timedOut.stopReason, 'error');
+  assert.match(timedOut.errorMessage!, /sent no response for 90 seconds, so the request timed out/);
+  assert.equal(isRetryableAssistantError(timedOut), true);
+  const stopped = await silent(new AbortController());
+  assert.equal(stopped.stopReason, 'aborted');
+});
+
 test('Anthropic cache boundaries preserve the shared text, workspace suffix, lifetime and marker budget', async () => {
   const { createPiModelBackend, createPiModelRuntime } =
     await import('../src/providers/pi/models.ts');

@@ -15,9 +15,11 @@ import {
   apiKeyConnectionProviders,
   lightestEffort,
   modelProviderInfo,
+  modelProviderNames,
   modelProviders,
   modelSource,
   repriceUsd,
+  type ModelIssue,
   type ModelSelection,
 } from '../shared/models.ts';
 import type { ProductAnalytics } from '../ports/analytics.ts';
@@ -242,7 +244,13 @@ export interface ApplicationAdapters {
     managed?: ReturnType<typeof managedChannelEnvironment>;
     create(environment: Record<string, string>): MessagingTransport;
   };
-  model: { provider: string; name: string; configured: boolean; reconnect?: boolean };
+  model: {
+    provider: string;
+    name: string;
+    configured: boolean;
+    reconnect?: boolean;
+    issue?: ModelIssue;
+  };
 }
 
 export function modelEnvironment(
@@ -832,6 +840,12 @@ async function initializeApplication(
   const onboardingCurator = adapters.onboardingCurator
     ? ledger.curator(adapters.onboardingCurator)
     : curator;
+  void adapters.models?.setSelectionCheck(() =>
+    onboardingCurator.curate(
+      { task: 'check', instructions: 'Return only {"ok":true}.', input: {}, automatic: false },
+      AbortSignal.timeout(30_000),
+    ),
+  );
   const decisions = adapters.decisions && ledger.decisions(adapters.decisions);
   const review: ModelReview = async (instructions, input, signal, question) => {
     if (question) {
@@ -2049,6 +2063,19 @@ async function initializeApplication(
             },
           }
         : {}),
+      modelAlternative: () => {
+        const view = adapters.models?.view();
+        const other = view?.connections.find(
+          (item) =>
+            item.id !== view.selection?.connectionId &&
+            item.status === 'connected' &&
+            !item.issue &&
+            item.models.length > 0,
+        );
+        return other
+          ? `Your ${modelProviderNames[other.provider]} connection is also set up: you can switch to it in Settings > Models.`
+          : undefined;
+      },
       taskClassification: true,
       observeTurn: (turnId, operation) =>
         analytics
@@ -2716,6 +2743,7 @@ async function initializeApplication(
         model: adapters.model.name,
         llmReady: adapters.model.configured,
         modelReconnect: adapters.model.reconnect === true,
+        ...(adapters.model.issue ? { modelIssue: adapters.model.issue } : {}),
         integrationsReady: adapters.integrations.configured,
       }),
   });

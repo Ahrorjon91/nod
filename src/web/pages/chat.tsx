@@ -2436,6 +2436,13 @@ export function Chat({
               {connectionNotice.text}
             </Notice>
           )}
+          {state.configuration.llmReady && state.configuration.modelIssue && (
+            <Notice kind="info">
+              Your model’s last request failed:{' '}
+              {state.configuration.modelIssue.reason.replace(/(?<![.!?])$/, '.')} Fix it in{' '}
+              <a href="/settings/models">Settings &gt; Models</a>.
+            </Notice>
+          )}
           {spendingPaused && trust?.limit && (
             <Notice kind="info">
               You reached your {money(trust.limit.monthlyUsd)} monthly spending limit. Raise or

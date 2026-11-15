@@ -9982,10 +9982,9 @@ test(
           const presentedFailures: string[] = [];
           presentInterruption = async (_threadId, input) => {
             if (input.kind === 'failed') presentedFailures.push(input.error);
-            return input.kind === 'failed' && input.error.includes('503 Service Unavailable')
-              ? 'Synthetic provider failure.'
-              : '';
+            return 'Synthetic presenter text.';
           };
+          dependencies.modelAlternative = () => 'Synthetic alternative connection.';
           const prefix = 'The model request failed: openrouter / anthropic/fixture-model: ';
           const nestedQuota =
             prefix +
@@ -10285,14 +10284,9 @@ test(
                 )
               ).rows[0].text as string;
               assert.equal(turn.status, 'failed');
-              assert.equal(presentedFailures.at(-1), turn.error);
-              assert.ok(
-                shown.includes(
-                  item.prompt === 'model-unavailable-fixture'
-                    ? 'Synthetic provider failure.'
-                    : turn.error,
-                ),
-              );
+              assert.equal(presentedFailures.length, 0);
+              assert.ok(shown.includes(turn.error));
+              assert.match(shown, /Synthetic alternative connection\./);
               assert.match(shown, /\]\(\/settings\/models\)/);
               assert.ok(turn.error.length <= 2000);
               assert.ok(turn.error.startsWith(prefix));
@@ -10311,6 +10305,7 @@ test(
           } finally {
             for (const item of cases) modelErrors.delete(item.prompt);
             presentInterruption = previousPresenter;
+            delete dependencies.modelAlternative;
           }
         },
       );

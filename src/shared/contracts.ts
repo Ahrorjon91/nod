@@ -1,3 +1,4 @@
+import type { ModelIssue } from './models';
 import type { Presentation } from './presentation';
 import type { TaskSuggestions } from './onboarding';
 import type { TrustBecause } from './trust';
@@ -255,6 +256,7 @@ export interface Configuration {
   model: string;
   llmReady: boolean;
   modelReconnect: boolean;
+  modelIssue?: ModelIssue;
   integrationsReady: boolean;
   conversationResetEnabled: boolean;
 }

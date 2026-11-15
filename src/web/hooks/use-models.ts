@@ -127,6 +127,7 @@ export function modelReady(models: ModelsResponse | null | undefined) {
     (connection) =>
       connection.id === models.selection?.connectionId &&
       connection.status === 'connected' &&
+      !connection.issue &&
       connection.models.some(
         (model) =>
           model.id === models.selection?.modelId && model.efforts.includes(models.selection.effort),

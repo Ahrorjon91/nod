@@ -583,7 +583,9 @@ export function ModelSettings({ onDirtyChange }: { onDirtyChange?(dirty: boolean
       <div className="model-services">
         {providers.map((provider) => {
           const accounts = connections.filter((connection) => connection.provider === provider);
-          const attention = accounts.some((connection) => connection.status !== 'connected');
+          const attention = accounts.some(
+            (connection) => connection.status !== 'connected' || connection.issue,
+          );
           return (
             <div className="model-service" key={provider}>
               <ModelProviderLogo provider={provider} size={24} />
@@ -702,7 +704,9 @@ export function ModelSettings({ onDirtyChange }: { onDirtyChange?(dirty: boolean
                         <ModelConnectionAvatar connection={connection} />
                         <div className="model-connection-identity">
                           <strong>{connectionName(connection, true)}</strong>
-                          <span className={`model-connection-meta ${connection.status}`}>
+                          <span
+                            className={`model-connection-meta ${connection.issue ? 'reconnect' : connection.status}`}
+                          >
                             {connection.managed
                               ? 'Server settings'
                               : connection.method === 'subscription'
@@ -714,10 +718,17 @@ export function ModelSettings({ onDirtyChange }: { onDirtyChange?(dirty: boolean
                                     : 'API key'}
                             {connection.status === 'reconnect'
                               ? ' · Needs attention'
-                              : connection.status === 'loading'
-                                ? ' · Models not loaded'
-                                : ''}
+                              : connection.issue
+                                ? ' · Last request failed'
+                                : connection.status === 'loading'
+                                  ? ' · Models not loaded'
+                                  : ''}
                           </span>
+                          {connection.issue?.reason && (
+                            <span className="model-connection-meta reconnect">
+                              {connection.issue.reason}
+                            </span>
+                          )}
                           {data.selection?.connectionId === connection.id && (
                             <span className="model-connection-selected">Current model</span>
                           )}

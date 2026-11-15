@@ -25,6 +25,7 @@ const untraced = new Set([
   'style',
   'skill',
   'classify',
+  'check',
 ]);
 
 const longCache = 55 * 60_000;
