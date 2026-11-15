@@ -23,6 +23,7 @@ import { authenticatorCode } from '../src/server/authenticator.ts';
 import { transaction } from '../src/server/transaction.ts';
 import { createChannels } from '../src/server/channels.ts';
 import type { AppState, Task } from '../src/shared/contracts.ts';
+import type { WorkUsageResponse } from '../src/shared/models.ts';
 import { mergeMessages } from '../src/web/lib/chat-messages.ts';
 
 function syntheticConfirmation(input: Record<string, unknown>) {
@@ -794,7 +795,7 @@ test(
           const second = await run();
           assert.deepEqual(modelsOf(second), ['gpt-6-luna']);
 
-          const before30 = (await request('GET', '/api/usage/work')).json();
+          const before30 = (await request('GET', '/api/usage/work')).json<WorkUsageResponse>();
           for (const [turnId, model, input] of [
             [direct.json().turnId, 'gpt-6.1-sol', 1000],
             [event, 'gpt-6-luna', 2000],
@@ -811,7 +812,7 @@ test(
                 { category: 'agent', model, inputTokens: input, outputTokens: 0 },
               ],
             );
-          const after30 = (await request('GET', '/api/usage/work')).json();
+          const after30 = (await request('GET', '/api/usage/work')).json<WorkUsageResponse>();
           const grew = (now?: { input: number }, then?: { input: number }) =>
             (now?.input ?? 0) - (then?.input ?? 0);
           assert.equal(grew(after30.lanes.chat, before30.lanes.chat), 1000);
@@ -819,6 +820,12 @@ test(
           assert.equal(grew(after30.lanes.schedule, before30.lanes.schedule), 0);
           assert.equal(grew(after30.schedules[schedule.id], before30.schedules[schedule.id]), 4000);
           assert.equal(grew(after30.tasks[task.id], before30.tasks[task.id]), 8000);
+          const onLuna = (usage: WorkUsageResponse, kind: string) =>
+            usage.own
+              .filter((entry) => entry.kind === kind && entry.model.modelId === 'gpt-6-luna')
+              .reduce((sum, entry) => sum + entry.input, 0);
+          assert.equal(onLuna(after30, 'schedule') - onLuna(before30, 'schedule'), 4000);
+          assert.equal(onLuna(after30, 'chat') - onLuna(before30, 'chat'), 8000);
 
           const back = await put(`/api/tasks/${task.id}/model`, { model: null });
           assert.equal(back.statusCode, 200, back.body);

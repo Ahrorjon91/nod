@@ -204,18 +204,10 @@ export function ModelSentences() {
       { usage: work.lanes.chat, model: data.selection },
       { usage: work.lanes.schedule, model: routeModel(data, 'schedule')?.selection },
       { usage: work.lanes.background, model: routeModel(data, 'background')?.selection },
-      ...(schedules.data ?? [])
-        .filter((schedule) => schedule.model)
-        .map((schedule) => ({
-          usage: work.schedules[schedule.id],
-          model: routeModel(data, 'schedule', { schedule: schedule.model })?.selection,
-        })),
-      ...(tasks.data ?? [])
-        .filter((task) => task.work && task.model)
-        .map((task) => ({
-          usage: work.tasks[task.id],
-          model: routeModel(data, task.work!, { task: task.model })?.selection,
-        })),
+      ...(work.own ?? []).map(({ kind, model, ...usage }) => ({
+        usage,
+        model: routeModel(data, kind, { task: model })?.selection,
+      })),
     ]);
   return (
     <section className="model-current-section" aria-label="Your models">
@@ -297,7 +289,9 @@ export function WorkModel({
       ? 'its own choice'
       : current.follows === 'schedule'
         ? 'same as its schedule'
-        : `same as ${kindNames[kind]}`;
+        : current.follows === 'light'
+          ? `same as ${kindNames[kind]}, the light model`
+          : `same as ${kindNames[kind]}`;
   return (
     <div className="work-model">
       <span className="work-model-label">Model</span>

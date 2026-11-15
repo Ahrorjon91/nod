@@ -9,7 +9,7 @@ import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import type { Agent, AgentSessionOptions } from '../ports/agent.ts';
 import type { ExecutionScope } from '../shared/execution.ts';
-import type { WorkKind, WorkUsage } from '../shared/models.ts';
+import type { ModelSelection, WorkKind, WorkUsage, WorkUsageResponse } from '../shared/models.ts';
 import type { ProviderUsageEvent, UsageTelemetry } from '../ports/provider-usage.ts';
 import type { MemoryCurator } from '../ports/memory-curator.ts';
 import type { DecisionModel } from '../ports/decisions.ts';
@@ -814,20 +814,28 @@ export function createLedger({
 
   async function workUsage() {
     const { rows } = await pool.query<
-      WorkUsage & { kind: WorkKind; scheduleId: string | null; taskId: string | null; own: boolean }
+      WorkUsage & {
+        kind: WorkKind;
+        scheduleId: string | null;
+        taskId: string | null;
+        model: ModelSelection | null;
+      }
     >(
       `WITH recent AS (
          SELECT m.owner_id,m.cost_usd,m.details,u.session_id,u.thread_id FROM model_usage m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
          WHERE m.owner_id=$1 AND m.created_at>=now()-interval '30 days'
-       ), sessions AS (
+       ), origins AS (
          SELECT x.session_id,${workKindSql('x')} AS kind,work_schedule.id::text AS schedule_id,
-           work_task.id::text AS task_id,
-           (work_task.model IS NOT NULL OR work_schedule.model IS NOT NULL) AS own
+           work_task.id::text AS task_id,work_task.model AS task_model,work_schedule.model AS schedule_model
          FROM (SELECT DISTINCT owner_id,session_id,thread_id FROM recent) x ${workOriginSql('x')}
+       ), sessions AS (
+         SELECT session_id,kind,schedule_id,task_id,
+           COALESCE(task_model,CASE WHEN kind='schedule' THEN schedule_model END) AS model
+         FROM origins
        )
-       SELECT x.kind,x.schedule_id AS "scheduleId",x.task_id AS "taskId",x.own,${usageColumns}
+       SELECT x.kind,x.schedule_id AS "scheduleId",x.task_id AS "taskId",x.model,${usageColumns}
        FROM recent m JOIN sessions x ON x.session_id=m.session_id
-       GROUP BY x.kind,x.schedule_id,x.task_id,x.own`,
+       GROUP BY x.kind,x.schedule_id,x.task_id,x.model`,
       [ownerId],
     );
     const empty = (): WorkUsage => ({
@@ -858,12 +866,17 @@ export function createLedger({
     };
     const schedules: Record<string, WorkUsage> = {};
     const tasks: Record<string, WorkUsage> = {};
-    for (const { kind, scheduleId, taskId, own, ...usage } of rows) {
-      if (!own) add(lanes[kind], usage);
+    const own = new Map<string, WorkUsageResponse['own'][number]>();
+    for (const { kind, scheduleId, taskId, model, ...usage } of rows) {
+      if (model) {
+        const key = JSON.stringify([kind, model.connectionId, model.modelId, model.effort]);
+        if (!own.has(key)) own.set(key, { ...empty(), kind, model });
+        add(own.get(key)!, usage);
+      } else add(lanes[kind], usage);
       if (scheduleId) add((schedules[scheduleId] ??= empty()), usage);
       if (taskId) add((tasks[taskId] ??= empty()), usage);
     }
-    return { lanes, schedules, tasks };
+    return { lanes, schedules, tasks, own: [...own.values()] };
   }
 
   async function recentTurnCost(turnId?: string) {
