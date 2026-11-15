@@ -1279,7 +1279,7 @@ async function failTurn(
         turnId,
         ownerId,
         turn.thread_id,
-        `failure:${turnId}`,
+        `${modelFailure ? 'model-failure' : 'failure'}:${turnId}`,
         turn.latest_user_message_id,
         Boolean(turn.task_id || work),
         error,
@@ -1291,7 +1291,7 @@ async function failTurn(
         { threadId: turn.thread_id, turnId, taskMessageId: turn.taskMessageId },
         message.trim(),
         [],
-        `failure:${turnId}`,
+        `${modelFailure ? 'model-failure' : 'failure'}:${turnId}`,
       );
   }, pool);
   return true;
@@ -1976,6 +1976,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       ...(checkIn ? { checkIn } : {}),
       ...(limit ? { spendingLimitReached: { monthlyUsd: limit.monthlyUsd } } : {}),
       currentMessageId: loaded.sourceMessageId ?? undefined,
+      automatic:
+        !loaded.sourceMessageId &&
+        (turn.source !== 'resume' || String(turn.source_id).startsWith('task-check:')),
       ...(loaded.audioCaption !== undefined ? { audioCaption: loaded.audioCaption } : {}),
       replyTo: loaded.replyTo && describe(loaded.replyTo),
       history: loaded.history.map(describe),

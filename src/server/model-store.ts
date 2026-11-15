@@ -15,12 +15,10 @@ export interface ModelRecord {
   models: ModelDefinition[];
   managed: boolean;
   credential?: ModelCredential;
-  requestFailure?: {
-    credentialTag: string;
-    reason: string;
-    failures: number;
-    retryAt: number;
-  } | null;
+  requestFailures?: Record<
+    string,
+    { credentialTag: string; reason: string; failures: number; retryAt: number }
+  >;
 }
 
 export interface ModelState {
@@ -51,7 +49,7 @@ export function createDatabaseModelStore(options: {
   async function read(client: Pool | PoolClient = database): Promise<ModelState> {
     const connections = (
       await client.query<ModelRecord>(
-        'SELECT id,provider,method,label,status,models,managed,request_failure AS "requestFailure" FROM model_connections WHERE owner_id=$1 ORDER BY created_at,id',
+        'SELECT id,provider,method,label,status,models,managed,request_failures AS "requestFailures" FROM model_connections WHERE owner_id=$1 ORDER BY created_at,id',
         [ownerId],
       )
     ).rows;
@@ -93,7 +91,7 @@ export function createDatabaseModelStore(options: {
           status text NOT NULL DEFAULT 'connected',models jsonb NOT NULL,managed boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now()
         ); CREATE INDEX IF NOT EXISTS model_connections_owner ON model_connections(owner_id);
         ALTER TABLE model_connections DROP COLUMN IF EXISTS request_pauses;
-        ALTER TABLE model_connections ADD COLUMN IF NOT EXISTS request_failure jsonb;
+        ALTER TABLE model_connections ADD COLUMN IF NOT EXISTS request_failures jsonb NOT NULL DEFAULT '{}';
         CREATE TABLE IF NOT EXISTS model_settings(owner_id text PRIMARY KEY,selection jsonb,selection_set boolean NOT NULL DEFAULT false);
         ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS host_id uuid NOT NULL DEFAULT gen_random_uuid();
         ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS routes jsonb NOT NULL DEFAULT '{}';`);
@@ -133,8 +131,8 @@ export function createDatabaseModelStore(options: {
           )
             await vault.put(row.id, JSON.stringify(row.credential), client);
           const saved = await client.query(
-            `INSERT INTO model_connections(id,owner_id,provider,method,label,models,managed,status,request_failure) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-             ON CONFLICT(id) DO UPDATE SET models=excluded.models,label=excluded.label,status=excluded.status,request_failure=excluded.request_failure
+            `INSERT INTO model_connections(id,owner_id,provider,method,label,models,managed,status,request_failures) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT(id) DO UPDATE SET models=excluded.models,label=excluded.label,status=excluded.status,request_failures=excluded.request_failures
              WHERE model_connections.owner_id=excluded.owner_id RETURNING id`,
             [
               row.id,
@@ -145,7 +143,7 @@ export function createDatabaseModelStore(options: {
               JSON.stringify(row.models),
               row.managed,
               row.status,
-              row.requestFailure ? JSON.stringify(row.requestFailure) : null,
+              JSON.stringify(row.requestFailures ?? {}),
             ],
           );
           if (!saved.rowCount) throw new Error('This model connection is unavailable.');

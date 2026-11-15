@@ -289,6 +289,7 @@ export function createLedger({
 }) {
   const activeTurn = new AsyncLocalStorage<{ id: string; automatic: boolean }>();
   const pastLimit = new AsyncLocalStorage<true>();
+  const ownerReply = new AsyncLocalStorage<true>();
   const preparation = new AsyncLocalStorage<{ id: string; closed?: boolean }>();
   let preparationDeclined: { month: number; maximumUsd: number } | undefined;
   const activeExecution = new AsyncLocalStorage<
@@ -569,7 +570,9 @@ export function createLedger({
         if (await limitReached()) throw new Error(spendingLimitReached);
         request = {
           ...request,
-          automatic: request.automatic ?? activeTurn.getStore()?.automatic ?? true,
+          automatic:
+            request.automatic ??
+            (!ownerReply.getStore() && (activeTurn.getStore()?.automatic ?? true)),
         };
         try {
           return await base.curate(request, signal, (value) => {
@@ -1349,6 +1352,7 @@ export function createLedger({
       activeTurn.run({ id: turnId, automatic }, () =>
         overLimit ? pastLimit.run(true, run) : run(),
       ),
+    forOwner: <T>(run: () => T) => ownerReply.run(true, run),
     withExecution: <T>(
       execution: ExecutionScope & Pick<AgentSessionOptions, 'onEvent'>,
       run: () => T,

@@ -1103,6 +1103,8 @@ async function initializeApplication(
       ? {
           validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice),
           workPricing: (own: ModelSelection | null) => adapters.models!.pricing('schedule', own),
+          modelReady: (model: ModelSelection | null) =>
+            adapters.models!.automaticRequestsAllowed({ kind: 'schedule', schedule: model }),
         }
       : {}),
     watchable: async (connectionIds) => integrations.watchable(connectionIds),
@@ -1673,7 +1675,7 @@ async function initializeApplication(
         await personal.validateReview(action.slice('NOD_'.length), args, expectedRevision, client);
       } else await integrations.prepare(ownerId, action, args, undefined, undefined, false, client);
     },
-    (reply) => trust.answer(reply),
+    (reply) => ledger.forOwner(() => trust.answer(reply)),
     communication.describe,
     captureAnalytics,
   );
@@ -1961,7 +1963,7 @@ async function initializeApplication(
     modelAvailable: async () =>
       !(await ledger.preparationLimit()).reached &&
       (adapters.models
-        ? await adapters.models.automaticRequestsAllowed('background')
+        ? await adapters.models.automaticRequestsAllowed({ kind: 'background' }, true)
         : adapters.model.configured),
     redact: createTextRedactor(secrets),
     sources: (client) => observations.sources(client),
@@ -2139,7 +2141,7 @@ async function initializeApplication(
                 .runTurn({ ...context, runtimeHost: desktopMode ? 'desktop' : 'server' })
                 .finally(() => proactivity.release(context.turnId)),
             Boolean(context.spendingLimitReached),
-            !context.currentMessageId,
+            Boolean(context.automatic),
           );
         return automaticWork ? ledger.withPreparation(context.turnId, run) : run();
       },
@@ -2907,7 +2909,8 @@ async function initializeApplication(
       ...(channelSettings ? { pair: channelSettings.pair } : {}),
       transport: messaging,
       isRetirableScheduleConfirmation: approvals.isRetirableScheduleConfirmation,
-      classifyRetiredReply: trust.classifyRetiredReply,
+      classifyRetiredReply: (reply, expired) =>
+        ledger.forOwner(() => trust.classifyRetiredReply(reply, expired)),
       acceptVerification: (text, input) => chatVerification.accept(text, input),
       reacted: (messageId, reaction) => reactToMessage(messageId, reaction),
       activeThread: (client) => lockThread(client),

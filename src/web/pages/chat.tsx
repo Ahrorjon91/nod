@@ -701,7 +701,7 @@ export function Chat({
   const beforeLast = allMessages.at(-2);
   const failedRequest =
     lastMessage?.role === 'assistant' &&
-    lastMessage.streamId?.startsWith('failure:') &&
+    lastMessage.streamId?.startsWith('model-failure:') &&
     beforeLast?.role === 'user' &&
     !beforeLast.attachments.length &&
     !beforeLast.replyToMessageId &&

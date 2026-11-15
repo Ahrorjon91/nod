@@ -5,6 +5,8 @@ import {
   getSystemMessageText,
   hasApi,
   createAssistantMessageEventStream,
+  isContextOverflow,
+  isRetryableAssistantError,
   type Api,
   type AssistantMessage,
   type Context,
@@ -1153,11 +1155,7 @@ export async function createPiModelRuntime(
     let completeRequest: ((error?: string) => Promise<void>) | undefined;
     let settleBudget: ((spentUsd: number | null) => Promise<void>) | undefined;
     const silence = new AbortController();
-    const silenceTimer =
-      access.provider === 'compatible'
-        ? undefined
-        : setTimeout(() => silence.abort(), modelFirstEventMs);
-    silenceTimer?.unref?.();
+    let silenceTimer: ReturnType<typeof setTimeout> | undefined;
     const heard = () => clearTimeout(silenceTimer);
     const guardedFetch =
       access.provider === 'compatible' ||
@@ -1337,6 +1335,11 @@ export async function createPiModelRuntime(
             : null;
         });
         phase = 'payload';
+        if (access.provider !== 'compatible') {
+          heard();
+          silenceTimer = setTimeout(() => silence.abort(), modelFirstEventMs);
+          silenceTimer.unref?.();
+        }
         return prepared;
       },
     });
@@ -1367,7 +1370,15 @@ export async function createPiModelRuntime(
         }
         if ((event.type === 'done' || event.type === 'error') && phase !== 'prepare') {
           const message = event.type === 'done' ? event.message : event.error;
-          if (message.stopReason !== 'aborted' && !options?.signal?.aborted)
+          if (
+            message.stopReason !== 'aborted' &&
+            !options?.signal?.aborted &&
+            (message.stopReason !== 'error' ||
+              !(
+                isRetryableAssistantError(message) ||
+                isContextOverflow(message, target.contextWindow)
+              ))
+          )
             await completeRequest?.(
               message.stopReason === 'error' ? message.errorMessage : undefined,
             );

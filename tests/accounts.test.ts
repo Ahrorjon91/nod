@@ -3105,7 +3105,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     await assert.rejects(owner.resolve());
   });
 
-  test('a failed model request pauses automatic requests on its connection, tries again after a growing wait and clears on success', async (t) => {
+  test('a model request failure that Pi does not retry pauses automatic requests to that model, tries again after a growing wait and clears on success', async (t) => {
     const f = await fixture(t);
     const { createPiMemoryCurator } = await import('../src/providers/pi/memory-curator.ts');
     const { createPiModelRuntime } = await import('../src/providers/pi/models.ts');
@@ -3159,15 +3159,21 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       input: {},
     };
     t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const first = service.view().selection!;
+    const definition = definitions.find((item) => item.choice.id !== first.modelId)!;
+    const second = {
+      connectionId,
+      modelId: definition.choice.id,
+      effort: lightestEffort(definition.choice.efforts),
+    };
+    const allowed = (schedule = first) =>
+      service.automaticRequestsAllowed({ kind: 'schedule', schedule });
 
     assert.equal((await ask()).stopReason, 'error');
     assert.equal(calls, 1);
-    assert.match(service.view().connections[0]!.issue!.reason, /Synthetic outage/);
-    assert.match(service.current.issue!.reason, /Synthetic outage/);
-    assert.equal(await service.automaticRequestsAllowed(), false);
-    await assert.rejects(curator.curate(request), /Automatic requests are paused/);
-    assert.equal(calls, 1);
-    assert.equal(await other.automaticRequestsAllowed(), true);
+    assert.equal(service.view().connections[0]!.issue, undefined);
+    assert.equal(await allowed(), true);
+
     reply = () =>
       Response.json(
         { error: { code: 402, message: 'This request requires more credits.' } },
@@ -3179,40 +3185,65 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       service.view().connections[0]!.issue!.reason,
       /HTTP 402; This request requires more credits\./,
     );
+    assert.match(service.current.issue!.reason, /requires more credits/);
+    assert.equal(await allowed(), false);
+    assert.equal(await allowed(second), true);
+    await assert.rejects(curator.curate(request), /Automatic requests to this model are paused/);
+    assert.equal(calls, 2);
+    const ledger = createLedger({
+      pool: { query: async () => ({ rows: [] }) } as never,
+      ownerId: 'fixture-failing-owner',
+    });
+    await assert.rejects(ledger.curator(curator).curate(request), /paused/);
+    assert.equal(calls, 2);
+    await assert.rejects(
+      ledger.forOwner(() => ledger.curator(curator).curate(request)),
+      /requires more credits/,
+    );
+    assert.equal(calls, 3);
+    assert.equal(await allowed(), false);
+    assert.equal(await other.automaticRequestsAllowed({ kind: 'background' }, true), true);
     assert.doesNotMatch(
       JSON.stringify(service.view()),
-      /credentialTag|requestFailure|fixture-failing-key/,
+      /credentialTag|requestFailures|fixture-failing-key/,
     );
-    assert.equal(checks, 1);
-    const selected = service.view().selection!;
-    const alternative = definitions.find((item) => item.choice.id !== selected.modelId)!;
-    await service.select({
-      connectionId,
-      modelId: alternative.choice.id,
-      effort: lightestEffort(alternative.choice.efforts),
-    });
-    assert.equal(checks, 2);
-    await service.select(service.view().selection!);
-    assert.equal(checks, 3);
 
     await service.close();
     service = await f.create('fixture-failing-owner', backend);
     service.setRequestBudget(async () => async () => {});
-    assert.equal(await service.automaticRequestsAllowed(), false);
+    await service.setSelectionCheck(async () => {
+      checks++;
+    });
+    assert.equal(await allowed(), false);
     t.mock.timers.tick(120_001);
-    assert.equal(await service.automaticRequestsAllowed(), true);
+    assert.equal(await allowed(), true);
     await assert.rejects(curator.curate(request), /requires more credits/);
-    assert.equal(calls, 3);
-    t.mock.timers.tick(120_001);
-    assert.equal(await service.automaticRequestsAllowed(), false);
-    t.mock.timers.tick(240_000);
-    assert.equal(await service.automaticRequestsAllowed(), true);
-    reply = healthy;
-    assert.deepEqual(await curator.curate(request), { ready: true });
     assert.equal(calls, 4);
+    t.mock.timers.tick(120_001);
+    assert.equal(await allowed(), false);
+    t.mock.timers.tick(240_000);
+    assert.equal(await allowed(), true);
+    await assert.rejects(curator.curate(request), /requires more credits/);
+    assert.equal(calls, 5);
+    assert.equal(await allowed(), false);
+
+    assert.equal(checks, 2);
+    await service.select(second);
+    assert.equal(checks, 3);
+    assert.equal(service.current.issue, undefined);
+    reply = healthy;
+    assert.equal((await ask()).stopReason, 'stop');
+    assert.equal(calls, 6);
+    assert.equal(await allowed(), true);
+    assert.match(service.view().connections[0]!.issue!.reason, /requires more credits/);
+    await service.select(first);
+    assert.equal(checks, 4);
+    await service.select(first);
+    assert.equal(checks, 5);
+    assert.deepEqual(await curator.curate(request), { ready: true });
+    assert.equal(calls, 7);
     assert.equal(service.view().connections[0]!.issue, undefined);
     assert.equal(service.current.issue, undefined);
-    assert.equal(await service.automaticRequestsAllowed(), true);
   });
 
   test('model setup chooses capable defaults, preserves explicit choices and requires valid cloud accounts', async (t) => {
@@ -3398,7 +3429,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
         .choice.id,
       'gpt-6-luna',
     );
-    assert.equal(await owner.automaticRequestsAllowed('background'), true);
+    assert.equal(await owner.automaticRequestsAllowed({ kind: 'background' }, true), true);
 
     const pinned = { ...main, effort: 'low' as const };
     assert.deepEqual(owner.workModel({ kind: 'background', task: pinned }), {
@@ -3433,7 +3464,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     assert.deepEqual(owner.workModel({ kind: 'background' }), { selection: main, follows: 'chat' });
     assert.throws(() => owner.workModel({ kind: 'schedule' }), /gpt-6-luna/);
     assert.throws(() => owner.workModel({ kind: 'chat', task: light }), /gpt-6-luna/);
-    assert.equal(await owner.automaticRequestsAllowed('background'), true);
+    assert.equal(await owner.automaticRequestsAllowed({ kind: 'background' }, true), true);
     listed = ['gpt-6.1-sol', 'gpt-6-luna'];
     await owner.refreshCatalog(connectionId);
 

@@ -47,6 +47,7 @@ test(
     };
     let failAfterTask = false;
     const watched = new Map<string, string>();
+    let modelReady = true;
     const personal = createPersonalService({
       pool: db.pool,
       ownerId: 'local-development',
@@ -55,6 +56,7 @@ test(
       watchable: async (ids) => ids.every((id) => watched.has(id)),
       watchState: async (ids) =>
         ids.every((id) => watched.has(id)) ? ids.map((id) => watched.get(id)).join() : null,
+      modelReady: async () => modelReady,
       enqueueTurn: async (...args) => {
         assert.ok(args[1]?.client);
         const id = await thread.enqueueTurn(...args);
@@ -1103,6 +1105,35 @@ test(
           await personal.manage('schedule_update', { id: schedule.id, watch: null });
           assert.equal((await fire()).length, 5);
           await finish();
+          await request('DELETE', `/api/schedules/${schedule.id}`);
+          clock = before;
+        },
+      );
+      await t.test(
+        'a recurring schedule skips fires while its model is paused and Run now still runs',
+        async () => {
+          const before = clock;
+          const schedule = await create({ cron: '*/15 * * * *' });
+          const fire = async () => {
+            const job = await jobFor(schedule.id);
+            clock = new Date(job.data.scheduledFor);
+            await deliver([job]);
+            return (await runs(schedule.id)).length;
+          };
+          modelReady = false;
+          try {
+            assert.equal(await fire(), 0);
+            assert.equal(await fire(), 0);
+            const manual = await runNow(await saved(schedule.id));
+            assert.equal(manual.statusCode, 200, manual.body);
+            assert.equal((await runs(schedule.id)).length, 1);
+            await db.pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [
+              manual.json().turnId,
+            ]);
+          } finally {
+            modelReady = true;
+          }
+          assert.equal(await fire(), 2);
           await request('DELETE', `/api/schedules/${schedule.id}`);
           clock = before;
         },

@@ -2881,6 +2881,28 @@ test(
             background: true,
           });
           await completed(ownerResume, 'scheduled', true, 'reply');
+          const signedIn = await thread.enqueueTurn('Synthetic analytics sign-in continuation', {
+            source: 'resume',
+            sourceId: `credentials:${schedule}`,
+            sessionId: schedule,
+            parentTurnId: schedule,
+            background: true,
+          });
+          await completed(signedIn, 'scheduled', false, 'reply');
+          const taskCheck = await thread.enqueueTurn('Synthetic analytics planned check', {
+            source: 'resume',
+            sourceId: `task-check:${randomUUID()}:1`,
+            sessionId: schedule,
+            parentTurnId: schedule,
+            background: true,
+          });
+          await completed(taskCheck, 'scheduled', false, 'reply');
+          assert.deepEqual(
+            [requested.turnId, schedule, task, answer.turnId, signedIn, taskCheck].map(
+              (id) => ran(id)?.automatic,
+            ),
+            [false, true, true, false, false, true],
+          );
           const inspect = inspectObserver;
           try {
             inspectObserver = async (context) => {
@@ -10267,7 +10289,7 @@ test(
                   (
                     await db.pool.query(
                       "SELECT 1 FROM messages WHERE turn_id=$1 AND role='assistant' AND stream_id=$2",
-                      [submitted.turnId, `failure:${submitted.turnId}`],
+                      [submitted.turnId, `model-failure:${submitted.turnId}`],
                     )
                   ).rowCount,
                 ),
@@ -10280,7 +10302,7 @@ test(
               const shown = (
                 await db.pool.query(
                   "SELECT text FROM messages WHERE turn_id=$1 AND role='assistant' AND stream_id=$2",
-                  [submitted.turnId, `failure:${submitted.turnId}`],
+                  [submitted.turnId, `model-failure:${submitted.turnId}`],
                 )
               ).rows[0].text as string;
               assert.equal(turn.status, 'failed');

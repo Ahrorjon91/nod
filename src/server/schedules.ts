@@ -105,6 +105,7 @@ export interface ScheduleDependencies {
   sessionCosts?(sessionIds: string[]): Promise<Record<string, number | null>>;
   watchable?(connectionIds: string[]): Promise<boolean>;
   watchState?(connectionIds: string[]): Promise<string | null>;
+  modelReady?(model: ModelSelection | null): Promise<boolean>;
   recentTurnCost?(turnId?: string): Promise<number | null>;
   validateModel?(choice: ModelSelection): ModelSelection;
   sessionUsage?(sessionIds: string[]): Promise<Record<string, WorkUsage>>;
@@ -428,8 +429,8 @@ export function createSchedules(dependencies: ScheduleDependencies) {
   async function dispatch(job: Job<ScheduleJob>) {
     job.signal.throwIfAborted();
     const watched = (
-      await pool.query<Pick<ScheduleRow, 'watch' | 'kind'>>(
-        'SELECT watch,kind FROM schedules WHERE id=$1 AND owner_id=$2',
+      await pool.query<Pick<ScheduleRow, 'watch' | 'kind' | 'model'>>(
+        'SELECT watch,kind,model FROM schedules WHERE id=$1 AND owner_id=$2',
         [job.data.scheduleId, ownerId],
       )
     ).rows[0];
@@ -437,6 +438,8 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       watched?.kind === 'recurring' && watched.watch?.length
         ? await dependencies.watchState?.(watched.watch).catch(() => null)
         : null;
+    const paused =
+      watched?.kind === 'recurring' && !(await (dependencies.modelReady?.(watched.model) ?? true));
     job.signal.throwIfAborted();
     const accepted = await transaction(async (client) => {
       const row = (
@@ -472,7 +475,7 @@ export function createSchedules(dependencies: ScheduleDependencies) {
           nextOccurrence(row, new Date(Math.max(now().getTime(), row.nextRun!.getTime()))),
         );
       }
-      if (busy) return true;
+      if (busy || paused) return true;
       const unchanged = marker ? `${row.revision}:${marker}` : null;
       if (unchanged) {
         if (

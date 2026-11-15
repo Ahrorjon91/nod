@@ -5925,7 +5925,7 @@ test('OpenAI cache boundaries cover shared instructions and keep task paths outs
   assert.equal(bodies.length, 4);
 });
 
-test('a model request with no response times out for a retry, while a stop stays a cancellation', async (t) => {
+test('a model request with no response after it is sent times out for a retry, while a stop stays a cancellation', async (t) => {
   const { createPiModelBackend, createPiModelRuntime, modelFirstEventMs } =
     await import('../src/providers/pi/models.ts');
   const { isRetryableAssistantError } = await import('@earendil-works/pi-ai');
@@ -5945,7 +5945,9 @@ test('a model request with no response times out for a retry, while a stop stays
     read: async () => ({ type: 'api_key', key: 'fixture-key' }),
   });
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const silent = async (stop?: AbortController) => {
+  let abortedAtSend: boolean | undefined;
+  const silent = async (stop?: AbortController, slowPreparation = false) => {
+    abortedAtSend = undefined;
     let sent!: () => void;
     const requested = new Promise<void>((resolve) => (sent = resolve));
     const result = runtime.completeSimple(
@@ -5953,16 +5955,21 @@ test('a model request with no response times out for a retry, while a stop stays
       { messages: [{ role: 'user', content: 'Synthetic request', timestamp: 1 }] },
       {
         signal: stop?.signal,
+        ...(slowPreparation
+          ? { onPayload: async () => void t.mock.timers.tick(modelFirstEventMs) }
+          : {}),
         fetch: (_input, init) =>
           new Promise<Response>((_resolve, reject) => {
-            init?.signal?.addEventListener('abort', () =>
-              reject(Object.assign(new Error('Synthetic abort'), { name: 'AbortError' })),
-            );
+            const abort = () =>
+              reject(Object.assign(new Error('Synthetic abort'), { name: 'AbortError' }));
+            abortedAtSend = init?.signal?.aborted;
+            if (abortedAtSend) abort();
+            init?.signal?.addEventListener('abort', abort);
             sent();
           }),
       },
     );
-    await requested;
+    await Promise.race([requested, result]);
     if (stop) stop.abort();
     else t.mock.timers.tick(modelFirstEventMs);
     return result;
@@ -5971,6 +5978,9 @@ test('a model request with no response times out for a retry, while a stop stays
   assert.equal(timedOut.stopReason, 'error');
   assert.match(timedOut.errorMessage!, /sent no response for 90 seconds, so the request timed out/);
   assert.equal(isRetryableAssistantError(timedOut), true);
+  const slow = await silent(undefined, true);
+  assert.equal(abortedAtSend, false);
+  assert.match(slow.errorMessage!, /sent no response for 90 seconds/);
   const stopped = await silent(new AbortController());
   assert.equal(stopped.stopReason, 'aborted');
 });
