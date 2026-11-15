@@ -25,6 +25,7 @@ const untraced = new Set([
   'style',
   'skill',
   'classify',
+  'check',
 ]);
 
 const longCache = 55 * 60_000;
@@ -133,6 +134,7 @@ export function createPiMemoryCurator(options: {
     },
     async curate({ task, instructions, input, images, automatic = true }, signal, report) {
       signal?.throwIfAborted();
+      const bounded = task === 'classify' || task === 'attention' || task === 'check';
       if (options.resolve) loaded = undefined;
       loaded ??= load(automatic).catch((error) => {
         loaded = undefined;
@@ -142,7 +144,9 @@ export function createPiMemoryCurator(options: {
       const sessionId = ['opencode', 'opencode-go'].includes(model.provider)
         ? crypto.randomUUID()
         : undefined;
+      let attempt = 0;
       const complete = async () => {
+        attempt++;
         const context: Context = {
           systemPrompt: instructions,
           messages: [
@@ -170,18 +174,19 @@ export function createPiMemoryCurator(options: {
                 }
               : {}),
             signal: AbortSignal.any([
-              AbortSignal.timeout(task === 'classify' ? 10_000 : 45_000),
+              AbortSignal.timeout(bounded ? 10_000 : 45_000),
               ...(signal ? [signal] : []),
             ]),
-            maxTokens: task === 'classify' ? 512 : 8192,
+            maxTokens: bounded ? 512 : 8192,
             ...(sessionId ? { sessionId } : {}),
-            ...(task === 'classify' ? { maxRetries: 0, timeoutMs: 10_000 } : {}),
+            ...(bounded ? { maxRetries: 0, timeoutMs: 10_000 } : {}),
             reasoning: effort === 'off' ? undefined : effort,
           });
         } finally {
           const metrics = piUsageMetrics(reply?.usage);
           report?.({
             id: crypto.randomUUID(),
+            attempt,
             provider: reply?.provider ?? model.provider,
             model: reply?.model ?? model.id,
             durationMs: performance.now() - started,
@@ -209,7 +214,7 @@ export function createPiMemoryCurator(options: {
       };
       const reply = await retryAssistantCall(
         complete,
-        { enabled: task !== 'vision' && task !== 'classify', maxRetries: 2, baseDelayMs: 250 },
+        { enabled: task !== 'vision' && !bounded, maxRetries: 2, baseDelayMs: 250 },
         signal,
       );
       if (
@@ -220,11 +225,13 @@ export function createPiMemoryCurator(options: {
         const label =
           task === 'vision'
             ? 'The image model is unavailable.'
-            : task === 'classify'
+            : task === 'classify' || task === 'attention'
               ? 'The classification model is unavailable.'
               : task === 'review' || task === 'access'
                 ? 'The action review model is unavailable.'
-                : 'The memory model is unavailable.';
+                : task === 'check'
+                  ? 'The selected model is unavailable.'
+                  : 'The memory model is unavailable.';
         const detail =
           reply.stopReason === 'error' && reply.errorMessage
             ? ` The provider said: ${reply.errorMessage.trim().slice(0, 300)}`

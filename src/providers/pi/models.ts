@@ -5,8 +5,11 @@ import {
   getSystemMessageText,
   hasApi,
   createAssistantMessageEventStream,
+  isContextOverflow,
+  isRetryableAssistantError,
   type Api,
   type AssistantMessage,
+  type Context,
   type Model,
   type CredentialStore,
 } from '@earendil-works/pi-ai';
@@ -37,6 +40,7 @@ import type { ProviderUsageEvent } from '../../ports/provider-usage.ts';
 import { piUsageMetrics } from './usage.ts';
 import { audioUsage, nativeAudioRequest, readsNativeAudio } from './audio.ts';
 import { completeAssistantMessage } from './checkpoint.ts';
+import { modelContext } from './context.ts';
 import { modelServiceError } from '../model-error.ts';
 import {
   antLingModel,
@@ -48,6 +52,7 @@ import {
 } from './model-catalog.ts';
 
 export const localModelSilenceMs = 30 * 60_000;
+export const modelFirstEventMs = 90_000;
 
 function supportedModel(model: Model<Api>): Model<Api> {
   if (model.provider === 'groq' && model.id.startsWith('qwen/'))
@@ -62,65 +67,6 @@ function supportedModel(model: Model<Api>): Model<Api> {
 const resource = 'https://api.openai.com/v1';
 const issuer = 'https://auth.openai.com';
 
-export function modelContextBudget(model: {
-  provider: string;
-  id: string;
-  contextWindow: number;
-  maxTokens: number;
-}) {
-  const routed =
-    model.provider === 'openrouter' && ['openrouter/free', 'openrouter/auto'].includes(model.id);
-  const window = routed ? Math.min(8192, model.contextWindow) : model.contextWindow;
-  const compact = window < 65_536;
-  return {
-    window,
-    compact,
-    margin: Math.min(2048, Math.max(128, Math.floor(window / 16))),
-    output: compact ? Math.min(model.maxTokens, Math.floor(window / 4)) : model.maxTokens,
-    reserve: compact ? Math.floor(window / 2) : Math.max(16_384, window - 256_000),
-    recent: compact
-      ? Math.floor(window / 8)
-      : Math.max(0, Math.round(Math.min(256_000, window - 16_384) / 3)),
-  };
-}
-
-export function estimateModelTokens(payload: unknown) {
-  let images = 0;
-  const text = JSON.stringify(payload, (_key, value) => {
-    if (!value || typeof value !== 'object') return value;
-    if (value.type === 'image_url' && typeof value.image_url?.url === 'string') {
-      images++;
-      return { ...value, image_url: { ...value.image_url, url: '[image]' } };
-    }
-    if (value.type === 'input_image' && typeof value.image_url === 'string') {
-      images++;
-      return { ...value, image_url: '[image]' };
-    }
-    if (value.type === 'image' && value.source?.type === 'base64') {
-      images++;
-      return { ...value, source: { ...value.source, data: '[image]' } };
-    }
-    if (
-      value.type === 'image' &&
-      /^image\//.test(value.mimeType ?? '') &&
-      typeof value.data === 'string'
-    ) {
-      images++;
-      return { ...value, data: '[image]' };
-    }
-    for (const key of ['inlineData', 'inline_data'])
-      if (/^image\//.test(value[key]?.mimeType ?? value[key]?.mime_type ?? '')) {
-        images++;
-        return { ...value, [key]: { ...value[key], data: '[image]' } };
-      }
-    if (value.image?.source?.bytes && value.image?.format) {
-      images++;
-      return { ...value, image: { ...value.image, source: { bytes: '[image]' } } };
-    }
-    return value;
-  });
-  return Math.ceil(Buffer.byteLength(text) / 3) + images * 1200;
-}
 const callbackUrl = 'http://127.0.0.1:1455/auth/callback';
 const registration = 'dynamic_agent_client';
 const planScope = 'chatgpt.tokens.use.direct';
@@ -181,7 +127,7 @@ const levels = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 let endpointConnections: Dispatcher1Wrapper | undefined;
 const keyless = 'nod-no-key';
 const ollamaShowSchema = z.object({
-  capabilities: z.array(z.string()).catch([]),
+  capabilities: z.array(z.string()).optional().catch(undefined),
   model_info: z.record(z.string(), z.unknown()).catch({}),
   parameters: z.string().catch(''),
   thinking: z
@@ -199,7 +145,7 @@ function ollamaModel(show: z.infer<typeof ollamaShowSchema>) {
   const values = show.thinking?.values;
   const named = levels.filter((level) => values?.includes(level));
   const thinkingLevelMap =
-    !show.capabilities.includes('thinking') || !values
+    show.capabilities?.includes('thinking') === false || !values
       ? undefined
       : named.length
         ? {
@@ -217,8 +163,8 @@ function ollamaModel(show: z.infer<typeof ollamaShowSchema>) {
             }
           : undefined;
   return {
-    usable: show.capabilities.includes('tools'),
-    images: show.capabilities.includes('vision'),
+    usable: show.capabilities?.includes('tools'),
+    images: show.capabilities?.includes('vision'),
     contextWindow: Number.isFinite(contextWindow) ? contextWindow : undefined,
     reasoning: !!thinkingLevelMap,
     thinkingLevelMap,
@@ -353,61 +299,67 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       })
         .then((response) => (response.ok ? response.json() : undefined))
         .catch(() => undefined);
-    const ollama = z
-      .object({ version: z.string() })
-      .safeParse(await serverJson('/api/version')).success;
-    const studio = ollama
-      ? undefined
-      : z.object({ models: z.array(z.unknown()) }).safeParse(await serverJson('/api/v1/models'))
-          .data?.models;
-    const studioModels = studio ? entries(studio, lmStudioModelSchema) : [];
-    const models = await Promise.all(
-      listed.map(async (entry) => {
-        const shown = ollama
-          ? ollamaShowSchema.safeParse(
-              await serverJson('/api/show', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: entry.id }),
-              }),
-            )
-          : undefined;
-        const studioModel = studioModels.find((model) => model.key === entry.id);
-        const known = shown?.success
-          ? ollamaModel(shown.data)
-          : studioModel
-            ? lmStudioModel(studioModel)
-            : undefined;
-        if (known && !known.usable) return [];
-        const contextWindow =
-          known?.contextWindow ??
-          entry.context_length ??
-          entry.context_window ??
-          entry.max_model_len ??
-          128_000;
-        return [
-          definition({
-            id: entry.id,
-            name: entry.id,
-            api: 'openai-completions',
-            provider: 'compatible',
-            baseUrl: found.url,
-            compat: {
-              supportsStore: false,
-              supportsDeveloperRole: false,
-              maxTokensField: 'max_tokens',
-            },
-            reasoning: known?.reasoning ?? false,
-            thinkingLevelMap: known?.thinkingLevelMap,
-            input: known?.images ? ['text', 'image'] : ['text'],
-            contextWindow,
-            maxTokens: Math.min(32_768, Math.floor(contextWindow / 2)),
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          } as Model<Api>),
-        ];
-      }),
+    const [version, studio] = await Promise.all([
+      serverJson('/api/version'),
+      serverJson('/api/v1/models'),
+    ]);
+    const ollama = z.object({ version: z.string() }).safeParse(version).success;
+    const studioModels = entries(
+      z.object({ models: z.array(z.unknown()) }).safeParse(studio).data?.models ?? [],
+      lmStudioModelSchema,
     );
-    return models.flat();
+    const models: ModelDefinition[] = [];
+    for (let index = 0; index < listed.length; index += 3) {
+      const batch = await Promise.all(
+        listed.slice(index, index + 3).map(async (entry) => {
+          const studioModel = studioModels.find((model) => model.key === entry.id);
+          const shown =
+            ollama && !studioModel
+              ? ollamaShowSchema.safeParse(
+                  await serverJson('/api/show', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: entry.id }),
+                  }),
+                )
+              : undefined;
+          const known = studioModel
+            ? lmStudioModel(studioModel)
+            : shown?.success
+              ? ollamaModel(shown.data)
+              : undefined;
+          if (known?.usable === false) return [];
+          const contextWindow =
+            known?.contextWindow ??
+            entry.context_length ??
+            entry.context_window ??
+            entry.max_model_len ??
+            128_000;
+          return [
+            definition({
+              id: entry.id,
+              name: entry.id,
+              api: 'openai-completions',
+              provider: 'compatible',
+              baseUrl: found.url,
+              compat: {
+                supportsStore: false,
+                supportsDeveloperRole: false,
+                maxTokensField: 'max_tokens',
+              },
+              reasoning: known?.reasoning ?? false,
+              thinkingLevelMap: known?.thinkingLevelMap,
+              input: known?.images ? ['text', 'image'] : ['text'],
+              contextWindow,
+              maxTokens: Math.min(32_768, Math.floor(contextWindow / 2)),
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            } as Model<Api>),
+          ];
+        }),
+      );
+      models.push(...batch.flat());
+    }
+    return models;
   }
   async function cloudResponse(url: string, init: RequestInit, rejected: string) {
     const response = await request(url, {
@@ -1024,6 +976,41 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
   };
 }
 
+function portableToolCallIds(messages: Context['messages'], model: string): Context['messages'] {
+  const portable = /^[A-Za-z0-9]{9}$/;
+  const used = new Set(
+    messages.flatMap((message) =>
+      message.role === 'assistant'
+        ? message.content.flatMap((part) =>
+            part.type === 'toolCall' && portable.test(part.id) ? [part.id] : [],
+          )
+        : [],
+    ),
+  );
+  const ids = new Map<string, string>();
+  return messages.map((message) => {
+    if (message.role === 'toolResult') {
+      const id = ids.get(message.toolCallId);
+      return id ? { ...message, toolCallId: id } : message;
+    }
+    if (message.role !== 'assistant') return message;
+    ids.clear();
+    if (message.model === model) return message;
+    return {
+      ...message,
+      content: message.content.map((part) => {
+        if (part.type !== 'toolCall' || portable.test(part.id)) return part;
+        let id = createHash('sha256').update(part.id).digest('hex').slice(0, 9);
+        for (let attempt = 1; used.has(id); attempt++)
+          id = createHash('sha256').update(`${attempt}:${part.id}`).digest('hex').slice(0, 9);
+        used.add(id);
+        ids.set(part.id, id);
+        return { ...part, id };
+      }),
+    };
+  });
+}
+
 export async function createPiModelRuntime(
   access: ModelAccess,
   {
@@ -1133,12 +1120,13 @@ export async function createPiModelRuntime(
       };
     };
   }
+  const limits = modelContext(
+    access.definition.spec as unknown as Model<Api>,
+    access.textModel?.definition.spec as unknown as Model<Api> | undefined,
+  ).model;
   runtime.registerProvider(provider, {
     models: [access.definition, ...(access.textModel ? [access.textModel.definition] : [])].map(
-      ({ spec }) => ({
-        ...supportedModel(spec as unknown as Model<Api>),
-        contextWindow: modelContextBudget(spec as unknown as Model<Api>).window,
-      }),
+      ({ spec }) => modelContext(supportedModel(spec as unknown as Model<Api>), limits).model,
     ) as unknown as ProviderModelConfig[],
   });
   await runtime.refresh({ allowNetwork: false });
@@ -1157,13 +1145,18 @@ export async function createPiModelRuntime(
       ),
     };
     const audio = readsNativeAudio(model) ? nativeAudioRequest(context, readAudio) : undefined;
-    const target = audio && !audio.active && textModel ? textModel : model;
+    const companion = audio && !audio.active ? textModel : undefined;
+    const { model: target } = modelContext(companion ?? model, limits);
     const usage = audio?.active ? audioUsage() : undefined;
     const cacheWarm = options?.maxTokens === 1 && options.maxRetries === 0;
     let phase: ModelRequestFacts['requestPhase'] = 'prepare';
     let status: number | undefined;
     let transportCause: string | undefined;
     let completeRequest: ((error?: string) => Promise<void>) | undefined;
+    let settleBudget: ((spentUsd: number | null) => Promise<void>) | undefined;
+    const silence = new AbortController();
+    let silenceTimer: ReturnType<typeof setTimeout> | undefined;
+    const heard = () => clearTimeout(silenceTimer);
     const guardedFetch =
       access.provider === 'compatible' ||
       access.provider === 'radius' ||
@@ -1171,12 +1164,16 @@ export async function createPiModelRuntime(
       access.provider === 'cloudflare-ai-gateway' ||
       (access.provider === 'openai' && !subscription) ||
       Boolean(usage);
-    const upstream = stream(target, audio?.context ?? context, {
+    const sent = audio?.context ?? context;
+    const replay =
+      access.provider === 'compatible'
+        ? { ...sent, messages: portableToolCallIds(sent.messages, target.id) }
+        : sent;
+    const output = Math.min(options?.maxTokens ?? target.maxTokens, target.maxTokens);
+    const upstream = stream(target, replay, {
       ...options,
-      maxTokens:
-        options?.maxTokens && target.maxTokens > 0
-          ? Math.min(options.maxTokens, target.maxTokens)
-          : options?.maxTokens,
+      signal: options?.signal ? AbortSignal.any([options.signal, silence.signal]) : silence.signal,
+      maxTokens: output,
       maxRetries: 0,
       onResponse: async (response, model) => {
         phase = 'response';
@@ -1184,13 +1181,14 @@ export async function createPiModelRuntime(
         await options?.onResponse?.(response, model);
       },
       onProviderStreamEvent: async (event, model) => {
+        heard();
         phase = 'stream';
         await options?.onProviderStreamEvent?.(event, model);
       },
       ...(target.provider === 'openrouter' && target.id === 'openrouter/free'
         ? { reasoning: options?.reasoning ?? 'minimal' }
         : {}),
-      ...(target !== model
+      ...(companion
         ? { reasoning: access.textModel!.effort === 'off' ? undefined : access.textModel!.effort }
         : {}),
       ...(guardedFetch ||
@@ -1320,28 +1318,28 @@ export async function createPiModelRuntime(
             );
         }
 
-        const budget = modelContextBudget(target);
-        const available = budget.window - estimateModelTokens(body) - budget.margin;
-        if (available < 128)
-          throw new Error(
-            `This request does not fit ${target.id}'s ${budget.window}-token context. Use a model with a larger context or a shorter request.`,
-          );
-        const output = Math.min(options?.maxTokens ?? budget.output, budget.output, available);
-        for (const field of ['max_tokens', 'max_completion_tokens', 'max_output_tokens'])
-          if (field in body) body[field] = output;
-        for (const [field, key] of [
-          ['generationConfig', 'maxOutputTokens'],
-          ['inferenceConfig', 'maxTokens'],
-        ] as const) {
-          const config = body[field];
-          if (config && typeof config === 'object')
-            (config as Record<string, unknown>)[key] = output;
-        }
-
         const prepared = audio?.active
           ? await audio.payload(body, options?.signal ?? AbortSignal.timeout(120000))
           : body;
+        settleBudget = await access.reserve?.(() => {
+          const prices = target.cost;
+          return prices &&
+            [prices.input, prices.output, prices.cacheRead, prices.cacheWrite].every(
+              (price) => Number.isFinite(price) && price >= 0,
+            ) &&
+            Math.max(prices.input, prices.output, prices.cacheRead, prices.cacheWrite) > 0
+            ? (Buffer.byteLength(JSON.stringify(prepared)) *
+                Math.max(prices.input * 2, prices.cacheWrite, prices.cacheRead) +
+                output * prices.output) /
+                1_000_000
+            : null;
+        });
         phase = 'payload';
+        if (access.provider !== 'compatible') {
+          heard();
+          silenceTimer = setTimeout(() => silence.abort(), modelFirstEventMs);
+          silenceTimer.unref?.();
+        }
         return prepared;
       },
     });
@@ -1361,19 +1359,33 @@ export async function createPiModelRuntime(
               }),
             ),
           );
+        if (event.type === 'done' || event.type === 'error') heard();
+        if (event.type === 'error' && silence.signal.aborted && !options?.signal?.aborted) {
+          event.error.stopReason = 'error';
+          event.error.errorMessage = `${modelProviderNames[access.provider]} sent no response for ${modelFirstEventMs / 1000} seconds, so the request timed out.`;
+        }
         if (event.type === 'error') {
           const error = event.error;
           error.errorMessage = `${error.errorMessage || 'The provider gave no reason.'}${status ? ` (HTTP ${status})` : ''}${transportCause ? ` (transport cause: ${transportCause})` : ''} [request phase: ${phase}]`;
         }
         if ((event.type === 'done' || event.type === 'error') && phase !== 'prepare') {
           const message = event.type === 'done' ? event.message : event.error;
-          if (message.stopReason !== 'aborted' && !options?.signal?.aborted)
+          if (
+            message.stopReason !== 'aborted' &&
+            !options?.signal?.aborted &&
+            (message.stopReason !== 'error' ||
+              !(
+                isRetryableAssistantError(message) ||
+                isContextOverflow(message, target.contextWindow)
+              ))
+          )
             await completeRequest?.(
               message.stopReason === 'error' ? message.errorMessage : undefined,
             );
         }
         if (event.type === 'done' || event.type === 'error') {
           const message = event.type === 'done' ? event.message : event.error;
+          await settleBudget?.(piUsageMetrics(message.usage).costUsd ?? null);
           requestFacts.set(message, {
             requestPhase: phase,
           });

@@ -39,6 +39,7 @@ Select **Rules** to ask Nod in chat to show the rules that apply to every task. 
 | **Waiting on** | Who Nod is waiting for, and how, such as an email reply                           |
 | **Next check** | When Nod will look again                                                          |
 | **Done when**  | What finished looks like                                                          |
+| **Model**      | The model the task uses. Select **Change** to give this task its own model        |
 
 A compact task preview appears in chat with its title, status and current activity. While a task works, its card has its own live line: the current step, the website or app it's working in, and how long it has been quiet. The chat's status line stays with your messages. While it works, a pulsing dot just above the top-right corner of the message box stands for it, and a pink dot with a question mark shows when it needs you. Hover over or focus the dot to see the task's title, or select it to open the card.
 
@@ -71,6 +72,8 @@ Open its preview and select its title in the details. Change the display name, t
 In chat, open a task preview and select **Show activity**. The details show planned steps, Nod's steps and messages, and the tool and helper steps between them, such as _Searched the web_ or _Gmail: send email_. Select **Show in chat** to return to the task's message.
 
 ![An expanded task with steps, activity from tools and helpers, and task controls.](../../../assets/screens/task-sessions-activity.png)
+
+To see the commands the task ran in Nod's workspace, select **Show commands**. See [Watch Nod's commands](/use/workspace/#watch-nods-commands).
 
 ## Read task results
 

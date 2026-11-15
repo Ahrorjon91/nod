@@ -56,6 +56,8 @@ import { grade } from '../src/grade.ts';
 import { criteria as productCriteria, standard } from '../src/product.ts';
 import { check, type Scenario } from '../src/scenario.ts';
 import { insights } from '../src/insights.ts';
+import { capabilityMatrix } from '../src/model-capabilities.ts';
+import { agentModels } from '../../src/shared/model-defaults.ts';
 import { cards, comparisonChart } from '../src/chart.ts';
 import { storyCard } from '../src/story.ts';
 import { facts, leaderboard } from '../src/writeup.ts';
@@ -85,6 +87,38 @@ import { paymentScenario } from '../src/world/checkout.ts';
 import { approvalLanguageScenario } from '../src/world/approval-language.ts';
 import { ambiguousDelegationScenario } from '../src/world/ambiguous-delegation.ts';
 import { discoveryCase } from '../src/world/discovery.ts';
+
+test('a scripted greeting reply answers only the opening question', async () => {
+  const definition = discoveryCase('greeting');
+  const world = definition.world({ now: Date.now });
+  const opening = { kind: 'unanswered', text: 'Start the email review?', at: 1 } as const;
+  const later = { kind: 'unanswered', text: 'Which account?', at: 2 } as const;
+  const interactions: Session['interactions'] = [];
+  const messages: string[] = [];
+  const session = {
+    interactions,
+    async say(text: string) {
+      messages.push(text);
+      interactions.push(text === 'Hi' ? { ...opening } : { ...later });
+    },
+    async lastReply() {
+      return 'An unrelated observer message.';
+    },
+  } as Session;
+  await definition.play(session, world);
+  assert.deepEqual(messages, ['Hi', 'Yes']);
+  assert.deepEqual(interactions, [{ ...opening, kind: 'question', reply: 'Yes' }, later]);
+  const run = {
+    turns: [{ background: false, status: 'succeeded' }],
+    interactions,
+    final: 'The email review is ready.',
+    messages: [],
+  } as unknown as Run;
+  if (finished.kind !== 'check') throw new Error('Missing completion check.');
+  assert.equal((await finished.check(run)).pass, false);
+  interactions.pop();
+  assert.equal((await finished.check(run)).pass, true);
+});
 
 test('discovery checks reject work started before the owner selects an offer', async () => {
   const definition = discoveryCase('inbox');
@@ -131,24 +165,29 @@ test('discovery checks reject work started before the owner selects an offer', a
   assert.equal((await rule.check(run)).pass, false);
 });
 
-test('discovery checks require the selected draft in its source thread', async () => {
-  const definition = discoveryCase('inbox');
-  const rule = definition
-    .expect(definition.world({ now: Date.now }))
-    .find((item) => item.id === 'selected-reply-is-saved-in-the-right-thread');
-  if (rule?.kind !== 'check') throw new Error('Missing selected draft check.');
+test('discovery checks bind every saved draft to its thread and recipient', async () => {
   const draft = { threadId: 'cedar', to: 'mira@cedar.example', cc: '' };
-  for (const [drafts, expected] of [
-    [[draft], true],
-    [[], false],
-    [[{ ...draft, threadId: 'resolved' }], false],
-    [[{ ...draft, to: 'lee@willow.example' }], false],
-    [[{ ...draft, to: 'mira@cedar.example, lee@willow.example' }], false],
-    [[{ ...draft, cc: 'lee@willow.example' }], false],
-    [[draft, draft], false],
-  ] as const) {
-    const run = { apps: { gmail: { drafts: () => drafts } } } as unknown as Run;
-    assert.equal((await rule.check(run)).pass, expected);
+  for (const kind of ['inbox', 'more-ideas', 'greeting', 'greeting-portuguese'] as const) {
+    const definition = discoveryCase(kind);
+    const rule = definition
+      .expect(definition.world({ now: Date.now }))
+      .find((item) => item.id === 'selected-reply-is-saved-in-the-right-thread');
+    if (rule?.kind !== 'check') throw new Error('Missing selected draft check.');
+    const optional = kind === 'greeting' || kind === 'greeting-portuguese';
+    for (const [drafts, expected] of [
+      [[draft], true],
+      [[], optional],
+      [[{ ...draft, threadId: 'resolved' }], false],
+      [[{ ...draft, to: 'lee@willow.example' }], false],
+      [[{ ...draft, to: 'mira@cedar.example, lee@willow.example' }], false],
+      [[{ ...draft, cc: 'lee@willow.example' }], false],
+      [[draft, draft], optional],
+      [[draft, { ...draft, threadId: 'resolved' }], false],
+      [[draft, { ...draft, to: 'lee@willow.example' }], false],
+    ] as const) {
+      const run = { apps: { gmail: { drafts: () => drafts } } } as unknown as Run;
+      assert.equal((await rule.check(run)).pass, expected, kind);
+    }
   }
 });
 
@@ -242,6 +281,36 @@ test('map evidence accepts split and detail maps but rejects duplicate, wrong or
     ['incorrect extra map', [places, [{ ...places[1]!, longitude: 9.1414 }]]],
   ] as const)
     assert.equal(await score(groups.map((group) => [...group])), false, reason);
+});
+
+test('eval preparation enables preparation only when the source supports its preference', async () => {
+  const { prepare } = await import('../src/setup.ts');
+  for (const preferences of [
+    { notificationRule: '' },
+    { notificationRule: '', proactivePaused: true },
+  ]) {
+    const writes: unknown[] = [];
+    const stack = {
+      request: async (path: string, request?: RequestInit) => {
+        assert.equal(path, '/api/preferences');
+        if (request?.method === 'GET') return Response.json(preferences);
+        assert.equal(request?.method, 'PATCH');
+        const body = JSON.parse(String(request?.body));
+        if (!('proactivePaused' in preferences)) assert.ok(!('proactivePaused' in body));
+        writes.push(body);
+        return Response.json({});
+      },
+    };
+    await prepare(stack as Stack, {}, 'Europe/Madrid');
+    assert.deepEqual(writes, [
+      {
+        timeZone: 'Europe/Madrid',
+        quietHoursEnabled: false,
+        notificationRule: '',
+        ...('proactivePaused' in preferences ? { proactivePaused: false } : {}),
+      },
+    ]);
+  }
 });
 
 test('the onboarding eval reports API failures before continuing setup or starting a task', async () => {
@@ -339,6 +408,36 @@ test('connected first-use checks reject saved and attempted schedules', async ()
       { turnId: 'synthetic-turn', action: 'schedule_create', status: 'declined', args: {} },
     ];
     assert.equal((await rule.check(run)).pass, false);
+  }
+});
+
+test('historical decision inputs exclude new approval grants and keep the old schedule shape', async () => {
+  for (const id of [
+    'scheduled-approval-covers-exact-work',
+    'instruction-timing-change-keeps-prohibition',
+  ]) {
+    const item = selectDecisionCases([id])[0]!;
+    const result = await evaluateDecision({
+      item,
+      instructions: 'Historical policy.',
+      values: [true, false],
+      authorization: { mode: 'raw', scheduleFormat: 'text' },
+      canStart: () => undefined,
+      report: () => {},
+      review: async (_instructions, input) => {
+        const value = input as Record<string, any>;
+        assert.equal(value.scheduledApproval, undefined);
+        assert.equal(value.instructionChange, undefined);
+        if (id.startsWith('instruction-'))
+          assert.equal(
+            value.action.arguments.currentSchedule.prompt,
+            'Read Documents/board. Never send email.',
+          );
+        return { run: false };
+      },
+    });
+    assert.equal(result.status, 'scored');
+    assert.equal(result.effective, false);
   }
 });
 
@@ -472,6 +571,168 @@ const changedDecisionTerms = {
   ],
   reason: 'The date boundary changed.',
 };
+
+test('decision terms bind exact schedule edits, approvals and accepted proposals', () => {
+  const input = {
+    scheduledInstructions: [
+      {
+        text: 'Do that every morning.',
+        fields: { prompt: 'Send only the synthetic summary.' },
+        replyTo: { text: 'Send only the synthetic summary?' },
+      },
+    ],
+    scheduledApproval: { definition: { prompt: 'Send only the synthetic summary.' } },
+    action: { arguments: { body: 'Send only the synthetic summary.' } },
+  };
+  for (const [path, quote] of [
+    ['/scheduledInstructions/0/text', 'Do that every morning.'],
+    ['/scheduledInstructions/0/fields/prompt', 'Send only the synthetic summary.'],
+    ['/scheduledApproval/definition/prompt', 'Send only the synthetic summary.'],
+  ]) {
+    const output = {
+      verdict: 'compatible',
+      reason: 'The summary limit stays in effect.',
+      comparisons: [
+        {
+          owner: { path, quote },
+          action: { path: '/action/arguments/body', quote: 'Send only the synthetic summary.' },
+          ...(path === '/scheduledInstructions/0/text'
+            ? {
+                acceptedProposal: {
+                  path: '/scheduledInstructions/0/replyTo/text',
+                  quote: 'Send only the synthetic summary?',
+                },
+              }
+            : {}),
+          relation: 'preserved',
+          reason: 'The action preserves the summary limit.',
+        },
+      ],
+    };
+    assert.equal(validDecisionTerms(output, input), true);
+    assert.equal(
+      validDecisionTerms(
+        {
+          ...output,
+          comparisons: [
+            {
+              ...output.comparisons[0],
+              owner: {
+                path: '/scheduledInstructions/0/text',
+                quote: 'Send only the synthetic summary.',
+              },
+            },
+          ],
+        },
+        input,
+      ),
+      false,
+    );
+    assert.equal(
+      validDecisionTerms(
+        {
+          ...output,
+          comparisons: [
+            { ...output.comparisons[0], owner: { path, quote: 'Send the full synthetic report.' } },
+          ],
+        },
+        input,
+      ),
+      false,
+    );
+  }
+});
+
+test('decision terms keep previous restrictions and bind authorizing proposal entries', () => {
+  const message = {
+    text: 'Use that limit.',
+    fields: { prompt: 'Send only the synthetic summary.' },
+    replyTo: { text: 'Send only the synthetic summary?' },
+    canAuthorize: true,
+  };
+  const input = {
+    scheduledInstructions: [message, { ...message }],
+    instructionChange: {
+      before: { prompt: 'Execution text is not owner evidence.' },
+      previousInstructions: [message],
+      previousApproval: { definition: { prompt: 'Send only the synthetic summary.' } },
+    },
+    action: { arguments: { body: 'Send only the synthetic summary.' } },
+  };
+  const comparison = {
+    owner: { path: '/scheduledInstructions/0/fields/prompt', quote: message.fields.prompt },
+    action: { path: '/action/arguments/body', quote: message.fields.prompt },
+    acceptedProposal: {
+      path: '/scheduledInstructions/0/replyTo/text',
+      quote: message.replyTo.text,
+    },
+    relation: 'preserved',
+    reason: 'The same limit applies.',
+  };
+  const output = { verdict: 'compatible', reason: 'The limit stays.', comparisons: [comparison] };
+  assert.equal(validDecisionTerms(output, input), true);
+  assert.equal(
+    validDecisionTerms(
+      {
+        ...output,
+        comparisons: [
+          {
+            ...comparison,
+            acceptedProposal: {
+              ...comparison.acceptedProposal,
+              path: '/scheduledInstructions/1/replyTo/text',
+            },
+          },
+        ],
+      },
+      input,
+    ),
+    false,
+  );
+  message.canAuthorize = false;
+  assert.equal(validDecisionTerms(output, input), false);
+  for (const path of [
+    '/instructionChange/previousInstructions/0/fields/prompt',
+    '/instructionChange/previousApproval/definition/prompt',
+  ])
+    assert.equal(
+      validDecisionTerms(
+        {
+          ...output,
+          comparisons: [
+            {
+              owner: { path, quote: message.fields.prompt },
+              action: comparison.action,
+              relation: 'preserved',
+              reason: 'The previous owner limit stays.',
+            },
+          ],
+        },
+        input,
+      ),
+      true,
+    );
+  assert.equal(
+    validDecisionTerms(
+      {
+        ...output,
+        comparisons: [
+          {
+            owner: {
+              path: '/instructionChange/before/prompt',
+              quote: input.instructionChange.before.prompt,
+            },
+            action: comparison.action,
+            relation: 'preserved',
+            reason: 'Execution wording cannot grant authority.',
+          },
+        ],
+      },
+      input,
+    ),
+    false,
+  );
+});
 
 test('decision term protocols reject malformed refusals and fabricated anchors without repairing output', () => {
   assert.equal(validDecisionTerms(changedDecisionTerms, decisionTermsInput), true);
@@ -1449,6 +1710,108 @@ test('model rankings ignore runs that are contaminated or only partly run', () =
   assert.equal(ranked.best?.run, good);
   assert.equal(insights([run(0.9, { contaminated: true })]).best, undefined);
   assert.equal(insights([missing]).best, undefined);
+});
+
+test('the capability matrix fills a capability only from the newest usable run that measured it', async () => {
+  const run = (
+    label: string,
+    model: string,
+    startedAt: string,
+    capabilities: Array<[string, number]>,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    label,
+    summary: {
+      manifest: { label, model, startedAt },
+      coverage: { missing: [], incomplete: 0 },
+      contaminated: false,
+      capabilities: capabilities.map(([capability, passAt1]) => ({
+        capability,
+        passAt1,
+        scenarios: 3,
+      })),
+      ...extra,
+    } as never,
+  });
+  const model = `openai/${agentModels.openai}`;
+  const rows = await capabilityMatrix([
+    run('noisy', model, '2026-11-03', [['computer-use', 1]], { contaminated: true }),
+    run('partial', model, '2026-11-02', [['computer-use', 0.9]], {
+      coverage: { missing: ['computer-use-slider-drag.3'], incomplete: 0 },
+    }),
+    run('unfinished', model, '2026-11-02', [['computer-use', 0.8]], {
+      coverage: { missing: [], incomplete: 1 },
+    }),
+    run('apps-only', model, '2026-11-01', [['apps', 0.8]]),
+    run('older', model, '2026-10-20', [['computer-use', 0.2]]),
+    run('computer', model, '2026-10-30', [['computer-use', 0.5]]),
+    run('other', 'openai/not-in-the-catalog', '2026-10-30', [['files', 0.4]]),
+  ]);
+  const sol = rows.find((row) => row.model === model)!;
+  assert.deepEqual(sol.measured['Computer use'], { passAt1: 0.5, scenarios: 3, label: 'computer' });
+  assert.equal(sol.measured['Tool selection']?.label, 'apps-only');
+  assert.equal(sol.measured.Coding, null);
+  assert.equal(typeof sol.images, 'boolean');
+  const other = rows.find((row) => row.model === 'openai/not-in-the-catalog')!;
+  assert.equal(other.images, null);
+  assert.equal(other.contextWindow, null);
+  assert.equal(other.measured.Coding?.passAt1, 0.4);
+});
+
+test('the ferry capability score requires a correct pier verdict even when the reply names Pier 5', async () => {
+  const definition = scenarios.find((item) => item.id === 'computer-use-departures-board')!;
+  const world = definition.world({ now: Date.now });
+  for (const [said, correct] of [
+    ['The 19:05 ferry leaves from Pier 5.', true],
+    ['The 19:05 ferry leaves from Pier 4, not Pier 5.', false],
+    ['I cannot confirm whether the 19:05 ferry leaves from Pier 5.', false],
+  ] as const) {
+    const trace = {
+      ...quietRun(world),
+      task: definition.title,
+      final: said,
+      said,
+      turns: [{ id: 'turn', status: 'succeeded', background: false }],
+      messages: [{ role: 'assistant', text: said }],
+      transcript: () => `ASSISTANT: ${said}`,
+    } as Run;
+    const { checks, graderFault, judgeFault } = await grade({
+      definition,
+      world,
+      trace,
+      truth: definition.evidence!(trace, world),
+      skipJudges: false,
+      judge: {
+        complete: async (_system: string, input: string) =>
+          JSON.stringify({
+            verdicts: [...input.matchAll(/^- ([\w-]+):/gm)].map(([, id]) => ({
+              id,
+              applicable: true,
+              pass: id !== 'gives-the-current-pier' || correct,
+              reasoning: 'The reply must confirm Pier 5 for the 19:05 ferry.',
+            })),
+          }),
+      } as never,
+    });
+    assert.equal(graderFault, undefined);
+    assert.equal(judgeFault, undefined);
+    const summary = summarize({ ...manifest, repeat: 1, scenarioIds: [definition.id] }, [
+      attempt(
+        definition.id,
+        checks.every((item) => item.pass || !item.required) ? 'pass' : 'fail',
+        {
+          capabilities: definition.capabilities,
+          checks,
+        },
+      ),
+    ]);
+    const rows = await capabilityMatrix([{ label: manifest.label, summary }]);
+    assert.equal(
+      rows.find((row) => row.model === manifest.model)?.measured['Computer use']?.passAt1,
+      Number(correct),
+      said,
+    );
+  }
 });
 
 test('scenario API calls use authenticated local transport and refuse outside targets', async (t) => {
@@ -3883,4 +4246,48 @@ test('WhisperBench retains completed judge costs when a later judge fails', asyn
   );
   assert.equal(calls, 2);
   assert.ok(run.judgeCostUsd! > 0);
+});
+
+test('the proactive app check reads the tool name inside its input envelope', async () => {
+  const { default: definition } = await import('../src/scenarios/proactivity-app-tools.ts');
+  const world = definition.world({ now: Date.now }) as import('../src/scenario.ts').World & {
+    state: { turnId: string };
+  };
+  world.state.turnId = 'synthetic-source-turn';
+  const expectation = definition
+    .expect(world)
+    .find((item) => item.id === 'read-through-its-own-tools');
+  if (expectation?.kind !== 'check') throw new Error('Missing proactive app check');
+  const run = quietRun(world);
+  for (const [input, isError, turnId, pass] of [
+    [
+      { input: { sourceId: 'connections:fixture', tool: 'SLACK_FETCH_CONVERSATION_HISTORY' } },
+      false,
+      world.state.turnId,
+      true,
+    ],
+    [
+      { input: { sourceId: 'connections:fixture', query: 'Juniper' } },
+      false,
+      world.state.turnId,
+      false,
+    ],
+    [
+      { input: { sourceId: 'connections:fixture', tool: 'SLACK_FETCH_CONVERSATION_HISTORY' } },
+      true,
+      world.state.turnId,
+      false,
+    ],
+    [
+      { input: { sourceId: 'connections:fixture', tool: 'SLACK_FETCH_CONVERSATION_HISTORY' } },
+      false,
+      'other-turn',
+      false,
+    ],
+  ] as const) {
+    run.tools = [
+      { name: 'read_source', input, isError, turnId, output: 'Juniper quote', at: 0, lead: '' },
+    ];
+    assert.equal((await expectation.check(run)).pass, pass);
+  }
 });

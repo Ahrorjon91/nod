@@ -25,6 +25,7 @@ export interface AttemptSpec {
   attempt: number;
   outFile: string;
   model: string;
+  backgroundModel?: string;
   effort?: ModelEffort;
   judge: string;
 }
@@ -99,6 +100,7 @@ async function run(spec: AttemptSpec): Promise<AttemptResult> {
     );
     stack = await (starting = startStack({
       model,
+      ...(spec.backgroundModel ? { backgroundModel: spec.backgroundModel } : {}),
       observations: world.observations,
       proactiveBaseline: world.proactiveBaseline,
       integrations:

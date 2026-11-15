@@ -6,11 +6,17 @@ import { join, resolve } from 'node:path';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { getSupportedThinkingLevels, InMemoryCredentialStore } from '@earendil-works/pi-ai';
+import {
+  InMemoryCredentialStore,
+  isContextOverflow,
+  isRecoverableLength,
+  type AssistantMessage,
+} from '@earendil-works/pi-ai';
 import { Agent as Connections, Dispatcher1Wrapper, buildConnector } from 'undici';
 import { Compile } from 'typebox/compile';
 import {
   compact,
+  estimateTokens,
   createAgentSession,
   createCodemodeExtension,
   createToolSearchExtension,
@@ -22,13 +28,9 @@ import {
   type ResourceLoader,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import {
-  createPiModelRuntime,
-  estimateModelTokens,
-  localModelSilenceMs,
-  modelContextBudget,
-} from './models.ts';
-import { audioContext, audioMessage, readsNativeAudio } from './audio.ts';
+import { createPiModelRuntime, localModelSilenceMs } from './models.ts';
+import { modelContext } from './context.ts';
+import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
 import { piModelTrace } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
 import type { ModelAccess } from '../../ports/models.ts';
@@ -44,7 +46,7 @@ import {
 import { threadIdentity } from '../../ports/thread-identity.ts';
 import { createPiUsageTracker, piUsageMetrics, usageId } from './usage.ts';
 import { agentModels } from '../../shared/model-defaults.ts';
-import { lightestEffort } from '../../shared/models.ts';
+import type { ModelSelection } from '../../shared/models.ts';
 import { createSandbox, workspaceOutputs, writeWorkspaceFile } from './sandbox.ts';
 import { untrustedBlock } from '../../shared/untrusted.ts';
 import { isPublicAddress, publicLookup } from '../agent-browser/network.ts';
@@ -208,8 +210,12 @@ type CachedRequest = {
   messages?: Array<{ role: string; content: string | CachedBlock[] }>;
 };
 
-function observerCache(cached: { owner?: string; stable?: string[] }) {
-  const long = { type: 'ephemeral', ttl: '1h' };
+function stableRequestCache(
+  cached: { owner?: string; stable?: string[] },
+  retention: 'short' | 'long',
+  moveOwnerFirst = false,
+) {
+  const durable = retention === 'long' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
   const short = { type: 'ephemeral' };
   return (pi: ExtensionAPI) => {
     pi.on('before_provider_request', ({ payload }) => {
@@ -217,15 +223,44 @@ function observerCache(cached: { owner?: string; stable?: string[] }) {
       if (!request || !Array.isArray(request.messages)) return;
       if (Array.isArray(request.system) && request.system.filter((b) => b.cache_control).length > 1)
         return;
-      const blocks = request.messages.flatMap((message, at) =>
+      const prefixes = [...new Set(cached.stable ?? [])].sort((a, b) => a.length - b.length);
+      const longest = prefixes.at(-1);
+      const ordered = [...request.messages];
+      if (moveOwnerFirst && cached.owner && longest) {
+        const ownerAt = ordered.findIndex(
+          (message) =>
+            Array.isArray(message.content) &&
+            message.content.length === 1 &&
+            message.content[0]?.type === 'text' &&
+            message.content[0].text === cached.owner,
+        );
+        const stableAt = ordered.findIndex(
+          (message) =>
+            Array.isArray(message.content) &&
+            message.content.some(
+              (block) =>
+                block.type === 'text' &&
+                typeof block.text === 'string' &&
+                block.text.startsWith(longest),
+            ),
+        );
+        if (
+          stableAt >= 0 &&
+          ownerAt === stableAt + 1 &&
+          ordered[stableAt]?.role === 'user' &&
+          ordered[ownerAt]?.role === 'user'
+        ) {
+          const [owner] = ordered.splice(ownerAt, 1);
+          ordered.splice(stableAt, 0, owner!);
+        }
+      }
+      const blocks = ordered.flatMap((message, at) =>
         Array.isArray(message.content)
           ? message.content.map((block, index) => ({ block, at, index }))
           : [],
       );
       const lastText = (match: (text: string) => boolean) =>
         blocks.findLast(({ block }) => block.type === 'text' && match(block.text ?? ''));
-      const prefixes = [...new Set(cached.stable ?? [])].sort((a, b) => a.length - b.length);
-      const longest = prefixes.at(-1);
       const stable = longest
         ? lastText((text) => text.length > longest.length && text.startsWith(longest))
         : undefined;
@@ -236,22 +271,26 @@ function observerCache(cached: { owner?: string; stable?: string[] }) {
         (found.at < stable.at || (found.at === stable.at && found.index < stable.index))
           ? found
           : undefined;
-      const messages = request.messages.map((message, at) =>
+      const messages = ordered.map((message, at) =>
         Array.isArray(message.content)
           ? {
               ...message,
               content: message.content.flatMap((block, index): CachedBlock[] => {
                 const rolling = block.cache_control ? { cache_control: short } : {};
                 if (owner?.at === at && owner.index === index)
-                  return [{ ...block, cache_control: long }];
+                  return [{ ...block, cache_control: durable }];
                 if (stable?.at === at && stable.index === index)
                   return [
                     ...prefixes.map((prefix, step) => ({
                       type: 'text',
                       text: prefix.slice(step ? prefixes[step - 1]!.length : 0),
-                      cache_control: long,
+                      cache_control: durable,
                     })),
-                    { ...block, text: block.text!.slice(longest!.length), ...rolling },
+                    {
+                      ...block,
+                      text: block.text!.slice(longest!.length),
+                      ...(moveOwnerFirst ? { cache_control: short } : rolling),
+                    },
                   ];
                 return [{ ...block, ...rolling }];
               }),
@@ -346,9 +385,20 @@ function completeAssistantMessages(pi: ExtensionAPI) {
   });
 }
 
+const tokenRateLimit = /\b(?:tokens? per (?:minute|day)|[tr]p[md])\b/i;
+
+const imageOutputExtensions: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/bmp': 'bmp',
+};
+
 export function createPiAgent(options: {
   provider: string;
-  resolve?: () => Promise<ModelAccess>;
+  resolve?: (choice?: ModelSelection) => Promise<ModelAccess>;
   model?: string;
   apiKey?: string;
   sessionRoot: string;
@@ -366,8 +416,12 @@ export function createPiAgent(options: {
   return {
     async open(input) {
       if (disposed) throw new Error('The agent service has stopped.');
-      const access = await options.resolve?.();
-      if (input.automatic) await access?.prepareRequest?.(access.definition.choice.id, true);
+      const access = await options.resolve?.(input.model);
+      if (input.automatic)
+        await access?.prepareRequest?.(
+          access.textModel?.definition.choice.id ?? access.definition.choice.id,
+          true,
+        );
       if (!access && !options.apiKey)
         throw new Error('Configure the selected model provider to enable the assistant.');
       if (access?.method === 'subscription') {
@@ -449,10 +503,10 @@ export function createPiAgent(options: {
         connection?.model ?? (modelId ? runtime.getModel(options.provider, modelId) : undefined);
       if (!selectedModel)
         throw new Error('The configured model is not present in the installed Pi catalog.');
-      const model =
+      const { model, ...budget } = modelContext(
         selectedModel.provider === 'openai' &&
-        selectedModel.api === 'openai-responses' &&
-        selectedModel.id === agentModels.openai
+          selectedModel.api === 'openai-responses' &&
+          selectedModel.id === agentModels.openai
           ? {
               ...selectedModel,
               samplingParams: {
@@ -463,14 +517,9 @@ export function createPiAgent(options: {
                 },
               },
             }
-          : selectedModel;
-      const budget = modelContextBudget({
-        ...model,
-        contextWindow: Math.min(
-          model.contextWindow,
-          connection?.textModel?.contextWindow ?? model.contextWindow,
-        ),
-      });
+          : selectedModel,
+        connection?.textModel,
+      );
       if (budget.compact && input.compactInstructions)
         input = { ...input, ...input.compactInstructions };
       const boundedOutput = async (
@@ -485,11 +534,25 @@ export function createPiAgent(options: {
           .filter((part) => part.type === 'text')
           .map((part) => part.text)
           .join('\n');
-        if (text.length <= Math.floor(budget.window / 2)) return result;
+        const images = result.content.filter((part) => part.type === 'image');
+        if (!text && !images.length) return result;
+        if (
+          Buffer.byteLength(text) <= budget.toolOutput.maxBytes &&
+          estimateTokens({
+            role: 'toolResult',
+            toolCallId: '',
+            toolName: name,
+            content: result.content,
+            isError: result.isError ?? false,
+            timestamp: 0,
+          }) <= budget.toolOutput.maxTokens
+        )
+          return result;
         signal?.throwIfAborted();
         if (input.shouldStop()) throw new Error('The turn was stopped.');
         const directory = `${input.workspace.path}/.nod/outputs`;
-        const path = `${directory}/${randomUUID()}.txt`;
+        const stem = `.nod/outputs/${randomBytes(12).toString('base64url')}`;
+        const textFile = `${stem}.txt`;
         if (
           (
             await input.workspace.exec(`mkdir -p -- '${directory.replaceAll("'", "'\\''")}'`, {
@@ -498,18 +561,51 @@ export function createPiAgent(options: {
           ).exitCode
         )
           throw new Error('The full tool output could not be saved.');
-        await writeWorkspaceFile(input.workspace, path, Buffer.from(text), signal);
+        let file = textFile;
+        if (images.length) {
+          const savedContent = [];
+          for (const [index, part] of result.content.entries()) {
+            const mimeType =
+              part.type === 'image' ? part.mimeType.toLowerCase().split(';')[0]!.trim() : '';
+            const partFile =
+              part.type === 'image'
+                ? `${stem}-${index}.${imageOutputExtensions[mimeType] ?? 'bin'}`
+                : `${stem}-${index}.txt`;
+            await writeWorkspaceFile(
+              input.workspace,
+              `${input.workspace.path}/${partFile}`,
+              part.type === 'image' ? Buffer.from(part.data, 'base64') : Buffer.from(part.text),
+              signal,
+            );
+            savedContent.push(
+              part.type === 'image'
+                ? { type: 'image', path: partFile, mimeType: part.mimeType }
+                : { type: 'text', path: partFile },
+            );
+          }
+          file = `${stem}.json`;
+          await writeWorkspaceFile(
+            input.workspace,
+            `${input.workspace.path}/${file}`,
+            Buffer.from(JSON.stringify({ content: savedContent })),
+            signal,
+          );
+        } else
+          await writeWorkspaceFile(
+            input.workspace,
+            `${input.workspace.path}/${textFile}`,
+            Buffer.from(text),
+            signal,
+          );
         const saved = JSON.stringify({
-          workspaceFile: path,
+          workspaceFile: file,
           characters: text.length,
-          preview: text.slice(0, 1000),
+          preview: text.slice(0, budget.toolOutput.previewCharacters),
         });
+        const pointer = result.isError ? saved : untrustedBlock(name, saved);
         return {
           ...result,
-          content: [
-            { type: 'text' as const, text: result.isError ? saved : untrustedBlock(name, saved) },
-            ...result.content.filter((part) => part.type === 'image'),
-          ],
+          content: [{ type: 'text' as const, text: pointer }],
         };
       };
       let idle = false;
@@ -519,18 +615,25 @@ export function createPiAgent(options: {
       closeInterruptedCalls(manager);
       const prior = manager.buildSessionContext().messages;
       const last = prior.findLast((message) => message.role === 'assistant');
-      const priorTokens = input.restartable === true ? estimateModelTokens(prior) : 0;
+      const priorTokens =
+        input.restartable === true
+          ? prior.reduce((total, message) => total + estimateTokens(message), 0)
+          : 0;
       const restart =
         input.restartable === true &&
         prior.length > 0 &&
-        (!last || Date.now() - last.timestamp >= warmCache || priorTokens > budget.recent);
+        (!last ||
+          Date.now() - last.timestamp >= warmCache ||
+          priorTokens > budget.compaction.keepRecentTokens ||
+          ![model.id, connection?.textModel?.id].includes((last as { model?: string }).model));
       const cached: { owner?: string; stable?: string[] } = { owner: input.ownerContext };
       const keepCache =
         restart &&
         model.api === 'anthropic-messages' &&
         last !== undefined &&
         Date.now() - last.timestamp < longCache;
-      if (keepCache) {
+      const scheduleCache = model.api === 'anthropic-messages' ? input.scheduleCache : undefined;
+      if (keepCache || scheduleCache === 'long') {
         const stream = runtime.streamSimple.bind(runtime);
         runtime.streamSimple = (target, context, options) =>
           stream(target, context, { ...options, cacheRetention: 'long' });
@@ -541,36 +644,6 @@ export function createPiAgent(options: {
           null,
           priorTokens,
         );
-      const historyTokens = budget.compact
-        ? estimateModelTokens(manager.buildSessionContext().messages)
-        : 0;
-      if (budget.compact && historyTokens > budget.window / 2) {
-        const entries = manager.buildContextEntries();
-        const lastAnswer = entries.findLastIndex(
-          (entry) => entry.type === 'message' && entry.message.role === 'assistant',
-        );
-        const firstPending = entries
-          .slice(lastAnswer + 1)
-          .find(
-            (entry) =>
-              (entry.type === 'message' && entry.message.role === 'user') ||
-              (entry.type === 'custom_message' && entry.customType === 'nod-audio-input'),
-          );
-        let recentTokens = 0;
-        let firstKept: string | null = null;
-        for (const entry of entries.toReversed()) {
-          if (entry.type !== 'message') continue;
-          recentTokens += estimateModelTokens(entry.message);
-          if (recentTokens > budget.recent) break;
-          if (entry.message.role === 'user') firstKept = entry.id;
-        }
-        manager.appendCompaction(
-          'Older session context does not fit this model. It remains in the saved transcript. Use history_search for earlier messages and read workspace files for work results. Do not infer missing facts or repeat uncertain actions. Follow the current owner instruction and rules.',
-          entries.find((entry) => entry.id === firstKept || entry.id === firstPending?.id)?.id ??
-            null,
-          historyTokens,
-        );
-      }
       const sandboxTools = input.restricted ? [] : createSandbox(input.workspace, input.timeZone);
       const tools: ToolDefinition[] = [
         ...sandboxTools.map((definition): ToolDefinition => ({
@@ -579,14 +652,26 @@ export function createPiAgent(options: {
             const result = await input.runTool(
               definition.name,
               params,
-              () =>
-                id.includes('/')
-                  ? definition.execute(id, params, signal, onUpdate, context)
-                  : boundedOutput(
-                      definition.name,
-                      () => definition.execute(id, params, signal, onUpdate, context),
-                      signal,
-                    ),
+              async () => {
+                const output = await definition.execute(id, params, signal, onUpdate, context);
+                const bounded = id.includes('/')
+                  ? output
+                  : await boundedOutput(definition.name, async () => output, signal);
+                if (definition.name !== 'bash') return bounded;
+                const exitCode = (output.structuredContent as { exit_code?: unknown } | undefined)
+                  ?.exit_code;
+                return {
+                  ...bounded,
+                  ...(Number.isInteger(exitCode) ? { exitCode: exitCode as number } : {}),
+                  ...(bounded === output
+                    ? {}
+                    : {
+                        commandOutput: output.content
+                          .flatMap((part) => (part.type === 'text' ? [part.text] : []))
+                          .join('\n'),
+                      }),
+                };
+              },
               { nested: id.includes('/') },
             );
             return { ...result, details: result.details ?? {} };
@@ -640,14 +725,11 @@ export function createPiAgent(options: {
       const deferred =
         !input.restricted || budget.compact || input.tools.some((tool) => tool.deferred);
       const settings = SettingsManager.inMemory({
-        compaction: {
-          enabled: true,
-          reserveTokens: budget.reserve,
-          keepRecentTokens: budget.recent,
-        },
+        compaction: budget.compaction,
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
+        retry: { baseDelayMs: 4000 },
         ...(access?.provider === 'compatible' ? { httpIdleTimeoutMs: localModelSilenceMs } : {}),
       });
       const extensionLoader = new DefaultResourceLoader({
@@ -672,13 +754,13 @@ export function createPiAgent(options: {
                         ...tool,
                         name: 'nod_tool_search',
                         description: tool.description.replaceAll('tool_search', 'nod_tool_search'),
-                        execute: (id, params, signal, update, context) => {
+                        execute: async (id, params, signal, update, context) => {
                           if (budget.compact)
                             pi.setActiveTools([
                               ...sandboxTools.map((tool) => tool.name),
                               'nod_tool_search',
                             ]);
-                          return tool.execute(
+                          const result = await tool.execute(
                             id,
                             budget.compact
                               ? ({ ...(params as object), limit: 1 } as typeof params)
@@ -687,6 +769,16 @@ export function createPiAgent(options: {
                             update,
                             context,
                           );
+                          const loaded = (result.details as { loaded?: string[] } | undefined)
+                            ?.loaded;
+                          return budget.compact && loaded?.length
+                            ? {
+                                ...result,
+                                content: [
+                                  { type: 'text' as const, text: `Loaded: ${loaded.join(', ')}` },
+                                ],
+                              }
+                            : result;
                         },
                       }),
                   }),
@@ -695,35 +787,74 @@ export function createPiAgent(options: {
           recentImages,
           audioContext(manager, readsNativeAudio(model) && Boolean(input.readAudio)),
           threadPromptCache(input.threadId),
-          ...(keepCache ? [observerCache(cached)] : []),
+          ...(keepCache || scheduleCache
+            ? [
+                stableRequestCache(
+                  cached,
+                  keepCache ? 'long' : scheduleCache!,
+                  Boolean(scheduleCache),
+                ),
+              ]
+            : []),
           ownerContextCopies(input.ownerContext),
           (pi: ExtensionAPI) =>
-            pi.on('session_before_compact', async ({ preparation, reason, signal }) => {
-              if (
-                reason === 'threshold' &&
-                !budget.compact &&
-                session.agent.state.isStreaming &&
-                preparation.tokensBefore + budget.output + budget.margin <= budget.window &&
-                preparation.tokensBefore <= budget.window - budget.reserve + budget.recent
-              ) {
-                compaction = undefined;
-                return { cancel: true };
+            pi.on('session_before_compact', async ({ preparation, customInstructions, signal }) => {
+              const target = readsNativeAudio(model) ? model : (session.model ?? model);
+              try {
+                return {
+                  compaction: await compact(
+                    preparation,
+                    target,
+                    undefined,
+                    undefined,
+                    customInstructions,
+                    signal,
+                    session.thinkingLevel,
+                    session.agent.streamFunction,
+                    undefined,
+                    settings.getRetrySettings(),
+                  ),
+                };
+              } catch (error) {
+                if (signal.aborted) return { cancel: true };
+                const message = error instanceof Error ? error.message : String(error);
+                if (
+                  tokenRateLimit.test(message) ||
+                  !isContextOverflow({
+                    stopReason: 'error',
+                    errorMessage: message,
+                    provider: target.provider,
+                  } as AssistantMessage)
+                ) {
+                  compaction!.error = `Compaction failed: ${message}`;
+                  return { cancel: true };
+                }
+                const request = preparation.turnPrefixMessages
+                  .flatMap((message) => {
+                    if (
+                      message.role !== 'user' &&
+                      (message.role !== 'custom' || message.customType !== 'nod-audio-input')
+                    )
+                      return [];
+                    return [
+                      typeof message.content === 'string'
+                        ? message.content
+                        : message.content
+                            .flatMap((part) => (part.type === 'text' ? [part.text] : []))
+                            .join('\n'),
+                    ];
+                  })
+                  .join('\n\n');
+                return {
+                  compaction: {
+                    summary:
+                      'Earlier context remains in the saved transcript. Use history_search for earlier owner instructions and action results. Do not infer missing facts or repeat completed or uncertain actions.' +
+                      (request ? `\n\nOwner input before the retained work:\n${request}` : ''),
+                    firstKeptEntryId: preparation.firstKeptEntryId,
+                    tokensBefore: preparation.tokensBefore,
+                  },
+                };
               }
-              const target = session.model ?? model;
-              return {
-                compaction: await compact(
-                  preparation,
-                  target,
-                  undefined,
-                  undefined,
-                  undefined,
-                  signal,
-                  lightestEffort(getSupportedThinkingLevels(target)),
-                  session.agent.streamFunction,
-                  undefined,
-                  settings.getRetrySettings(),
-                ),
-              };
             }),
           (pi: ExtensionAPI) =>
             pi.on('cache_warming_decision', async () => {
@@ -855,12 +986,31 @@ export function createPiAgent(options: {
       const systemPrompt = guidelines.length
         ? `${input.systemPrompt}\n\nTool guidelines:\n${guidelines.map((rule) => `- ${rule}`).join('\n')}`
         : input.systemPrompt;
+      let sessionModel = model;
+      if (connection?.textModel && readsNativeAudio(model)) {
+        const textModel = connection.textModel;
+        const id = `nod/${model.id}`;
+        runtime.registerVirtualModel({
+          provider: model.provider,
+          id,
+          name: model.name,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+          input: model.input,
+          thinkingLevels: ['off'],
+          route: ({ reason, thinkingLevel }) =>
+            reason !== 'direct' && input.readAudio && audioEntries(manager).length
+              ? { model, thinkingLevel }
+              : { model: textModel, thinkingLevel: access?.textModel?.effort ?? thinkingLevel },
+        });
+        sessionModel = runtime.getModel(model.provider, id)!;
+      }
       const resumed = !restart && manager.buildSessionContext().messages.length > 0;
       const { session } = await (options.createSession ?? createAgentSession)({
         cwd: input.workspace.path,
         agentDir: directory,
         modelRuntime: runtime,
-        model: { ...model, contextWindow: budget.window },
+        model: sessionModel,
         thinkingLevel: access?.effort ?? 'high',
         tools: [
           ...tools
@@ -888,7 +1038,21 @@ export function createPiAgent(options: {
       const finishTurn = session.agent.finishTurn;
       session.agent.finishTurn = async (turn, signal) => {
         const result = await finishTurn?.(turn, signal);
-        if (input.shouldStop()) return { action: 'end' as const };
+        if (
+          input.shouldStop(
+            turn.toolResults.map((result) => ({
+              name: result.toolName,
+              ...(result.isError
+                ? {
+                    error: result.content
+                      .flatMap((part) => (part.type === 'text' ? [part.text] : []))
+                      .join('\n'),
+                  }
+                : {}),
+            })),
+          )
+        )
+          return { action: 'end' as const };
         if (
           input.nextMessages &&
           result?.action !== 'end' &&
@@ -906,7 +1070,7 @@ export function createPiAgent(options: {
       };
       let textBlock: number | undefined;
       let thinking = { index: -1, text: '', scanned: 0 };
-      let compaction: { id: string; started: number } | undefined;
+      let compaction: { id: string; started: number; error?: string } | undefined;
       const auxiliarySeen = new Set(manager.getEntries().map((entry) => entry.id));
       const observeUsage = createPiUsageTracker({
         sessionId: manager.getSessionId(),
@@ -921,22 +1085,30 @@ export function createPiAgent(options: {
       const unsubscribe = session.subscribe((event) => {
         if (event.type === 'compaction_start')
           compaction = { id: randomUUID(), started: performance.now() };
-        if (event.type === 'compaction_end' && compaction) {
+        if (event.type === 'compaction_end') {
+          settings.applyOverrides({ compaction: budget.compaction });
           const target = readsNativeAudio(model) ? (connection?.textModel ?? model) : model;
-          input.onEvent({
-            type: 'provider_usage',
-            usage: {
-              id: compaction.id,
-              provider: target.provider,
-              category: 'agent',
-              operation: 'compaction',
-              model: target.id,
-              turnId: input.turnId,
-              status: event.aborted ? 'cancelled' : event.errorMessage ? 'failed' : 'succeeded',
-              durationMs: performance.now() - compaction.started,
-              ...piUsageMetrics(event.result?.usage),
-            },
-          });
+          const error = compaction?.error ?? event.errorMessage;
+          if (error)
+            input.onEvent({
+              type: 'error',
+              message: `${target.provider} / ${target.id}: ${error}`,
+            });
+          if (compaction)
+            input.onEvent({
+              type: 'provider_usage',
+              usage: {
+                id: compaction.id,
+                provider: target.provider,
+                category: 'agent',
+                operation: 'compaction',
+                model: target.id,
+                turnId: input.turnId,
+                status: error ? 'failed' : event.aborted ? 'cancelled' : 'succeeded',
+                durationMs: performance.now() - compaction.started,
+                ...piUsageMetrics(event.result?.usage),
+              },
+            });
           compaction = undefined;
         }
         if (
@@ -1004,6 +1176,16 @@ export function createPiAgent(options: {
           }
         }
         if (event.type === 'message_end' && event.message.role === 'assistant') {
+          if (
+            event.message.stopReason === 'error' &&
+            tokenRateLimit.test(event.message.errorMessage ?? '')
+          )
+            settings.applyOverrides({ compaction: { enabled: false } });
+          else if (
+            isContextOverflow(event.message, model.contextWindow) ||
+            isRecoverableLength(event.message, model.maxTokens)
+          )
+            settings.applyOverrides({ compaction: { keepRecentTokens: 0 } });
           const usage = observeUsage(event.message);
           if (usage) input.onEvent(usage);
           if (event.message.stopReason === 'error')
@@ -1032,7 +1214,7 @@ export function createPiAgent(options: {
           const contextExhausted =
             status === 'incomplete' &&
             tokens.input + tokens.cacheRead + tokens.cacheWrite + tokens.output >=
-              budget.window - budget.margin;
+              model.contextWindow - budget.margin;
           input.onEvent({
             type: 'message_end',
             ...(status ? { status } : {}),
@@ -1063,16 +1245,9 @@ export function createPiAgent(options: {
         resumed,
         readsImages: model.input.includes('image'),
         readsAudio: readsNativeAudio(model) && Boolean(input.readAudio),
-        contextWindow: budget.window,
+        compactContext: budget.compact,
         async prompt(text, images, audio, stablePrefixes) {
           cached.stable = stablePrefixes;
-          if (
-            budget.compact &&
-            Math.ceil(Buffer.byteLength(text) / 3) + budget.output + budget.margin > budget.window
-          )
-            throw new Error(
-              `This request does not fit the model's ${budget.window}-token context. Use a model with a larger context or a shorter request.`,
-            );
           const owner = input.ownerContext;
           const copy = manager.buildSessionContext().messages.findLast(isOwnerContext);
           if (owner && (copy as { content?: unknown } | undefined)?.content !== owner)
@@ -1080,12 +1255,16 @@ export function createPiAgent(options: {
               { customType: ownerContextType, content: owner, display: false },
               prior.length ? undefined : { deliverAs: 'nextTurn' },
             );
-          if (audio && readsNativeAudio(model))
-            await session.sendCustomMessage(audioMessage(text, images, audio), {
-              triggerTurn: true,
-            });
-          else await session.prompt(text, { images, expandPromptTemplates: false });
-          if (dropFailedInput(manager)) session.refreshContext();
+          try {
+            if (audio && readsNativeAudio(model))
+              await session.sendCustomMessage(audioMessage(text, images, audio), {
+                triggerTurn: true,
+              });
+            else await session.prompt(text, { images, expandPromptTemplates: false });
+          } finally {
+            settings.applyOverrides({ compaction: budget.compaction });
+            if (dropFailedInput(manager)) session.refreshContext();
+          }
         },
         async abort() {
           await session.abort();

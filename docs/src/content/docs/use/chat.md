@@ -17,6 +17,8 @@ Type in the message box and press Enter. Press Shift+Enter for a new line.
 
 Pasted text stays literal. Nod uses the clipboard's plain text even when the source also offers formatting. Line breaks, indentation and Markdown-looking characters such as `*priority*`, `# call` and `<u>text</u>` stay as written in the composer, the sent message and Nod's request. An unsent pasted draft keeps them after a reload.
 
+Messages can contain up to 100,000 characters. Some emoji and symbols count as two characters toward this limit. If your text is longer, the composer keeps your draft and asks you to shorten it or attach the content as a file.
+
 Web and desktop chat limit text message attempts to 120 per minute and audio message attempts to 120 per minute. If you reach either limit, wait and send again.
 
 Use the formatting toolbar when you want formatted text, including underline. Code stays literal, including text that looks like a link or a code fence.
@@ -112,7 +114,7 @@ The message box stays open while Nod works, so you can send another message at a
 
 The line describes the work instead of showing internal tool names. When Nod hasn't named a step, it names the app, website or kind of work that's active, or the model Nod is waiting for. It never counts seconds or guesses when Nod will finish. When Nod answers, the answer takes its place. It clears when Nod asks you something or stops, and hides while the app reconnects. A failed send clears the line and shows an error. Steps come from Nod's own short descriptions, which appear as soon as Nod starts the tool they describe, and, when your model shares a summary of its reasoning, from that summary's heading, such as "Researching Málaga travel ideas".
 
-The line follows only the work on your messages. A task shows its progress on its own card, so a step never appears twice. While anything works, the message box says **Send another message to Nod…**. While a task works, a small dot pulses just above the top-right corner of the message box. A task that needs your answer shows a slightly larger pink dot with a question mark. Hover over a dot or focus it to see which task it is. Select it to open the task's card with a soft highlight: if the card is already on screen, the chat stays where it is; otherwise the chat scrolls to it.
+The line follows only the work on your messages. A task shows its progress on its own card, and a question from a task or schedule shows it on the small line above that question. While anything works, the message box says **Send another message to Nod…**. While a task works, a small dot pulses just above the top-right corner of the message box. A task that needs your answer shows a slightly larger pink dot with a question mark. Hover over a dot or focus it to see which task it is. Select it to open the task's card with a soft highlight: if the card is already on screen, the chat stays where it is; otherwise the chat scrolls to it.
 
 ### Send more while Nod works
 
@@ -163,7 +165,7 @@ macOS controls whether badges appear. In **System Settings > Notifications > Nod
 
 ## Answer Nod's questions
 
-When a task needs a decision, an approval or your help in its browser, it asks and waits. Reply to its question to continue the session that asked. Other tasks can keep working. For actions that need a yes or no, see [Approvals](/trust/approvals/).
+When a task needs a decision, an approval or your help in its browser, it asks and waits. Reply to its question to continue the session that asked. Other tasks can keep working. A question from a task or a scheduled run has a small line above it with the name of that work: a pink dot while it waits for you, then a pulsing dot and the current step while the work continues after your answer. For a task, select the line to go to its card. For actions that need a yes or no, see [Approvals](/trust/approvals/).
 
 For a question with a few useful answers, Nod shows the question as a card with its choices, each marked A, B, C, one line each. Select a choice to send it as a reply to that question, even when a newer question appears below it. When Nod says you can pick one or more, select every choice that fits, add your own in **Type your own answer** if you like, then select **Done** or press Enter.
 
@@ -187,7 +189,9 @@ You can also tell Nod in the main chat, from any app, for example "stop everythi
 
 When a run you started stops on an error or on your spending limit, Nod tells you what failed in the main chat or as a reply to the affected task. For a failed agent model request, Nod shows the provider and model that handled it, the service's specific reason and status, and useful details after removing secrets.
 
-The failure links to **Settings > Models**. You can check the connection or choose another model there. A connection or stream failure also keeps the available cause and request phase. It does not establish whether a provider outage or your network caused the failure. After a known Google daily or zero quota, automatic work on that model pauses on that connection. You can still start a new request yourself. See [Models](/connect/models/) for recovery details.
+The failure links to **Settings > Models**. You can check the connection or choose another model there. A connection or stream failure also keeps the available cause and request phase. It does not establish whether a provider outage or your network caused the failure. When Nod records a failure for your model, the provider's reason also shows above the message box, and automatic work on that model waits. Failures Nod retries on its own, such as an overload, aren't recorded. After your message fails at the model, and while a failure is recorded, a notice above the message box lets you switch to another connected model or try again with the same model. Both buttons send your last message again when it failed at the model and was plain text. A message with attachments, a reply or a card answer isn't sent again for you, so send it again yourself. You can still start a new request yourself. See [Models](/connect/models/) for recovery details.
+
+Nod can also end a run after five repeated failures for the same tool. These include invalid input, unavailable tools, and failed sign-in or action review checks. A successful call resets that tool's count. Nod keeps the last specific cause, so you can see what stopped the work. Approval and sign-in checks still apply when you ask again.
 
 If the service reports an oversized tokens-per-minute request, the error keeps its requested and allowed token counts and suggests shortening the conversation or choosing a model with a higher limit. If a daily quota error includes a retry delay, Nod gives you an approximate wait time. For an account or workspace usage cap, wait for the limit to reset or check its settings; a workspace admin may need to raise it. Nod's next turn knows what went wrong.
 
@@ -209,7 +213,7 @@ In the desktop app, hold Command on a Mac or Ctrl on Windows and Linux to reveal
 
 ## React to messages
 
-To react to one of Nod's replies, hover over the bubble and select its reaction icon, or hold or right-click the bubble and choose **React**. Pick a quick reaction, or choose **More emoji** to search and scroll through the full picker. Your reaction appears at the bottom of the bubble and is sent as a reply to that message for Nod to interpret. A thumbs-up can answer a question. On an action confirmation, 👍 or 👎 confirms or declines the exact action Nod asked about. For other reactions, Nod asks for confirmation before acting outside chat. Select the reaction to remove it from the bubble. Removing or changing it does not undo a reply or action already sent.
+To react to one of Nod's replies, hover over the bubble and select its reaction icon, or hold or right-click the bubble and choose **React**. Pick a quick reaction, or choose **More emoji** to search and scroll through the full picker. Your reaction appears at the bottom of the bubble without adding another chat message, and Nod can interpret it as a response to that message. A thumbs-up can answer a question. On an action confirmation, 👍 or 👎 confirms or declines the exact action Nod asked about. For other reactions, Nod asks for confirmation before acting outside chat. Select the reaction to remove it from the bubble. Removing or changing it does not undo a response or action already sent.
 
 Nod sometimes reacts to your messages too, such as ✅ when you say yes to something it offered or ❤️ when you thank it. It reacts only now and then, and a reaction never replaces its reply.
 
@@ -231,9 +235,9 @@ Links to Nod screens open in the current window. A link to **Settings > Models**
 
 In Telegram and WhatsApp, a screen link opens a public page. Select **Open in Nod** on the computer where Nod is installed. On a phone, use the location on that page to continue in Nod on your computer. The link contains only the screen name. It cannot change settings or approve an action.
 
-You can also ask Nod to change supported settings from any channel. For example, ask it to use a connected model, set quiet hours, change the time zone or clock format, or set a spending limit. Nod uses its tools and reports the saved result. It asks when your request does not identify the target or value. Model sign-in and device settings, such as launch at login, still need the app.
+You can also ask Nod to change supported settings from any channel. For example, ask it to use a connected model, for chat, schedules, one schedule, one task or its own work, set quiet hours, change the time zone or clock format, or set a spending limit. Nod uses its tools and reports the saved result. It asks when your request does not identify the target or value. Model sign-in and device settings, such as launch at login, still need the app.
 
-Links stay inline in the reply. Hover over a link, or focus it with the keyboard, to see its full address. Select a link, or press Enter while it is focused, to open its page. Nod sends Telegram and WhatsApp replies with link previews turned off.
+Links stay inline in the reply. Hover over a link, or focus it with the keyboard, to see its full address. Select a link, or press Enter while it is focused, to open its page. In the desktop app, right-click a link and choose **Copy link address** to copy its destination. Nod sends Telegram and WhatsApp replies with link previews turned off.
 
 ## Replies go back where you wrote
 
