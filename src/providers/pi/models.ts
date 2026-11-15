@@ -38,6 +38,7 @@ import type { ProviderUsageEvent } from '../../ports/provider-usage.ts';
 import { piUsageMetrics } from './usage.ts';
 import { audioUsage, nativeAudioRequest, readsNativeAudio } from './audio.ts';
 import { completeAssistantMessage } from './checkpoint.ts';
+import { modelContext } from './context.ts';
 import { modelServiceError } from '../model-error.ts';
 import {
   antLingModel,
@@ -62,28 +63,6 @@ function supportedModel(model: Model<Api>): Model<Api> {
 
 const resource = 'https://api.openai.com/v1';
 const issuer = 'https://auth.openai.com';
-
-export function modelContextBudget(model: {
-  provider: string;
-  id: string;
-  contextWindow: number;
-  maxTokens: number;
-}) {
-  const routed =
-    model.provider === 'openrouter' && ['openrouter/free', 'openrouter/auto'].includes(model.id);
-  const window = routed ? Math.min(8192, model.contextWindow) : model.contextWindow;
-  const compact = window < 65_536;
-  return {
-    window,
-    compact,
-    margin: Math.min(2048, Math.max(128, Math.floor(window / 16))),
-    output: compact ? Math.min(model.maxTokens, Math.floor(window / 4)) : model.maxTokens,
-    reserve: compact ? Math.floor(window / 2) : Math.max(16_384, window - 256_000),
-    recent: compact
-      ? Math.floor(window / 8)
-      : Math.max(0, Math.round(Math.min(256_000, window - 16_384) / 3)),
-  };
-}
 
 const callbackUrl = 'http://127.0.0.1:1455/auth/callback';
 const registration = 'dynamic_agent_client';
@@ -1138,12 +1117,13 @@ export async function createPiModelRuntime(
       };
     };
   }
+  const limits = modelContext(
+    access.definition.spec as unknown as Model<Api>,
+    access.textModel?.definition.spec as unknown as Model<Api> | undefined,
+  ).model;
   runtime.registerProvider(provider, {
     models: [access.definition, ...(access.textModel ? [access.textModel.definition] : [])].map(
-      ({ spec }) => ({
-        ...supportedModel(spec as unknown as Model<Api>),
-        contextWindow: modelContextBudget(spec as unknown as Model<Api>).window,
-      }),
+      ({ spec }) => modelContext(supportedModel(spec as unknown as Model<Api>), limits).model,
     ) as unknown as ProviderModelConfig[],
   });
   await runtime.refresh({ allowNetwork: false });
@@ -1162,7 +1142,8 @@ export async function createPiModelRuntime(
       ),
     };
     const audio = readsNativeAudio(model) ? nativeAudioRequest(context, readAudio) : undefined;
-    const target = audio && !audio.active && textModel ? textModel : model;
+    const companion = audio && !audio.active ? textModel : undefined;
+    const { model: target } = modelContext(companion ?? model, limits);
     const usage = audio?.active ? audioUsage() : undefined;
     const cacheWarm = options?.maxTokens === 1 && options.maxRetries === 0;
     let phase: ModelRequestFacts['requestPhase'] = 'prepare';
@@ -1182,10 +1163,7 @@ export async function createPiModelRuntime(
       access.provider === 'compatible'
         ? { ...sent, messages: portableToolCallIds(sent.messages, target.id) }
         : sent;
-    const output = Math.min(
-      options?.maxTokens ?? target.maxTokens,
-      modelContextBudget(target).output,
-    );
+    const output = Math.min(options?.maxTokens ?? target.maxTokens, target.maxTokens);
     const upstream = stream(target, replay, {
       ...options,
       maxTokens: output,
@@ -1202,7 +1180,7 @@ export async function createPiModelRuntime(
       ...(target.provider === 'openrouter' && target.id === 'openrouter/free'
         ? { reasoning: options?.reasoning ?? 'minimal' }
         : {}),
-      ...(target !== model
+      ...(companion
         ? { reasoning: access.textModel!.effort === 'off' ? undefined : access.textModel!.effort }
         : {}),
       ...(guardedFetch ||

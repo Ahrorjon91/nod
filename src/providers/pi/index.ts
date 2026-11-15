@@ -28,7 +28,8 @@ import {
   type ResourceLoader,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { createPiModelRuntime, localModelSilenceMs, modelContextBudget } from './models.ts';
+import { createPiModelRuntime, localModelSilenceMs } from './models.ts';
+import { modelContext } from './context.ts';
 import { audioContext, audioMessage, readsNativeAudio } from './audio.ts';
 import { piModelTrace } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
@@ -497,10 +498,10 @@ export function createPiAgent(options: {
         connection?.model ?? (modelId ? runtime.getModel(options.provider, modelId) : undefined);
       if (!selectedModel)
         throw new Error('The configured model is not present in the installed Pi catalog.');
-      const model =
+      const { model, ...budget } = modelContext(
         selectedModel.provider === 'openai' &&
-        selectedModel.api === 'openai-responses' &&
-        selectedModel.id === agentModels.openai
+          selectedModel.api === 'openai-responses' &&
+          selectedModel.id === agentModels.openai
           ? {
               ...selectedModel,
               samplingParams: {
@@ -511,14 +512,9 @@ export function createPiAgent(options: {
                 },
               },
             }
-          : selectedModel;
-      const budget = modelContextBudget({
-        ...model,
-        contextWindow: Math.min(
-          model.contextWindow,
-          connection?.textModel?.contextWindow ?? model.contextWindow,
-        ),
-      });
+          : selectedModel,
+        connection?.textModel,
+      );
       if (budget.compact && input.compactInstructions)
         input = { ...input, ...input.compactInstructions };
       const boundedOutput = async (
@@ -535,9 +531,8 @@ export function createPiAgent(options: {
           .join('\n');
         const images = result.content.filter((part) => part.type === 'image');
         if (!text && !images.length) return result;
-        const limit = Math.floor(budget.window / 2);
         if (
-          Buffer.byteLength(text) <= limit &&
+          Buffer.byteLength(text) <= budget.toolOutput.maxBytes &&
           estimateTokens({
             role: 'toolResult',
             toolCallId: '',
@@ -545,8 +540,7 @@ export function createPiAgent(options: {
             content: result.content,
             isError: result.isError ?? false,
             timestamp: 0,
-          }) <=
-            budget.window / 8
+          }) <= budget.toolOutput.maxTokens
         )
           return result;
         signal?.throwIfAborted();
@@ -601,7 +595,7 @@ export function createPiAgent(options: {
         const saved = JSON.stringify({
           workspaceFile: file,
           characters: text.length,
-          preview: text.slice(0, 1000),
+          preview: text.slice(0, budget.toolOutput.previewCharacters),
         });
         const pointer = result.isError ? saved : untrustedBlock(name, saved);
         return {
@@ -623,7 +617,9 @@ export function createPiAgent(options: {
       const restart =
         input.restartable === true &&
         prior.length > 0 &&
-        (!last || Date.now() - last.timestamp >= warmCache || priorTokens > budget.recent);
+        (!last ||
+          Date.now() - last.timestamp >= warmCache ||
+          priorTokens > budget.compaction.keepRecentTokens);
       const cached: { owner?: string; stable?: string[] } = { owner: input.ownerContext };
       const keepCache =
         restart &&
@@ -723,11 +719,7 @@ export function createPiAgent(options: {
       const deferred =
         !input.restricted || budget.compact || input.tools.some((tool) => tool.deferred);
       const settings = SettingsManager.inMemory({
-        compaction: {
-          enabled: true,
-          reserveTokens: budget.reserve,
-          keepRecentTokens: budget.recent,
-        },
+        compaction: budget.compaction,
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
@@ -992,7 +984,7 @@ export function createPiAgent(options: {
         cwd: input.workspace.path,
         agentDir: directory,
         modelRuntime: runtime,
-        model: { ...model, contextWindow: budget.window, maxTokens: budget.output },
+        model,
         thinkingLevel: access?.effort ?? 'high',
         tools: [
           ...tools
@@ -1068,7 +1060,7 @@ export function createPiAgent(options: {
         if (event.type === 'compaction_start')
           compaction = { id: randomUUID(), started: performance.now() };
         if (event.type === 'compaction_end') {
-          settings.applyOverrides({ compaction: { keepRecentTokens: budget.recent } });
+          settings.applyOverrides({ compaction: budget.compaction });
           const target = readsNativeAudio(model) ? (connection?.textModel ?? model) : model;
           const error = compaction?.error ?? event.errorMessage;
           if (error)
@@ -1164,8 +1156,8 @@ export function createPiAgent(options: {
           )
             settings.applyOverrides({ compaction: { enabled: false } });
           else if (
-            isContextOverflow(event.message, budget.window) ||
-            isRecoverableLength(event.message, budget.output)
+            isContextOverflow(event.message, model.contextWindow) ||
+            isRecoverableLength(event.message, model.maxTokens)
           )
             settings.applyOverrides({ compaction: { keepRecentTokens: 0 } });
           const usage = observeUsage(event.message);
@@ -1196,7 +1188,7 @@ export function createPiAgent(options: {
           const contextExhausted =
             status === 'incomplete' &&
             tokens.input + tokens.cacheRead + tokens.cacheWrite + tokens.output >=
-              budget.window - budget.margin;
+              model.contextWindow - budget.margin;
           input.onEvent({
             type: 'message_end',
             ...(status ? { status } : {}),
@@ -1227,7 +1219,7 @@ export function createPiAgent(options: {
         resumed,
         readsImages: model.input.includes('image'),
         readsAudio: readsNativeAudio(model) && Boolean(input.readAudio),
-        contextWindow: budget.window,
+        contextWindow: model.contextWindow,
         async prompt(text, images, audio, stablePrefixes) {
           cached.stable = stablePrefixes;
           const owner = input.ownerContext;
@@ -1244,9 +1236,7 @@ export function createPiAgent(options: {
               });
             else await session.prompt(text, { images, expandPromptTemplates: false });
           } finally {
-            settings.applyOverrides({
-              compaction: { enabled: true, keepRecentTokens: budget.recent },
-            });
+            settings.applyOverrides({ compaction: budget.compaction });
             if (dropFailedInput(manager)) session.refreshContext();
           }
         },

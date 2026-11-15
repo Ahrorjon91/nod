@@ -170,6 +170,7 @@ test('models and routers complete tool discovery inside the endpoint context', a
       let rejections = 0;
       const bodies: Record<string, any>[] = [];
       const requestBudgets: number[] = [];
+      let selectedOutput = 0;
       const documentation =
         id === 'fixture-docs-small'
           ? createDocumentation(join(process.cwd(), 'docs/src/content/docs'))
@@ -201,6 +202,10 @@ test('models and routers complete tool discovery inside the endpoint context', a
         assert.equal(String(url), `${access.definition.spec.baseUrl}/chat/completions`);
         const body = JSON.parse(String(init?.body));
         bodies.push(body);
+        assert.ok(
+          (body.max_tokens ?? body.max_completion_tokens) <= selectedOutput,
+          `Requested output exceeds Pi's ${selectedOutput}-token limit.`,
+        );
         let images = 0;
         const text = JSON.stringify(
           { messages: body.messages, tools: body.tools },
@@ -316,7 +321,10 @@ test('models and routers complete tool discovery inside the endpoint context', a
               test.mock.method(globalThis, 'fetch', serve);
               fetchMocked = true;
             }
-            return createAgentSession(options);
+            const result = await createAgentSession(options);
+            assert.equal(result.session.model?.contextWindow, limit);
+            selectedOutput = result.session.model!.maxTokens;
+            return result;
           },
         }),
         skills: createSkillLibrary(join(process.cwd(), 'src/runtime/skills'), coreSkills),
@@ -5644,6 +5652,7 @@ test('full 32k Pi sessions distinguish context exhaustion from output truncation
   assert.ok(outputLimit.outcome.failure);
   assert.deepEqual(outputLimit.ending, { type: 'message_end', status: 'incomplete' });
   assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].max_tokens, 8192);
   assert.equal(outputLimit.usage[0].outputTokens, bodies[0].max_tokens);
   assert.ok(outputLimit.usage[0].totalTokens < 32_768);
 
@@ -7797,6 +7806,8 @@ test('native audio reaches the selected Pi model with tools and survives a reope
   const { createServer } = await import('node:http');
   const bodies: Array<{
     model: string;
+    max_tokens?: number;
+    max_completion_tokens?: number;
     messages: Array<{ role: string; content: unknown }>;
     tools?: unknown[];
   }> = [];
@@ -8033,6 +8044,10 @@ test('native audio reaches the selected Pi model with tools and survives a reope
   await first.dispose();
   assert.equal(calls, 1);
   assert.ok(bodies[0].tools?.length);
+  assert.equal(
+    bodies[0].max_tokens ?? bodies[0].max_completion_tokens,
+    piSession!.model!.maxTokens,
+  );
   const audio = (body: (typeof bodies)[number]) =>
     body.messages.flatMap((message) =>
       Array.isArray(message.content)
@@ -8198,9 +8213,12 @@ test('native audio reaches the selected Pi model with tools and survives a reope
     systemPrompt: 'Large synthetic owner context. '.repeat(3000),
     compactInstructions: { systemPrompt: 'Answer the synthetic typed request briefly.' },
   });
+  assert.equal(piSession!.model!.contextWindow, 8192);
+  assert.equal(piSession!.model!.maxTokens, 2048);
   await small.prompt('A typed request using the small text companion.', []);
   await small.dispose();
   assert.equal(bodies.length, beforeSmall + 1);
+  assert.equal(bodies.at(-1)!.max_tokens ?? bodies.at(-1)!.max_completion_tokens, 2048);
   assert.equal(bodies.at(-1)!.model, 'fixture-text-model');
   assert.equal(audio(bodies.at(-1)!).length, 0);
   assert.equal(
