@@ -703,7 +703,10 @@ export function Chat({
     lastMessage?.role === 'assistant' &&
     lastMessage.streamId?.startsWith('failure:') &&
     beforeLast?.role === 'user' &&
-    !beforeLast.attachments.length
+    !beforeLast.attachments.length &&
+    !beforeLast.replyToMessageId &&
+    !beforeLast.choiceAnswer &&
+    !beforeLast.cardAnswer
       ? beforeLast.text
       : undefined;
   const chatWork = connected
@@ -2477,7 +2480,7 @@ export function Chat({
                     type="button"
                     size="sm"
                     variant="secondary"
-                    disabled={recovering || working}
+                    disabled={recovering || working || sending}
                     onClick={() => void recover(state.configuration.modelAlternative)}
                   >
                     Use {state.configuration.modelAlternative.label}
@@ -2488,7 +2491,7 @@ export function Chat({
                     type="button"
                     size="sm"
                     variant="ghost"
-                    disabled={recovering || working}
+                    disabled={recovering || working || sending}
                     onClick={() => void recover()}
                   >
                     Try again

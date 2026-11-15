@@ -134,7 +134,7 @@ export function createPiMemoryCurator(options: {
     },
     async curate({ task, instructions, input, images, automatic = true }, signal, report) {
       signal?.throwIfAborted();
-      const bounded = task === 'classify' || task === 'attention';
+      const bounded = task === 'classify' || task === 'attention' || task === 'check';
       if (options.resolve) loaded = undefined;
       loaded ??= load(automatic).catch((error) => {
         loaded = undefined;

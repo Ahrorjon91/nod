@@ -3193,7 +3193,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     });
     assert.equal(checks, 2);
     await service.select(service.view().selection!);
-    assert.equal(checks, 2);
+    assert.equal(checks, 3);
 
     await service.close();
     service = await f.create('fixture-failing-owner', backend);

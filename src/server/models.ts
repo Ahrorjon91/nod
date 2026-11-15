@@ -1263,6 +1263,7 @@ export function createModelService(options: {
     },
     async select(input: ModelSelection, actor: SettingActor = 'owner', client?: PoolClient) {
       const value = modelSelectionInput.parse(input);
+      checked = undefined;
       const capture = snapshotAnalytics(analytics);
       const changed = await store.change(
         (state) => {

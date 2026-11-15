@@ -1154,7 +1154,7 @@ export async function createPiModelRuntime(
     let settleBudget: ((spentUsd: number | null) => Promise<void>) | undefined;
     const silence = new AbortController();
     const silenceTimer =
-      access.provider === 'compatible' || cacheWarm
+      access.provider === 'compatible'
         ? undefined
         : setTimeout(() => silence.abort(), modelFirstEventMs);
     silenceTimer?.unref?.();
