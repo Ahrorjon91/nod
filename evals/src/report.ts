@@ -530,7 +530,7 @@ export function runsTable(
     `  ${'label'.padEnd(width)}  ${'when'.padEnd(16)}  ${'agent'.padEnd(28)} ${'source'.padEnd(12)} all required checks`,
     ...runs.map(
       (run) =>
-        `  ${run.label.padEnd(width)}  ${run.manifest.startedAt.slice(0, 16).replace('T', ' ')}  ${`${run.manifest.model}${run.manifest.backgroundModel ? ` + ${run.manifest.backgroundModel}` : ''}`.padEnd(28)} ${(run.manifest.ref ?? run.manifest.commit.slice(0, 7)).slice(0, 12).padEnd(12)} ${pct(run.summary.combined.percent)} (${run.summary.combined.passed}/${run.summary.combined.total}), ${money(run.summary.costUsd)}, ${minutes(run.summary.seconds)}`,
+        `  ${run.label.padEnd(width)}  ${run.manifest.startedAt.slice(0, 16).replace('T', ' ')}  ${`${run.manifest.model}${run.manifest.backgroundModel ? ` + ${run.manifest.backgroundModel}` : ''}`.slice(0, 28).padEnd(28)} ${(run.manifest.ref ?? run.manifest.commit.slice(0, 7)).slice(0, 12).padEnd(12)} ${pct(run.summary.combined.percent)} (${run.summary.combined.passed}/${run.summary.combined.total}), ${money(run.summary.costUsd)}, ${minutes(run.summary.seconds)}`,
     ),
   ].join('\n');
 }

@@ -282,7 +282,7 @@ export function WorkModel({
   const models = useModels();
   const usage = usePageData<WorkUsageResponse>(workUsagePath);
   const data = models.data;
-  if (!data?.selection) return null;
+  if (!data) return null;
   const kind = schedule ? 'schedule' : task.work;
   if (!kind) return null;
   const own = schedule ? schedule.model : task.model;
