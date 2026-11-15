@@ -790,6 +790,11 @@ test(
           };
           assert.deepEqual(modelsOf(await run()), ['gpt-6.1-sol']);
           const lightChoice = models.view().light!;
+          const retired = await put(`/api/schedules/${schedule.id}/model`, {
+            model: { ...lightChoice, modelId: 'gpt-retired' },
+          });
+          assert.equal(retired.statusCode, 400, retired.body);
+          assert.match(retired.json<{ error: string }>().error, /available text model/);
           const pinned = await put(`/api/schedules/${schedule.id}/model`, { model: lightChoice });
           assert.equal(pinned.statusCode, 200, pinned.body);
           const second = await run();
@@ -822,10 +827,53 @@ test(
           assert.equal(grew(after30.tasks[task.id], before30.tasks[task.id]), 8000);
           const onLuna = (usage: WorkUsageResponse, kind: string) =>
             usage.own
-              .filter((entry) => entry.kind === kind && entry.model.modelId === 'gpt-6-luna')
+              .filter(
+                (entry) =>
+                  entry.kind === kind && (entry.task ?? entry.schedule)?.modelId === 'gpt-6-luna',
+              )
               .reduce((sum, entry) => sum + entry.input, 0);
           assert.equal(onLuna(after30, 'schedule') - onLuna(before30, 'schedule'), 4000);
           assert.equal(onLuna(after30, 'chat') - onLuna(before30, 'chat'), 8000);
+
+          const followUp = randomUUID();
+          const followTurn = randomUUID();
+          await pool.query(
+            `INSERT INTO turns(id,owner_id,thread_id,session_id,parent_turn_id,source,prompt,status,background)
+             SELECT $1,owner_id,thread_id,$2,id,'task','Synthetic schedule follow-up','succeeded',true FROM turns WHERE id=$3`,
+            [followTurn, followUp, second],
+          );
+          await pool.query(
+            `INSERT INTO tasks(id,owner_id,turn_id,title,done_when,now_text,session_id)
+             VALUES($1,$2,$3,'Synthetic schedule follow-up','Synthetic follow-up is done.','Waiting.',$1)`,
+            [followUp, ownerId, followTurn],
+          );
+          await pool.query(
+            'INSERT INTO model_usage(id,owner_id,turn_id,cost_usd,details) VALUES($1,$2,$3,$4,$5)',
+            [
+              randomUUID(),
+              ownerId,
+              followTurn,
+              0.01,
+              { category: 'agent', model: 'gpt-6.1-sol', inputTokens: 1000, outputTokens: 0 },
+            ],
+          );
+          const inherited = (await request('GET', '/api/tasks'))
+            .json<Task[]>()
+            .find((item) => item.id === followUp)!;
+          assert.equal(inherited.work, 'schedule');
+          assert.equal(inherited.scheduleModel?.modelId, 'gpt-6-luna');
+          const lunaPrice = models
+            .view()
+            .connections[0]!.models.find((item) => item.id === 'gpt-6-luna')!.pricing as {
+            input: number;
+          };
+          const followDefault = (await application.personal.manage('model_select', {
+            scope: 'task',
+            id: followUp,
+            use: 'same',
+          })) as { last30Days?: { withChoiceUsd: number | null } };
+          assert.equal(followDefault.last30Days?.withChoiceUsd, (1000 * lunaPrice.input) / 1e6);
+          await pool.query('DELETE FROM tasks WHERE id=$1', [followUp]);
 
           const back = await put(`/api/tasks/${task.id}/model`, { model: null });
           assert.equal(back.statusCode, 200, back.body);

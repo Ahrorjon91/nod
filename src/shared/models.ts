@@ -114,7 +114,9 @@ export interface WorkUsageResponse {
   lanes: Record<WorkKind, WorkUsage>;
   schedules: Record<string, WorkUsage>;
   tasks: Record<string, WorkUsage>;
-  own: Array<WorkUsage & { kind: WorkKind; model: ModelSelection }>;
+  own: Array<
+    WorkUsage & { kind: WorkKind; task: ModelSelection | null; schedule: ModelSelection | null }
+  >;
 }
 
 export function routeModel(

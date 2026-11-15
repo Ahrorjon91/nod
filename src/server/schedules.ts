@@ -1008,10 +1008,10 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       await client.query<ScheduleRow>(
         `SELECT ${columns} FROM schedules WHERE owner_id=$1 AND enabled AND kind=$2
            AND cron IS NOT DISTINCT FROM $3 AND run_at IS NOT DISTINCT FROM $4::timestamptz AND time_zone=$5
-           AND watch IS NOT DISTINCT FROM $9::jsonb AND model IS NOT DISTINCT FROM $10::jsonb AND delivery_channel=$8 AND ${
+           AND watch IS NOT DISTINCT FROM $9::jsonb AND delivery_channel=$8 AND ${
              route.sourceId
                ? `channel_source_id IN (SELECT source_id FROM channel_inbox WHERE owner_id=$1
-                    AND thread_id=(SELECT thread_id FROM channel_inbox WHERE source_id=$11 AND owner_id=$1))`
+                    AND thread_id=(SELECT thread_id FROM channel_inbox WHERE source_id=$10 AND owner_id=$1))`
                : 'channel_source_id IS NULL'
            }
            AND (lower(btrim(title))=lower(btrim($6)) OR prompt=$7) ORDER BY created_at LIMIT 1`,
@@ -1025,7 +1025,6 @@ export function createSchedules(dependencies: ScheduleDependencies) {
           input.prompt,
           route.channel,
           input.watch ? JSON.stringify(input.watch) : null,
-          input.model ? JSON.stringify(input.model) : null,
           ...(route.sourceId ? [route.sourceId] : []),
         ],
       )
@@ -1041,7 +1040,18 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       assertChange(provenance, input);
       const authorized = await authority(client, input, provenance);
       const existing = provenance && (await duplicate(client, input, route));
-      if (existing) return { row: existing, existing: true };
+      if (existing) {
+        const updated = input.model
+          ? (
+              await client.query<ScheduleRow>(
+                `UPDATE schedules SET model=$3::jsonb WHERE id=$1 AND owner_id=$2 AND model IS DISTINCT FROM $3::jsonb RETURNING ${columns}`,
+                [existing.id, ownerId, JSON.stringify(input.model)],
+              )
+            ).rows[0]
+          : undefined;
+        if (updated) modelChanged(client, 'agent', input.model ?? null);
+        return { row: updated ?? existing, existing: true };
+      }
       const saved = (
         await client.query<ScheduleRow>(
           `INSERT INTO schedules(id,owner_id,title,prompt,kind,cron,run_at,time_zone,delivery_channel,channel_source_id,authority,baseline_observation,watch,model)
@@ -1188,19 +1198,18 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       if (!rowCount) await read(id, client);
       return Boolean(rowCount);
     }, shared);
-    if (changed)
-      afterCommit(shared ?? pool, () => {
-        refresh();
-        dependencies.analytics?.({
-          event: 'setting_changed',
-          properties: {
-            setting: 'schedule_model',
-            actor,
-            state: choice ? 'configured' : 'default',
-          },
-        });
-      });
+    if (changed) modelChanged(shared ?? pool, actor, choice);
     return value(await read(id, shared));
+  }
+
+  function modelChanged(client: object, actor: 'owner' | 'agent', choice: ModelSelection | null) {
+    afterCommit(client, () => {
+      refresh();
+      dependencies.analytics?.({
+        event: 'setting_changed',
+        properties: { setting: 'schedule_model', actor, state: choice ? 'configured' : 'default' },
+      });
+    });
   }
 
   async function remove(id: string) {

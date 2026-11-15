@@ -204,9 +204,9 @@ export function ModelSentences() {
       { usage: work.lanes.chat, model: data.selection },
       { usage: work.lanes.schedule, model: routeModel(data, 'schedule')?.selection },
       { usage: work.lanes.background, model: routeModel(data, 'background')?.selection },
-      ...(work.own ?? []).map(({ kind, model, ...usage }) => ({
+      ...(work.own ?? []).map(({ kind, task, schedule, ...usage }) => ({
         usage,
-        model: routeModel(data, kind, { task: model })?.selection,
+        model: routeModel(data, kind, { task, schedule })?.selection,
       })),
     ]);
   return (

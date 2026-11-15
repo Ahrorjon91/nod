@@ -1041,18 +1041,18 @@ async function initializeApplication(
               ];
       const last30Usd = spent ? spent.agentUsd + spent.otherUsd : 0;
       if (!spent || last30Usd <= 0) return null;
-      const kind =
+      const origin =
         scope === 'schedules' || scope === 'schedule'
-          ? 'schedule'
+          ? { kind: 'schedule' as const }
           : scope === 'background'
-            ? 'background'
+            ? { kind: 'background' as const }
             : scope === 'task'
-              ? ((await tasks.workOf(id!)) ?? 'chat')
-              : 'chat';
+              ? ((await tasks.workOf(id!)) ?? { kind: 'chat' as const })
+              : { kind: 'chat' as const };
       const target = models.priceOf(
         model === 'light'
           ? (models.light() ?? models.view().selection)
-          : (model ?? models.workModel({ kind }).selection),
+          : (model ?? models.workModel(origin).selection),
       );
       if (!target) return null;
       const withChoiceUsd =
@@ -1097,9 +1097,11 @@ async function initializeApplication(
         ? (view.light ?? view.selection)
         : input.use === 'same'
           ? scope === 'schedule' || scope === 'task'
-            ? models.workModel({
-                kind: scope === 'task' && id ? ((await tasks.workOf(id)) ?? 'chat') : lane,
-              }).selection
+            ? models.workModel(
+                scope === 'task' && id
+                  ? ((await tasks.workOf(id)) ?? { kind: 'chat' })
+                  : { kind: lane },
+              ).selection
             : view.selection
           : { connectionId: String(input.connectionId), modelId: String(input.modelId) };
     const connection = view.connections.find((item) => item.id === choice?.connectionId);

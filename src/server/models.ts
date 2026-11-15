@@ -580,7 +580,9 @@ export function createModelService(options: {
       row?.status === 'connected' &&
       row.models.find((item) => item.choice.id === value.modelId && !item.choice.audio);
     if (!row || !definition || !definition.choice.efforts.includes(value.effort))
-      throw new ConnectionError('Choose an available text model and effort.');
+      throw Object.assign(new ConnectionError('Choose an available text model and effort.'), {
+        statusCode: 400,
+      });
     return { row, definition };
   }
   function routeState(value: ModelRoute | null | undefined) {

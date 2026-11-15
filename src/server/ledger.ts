@@ -818,7 +818,8 @@ export function createLedger({
         kind: WorkKind;
         scheduleId: string | null;
         taskId: string | null;
-        model: ModelSelection | null;
+        taskModel: ModelSelection | null;
+        scheduleModel: ModelSelection | null;
       }
     >(
       `WITH recent AS (
@@ -829,13 +830,14 @@ export function createLedger({
            work_task.id::text AS task_id,work_task.model AS task_model,work_schedule.model AS schedule_model
          FROM (SELECT DISTINCT owner_id,session_id,thread_id FROM recent) x ${workOriginSql('x')}
        ), sessions AS (
-         SELECT session_id,kind,schedule_id,task_id,
-           COALESCE(task_model,CASE WHEN kind='schedule' THEN schedule_model END) AS model
+         SELECT session_id,kind,schedule_id,task_id,task_model,
+           CASE WHEN kind='schedule' THEN schedule_model END AS schedule_model
          FROM origins
        )
-       SELECT x.kind,x.schedule_id AS "scheduleId",x.task_id AS "taskId",x.model,${usageColumns}
+       SELECT x.kind,x.schedule_id AS "scheduleId",x.task_id AS "taskId",
+         x.task_model AS "taskModel",x.schedule_model AS "scheduleModel",${usageColumns}
        FROM recent m JOIN sessions x ON x.session_id=m.session_id
-       GROUP BY x.kind,x.schedule_id,x.task_id,x.model`,
+       GROUP BY x.kind,x.schedule_id,x.task_id,x.task_model,x.schedule_model`,
       [ownerId],
     );
     const empty = (): WorkUsage => ({
@@ -867,10 +869,13 @@ export function createLedger({
     const schedules: Record<string, WorkUsage> = {};
     const tasks: Record<string, WorkUsage> = {};
     const own = new Map<string, WorkUsageResponse['own'][number]>();
-    for (const { kind, scheduleId, taskId, model, ...usage } of rows) {
-      if (model) {
-        const key = JSON.stringify([kind, model.connectionId, model.modelId, model.effort]);
-        if (!own.has(key)) own.set(key, { ...empty(), kind, model });
+    const choice = (value: ModelSelection | null) =>
+      value && [value.connectionId, value.modelId, value.effort];
+    for (const { kind, scheduleId, taskId, taskModel, scheduleModel, ...usage } of rows) {
+      if (taskModel || scheduleModel) {
+        const key = JSON.stringify([kind, choice(taskModel), choice(scheduleModel)]);
+        if (!own.has(key))
+          own.set(key, { ...empty(), kind, task: taskModel, schedule: scheduleModel });
         add(own.get(key)!, usage);
       } else add(lanes[kind], usage);
       if (scheduleId) add((schedules[scheduleId] ??= empty()), usage);

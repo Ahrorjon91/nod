@@ -62,6 +62,7 @@ test(
         return id;
       },
       refresh() {},
+      validateModel: (choice) => choice,
     });
     const app = Fastify();
     app.setErrorHandler((error, _request, reply) => {
@@ -1274,6 +1275,16 @@ test(
             assert.equal(created.id === schedule.id, reused);
             assert.equal(created.existing === true, reused);
           }
+          const pinned = { connectionId: randomUUID(), modelId: 'fixture-model', effort: 'high' };
+          await db.pool.query('UPDATE schedules SET model=$2 WHERE id=$1', [
+            schedule.id,
+            JSON.stringify(pinned),
+          ]);
+          assert.equal((await createRouted(provenance)).id, schedule.id);
+          const repinned = { ...pinned, modelId: 'fixture-other-model' };
+          const again = await createRouted(provenance, { model: repinned });
+          assert.equal(again.id, schedule.id);
+          assert.deepEqual(again.model, repinned);
           for (const sourceOwner of [ownerId, 'foreign-source']) {
             const sourceThread = randomUUID();
             const sourceTurn = randomUUID();

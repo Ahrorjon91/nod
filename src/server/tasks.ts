@@ -260,7 +260,8 @@ export function createTasks(options: {
   }
 
   async function workOf(id: string) {
-    return (await read(pool, { id, closed: true }))[0]?.work;
+    const task = (await read(pool, { id, closed: true }))[0];
+    return task?.work ? { kind: task.work, schedule: task.scheduleModel ?? null } : undefined;
   }
 
   async function setModel(
