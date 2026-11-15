@@ -429,8 +429,8 @@ export function createSchedules(dependencies: ScheduleDependencies) {
   async function dispatch(job: Job<ScheduleJob>) {
     job.signal.throwIfAborted();
     const watched = (
-      await pool.query<Pick<ScheduleRow, 'watch' | 'kind' | 'model'>>(
-        'SELECT watch,kind,model FROM schedules WHERE id=$1 AND owner_id=$2',
+      await pool.query<Pick<ScheduleRow, 'watch' | 'kind'>>(
+        'SELECT watch,kind FROM schedules WHERE id=$1 AND owner_id=$2',
         [job.data.scheduleId, ownerId],
       )
     ).rows[0];
@@ -438,8 +438,6 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       watched?.kind === 'recurring' && watched.watch?.length
         ? await dependencies.watchState?.(watched.watch).catch(() => null)
         : null;
-    const paused =
-      watched?.kind === 'recurring' && Boolean(dependencies.modelPaused?.(watched.model));
     job.signal.throwIfAborted();
     const accepted = await transaction(async (client) => {
       const row = (
@@ -475,7 +473,7 @@ export function createSchedules(dependencies: ScheduleDependencies) {
           nextOccurrence(row, new Date(Math.max(now().getTime(), row.nextRun!.getTime()))),
         );
       }
-      if (busy || paused) return true;
+      if (busy || (row.kind === 'recurring' && dependencies.modelPaused?.(row.model))) return true;
       const unchanged = marker ? `${row.revision}:${marker}` : null;
       if (unchanged) {
         if (

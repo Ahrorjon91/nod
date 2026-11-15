@@ -1110,7 +1110,7 @@ test(
         },
       );
       await t.test(
-        'a recurring schedule skips planned fires while its model is paused, and Run now still starts a run',
+        'a recurring schedule skips planned fires while its model is paused, while Run now and one-time runs still start',
         async () => {
           const before = clock;
           const schedule = await create({ cron: '*/15 * * * *' });
@@ -1130,6 +1130,15 @@ test(
             await db.pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [
               manual.json().turnId,
             ]);
+            const once = await create({
+              kind: 'once',
+              runAt: new Date(clock.getTime() + 60_000).toISOString(),
+            });
+            const job = await jobFor(once.id);
+            clock = new Date(job.data.scheduledFor);
+            await deliver([job]);
+            assert.equal((await runs(once.id)).length, 1);
+            await request('DELETE', `/api/schedules/${once.id}`);
           } finally {
             modelPaused = false;
           }

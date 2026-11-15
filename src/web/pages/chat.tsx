@@ -359,6 +359,7 @@ export function Chat({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [recovering, setRecovering] = useState(false);
+  const [recovered, setRecovered] = useState<string>();
   const [connectionNotice, setConnectionNotice] = useState<{
     text: string;
     kind: 'success' | 'error';
@@ -701,6 +702,7 @@ export function Chat({
   const beforeLast = allMessages.at(-2);
   const modelFailed =
     lastMessage?.role === 'assistant' &&
+    lastMessage.id !== recovered &&
     lastMessage.streamId?.startsWith('model-failure:') &&
     beforeLast?.role === 'user' &&
     beforeLast.turnId === lastMessage.turnId;
@@ -1168,6 +1170,7 @@ export function Chat({
   }, [focusTarget, loadingHistory, historyPage, hasEarlier, historyError, visible]);
   async function recover(selection?: ModelSelection) {
     setRecovering(true);
+    setRecovered(lastMessage?.id);
     try {
       if (selection)
         await api('/api/models/selection', {

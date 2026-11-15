@@ -671,12 +671,11 @@ function alternativeModel(models: ApplicationAdapters['models']) {
     (item) =>
       item.id !== view.selection?.connectionId &&
       item.status === 'connected' &&
-      !item.issue &&
       item.models.length > 0,
   );
   const choice =
     other && (defaultModel(other.provider, other.models, other.method) ?? other.models[0]);
-  return other && choice
+  return other && choice && !models?.issue({ connectionId: other.id, modelId: choice.id })
     ? {
         connectionId: other.id,
         modelId: choice.id,

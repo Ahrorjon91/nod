@@ -1055,10 +1055,14 @@ export function createModelService(options: {
         label: chosen?.choice.name ?? selection?.modelId,
         configured: service.configured,
         reconnect: row?.status === 'reconnect',
-        issue: requested(row, selection?.modelId)
-          .map((id) => row?.issues?.[id])
-          .find(Boolean),
+        issue: selection ? service.issue(selection) : undefined,
       };
+    },
+    issue(choice: Pick<ModelSelection, 'connectionId' | 'modelId'>) {
+      const row = rows.find((item) => item.id === choice.connectionId);
+      return requested(row, choice.modelId)
+        .map((id) => row?.issues?.[id])
+        .find(Boolean);
     },
     paused(origin: WorkOrigin) {
       try {
