@@ -30,6 +30,12 @@ function modelOf(data: ModelsResponse, choice: ModelSelection | null | undefined
     ?.models.find((item) => item.id === choice?.modelId);
 }
 
+function same(a: ModelSelection | null | undefined, b: ModelSelection | null | undefined) {
+  return (
+    a?.connectionId === b?.connectionId && a?.modelId === b?.modelId && a?.effort === b?.effort
+  );
+}
+
 async function saved<T>(path: string, body: unknown, update: (value: T) => void) {
   try {
     update(await api<T>(path, { method: 'PUT', body: JSON.stringify(body) }));
@@ -169,14 +175,16 @@ export function ModelSentences() {
     (schedule) =>
       schedule.model &&
       modelOf(data, schedule.model) &&
-      routeModel(data, 'schedule', { schedule: schedule.model })?.selection.modelId !==
-        routeModel(data, 'schedule')?.selection.modelId,
+      !same(
+        routeModel(data, 'schedule', { schedule: schedule.model })?.selection,
+        routeModel(data, 'schedule')?.selection,
+      ),
   );
   const ownTasks = (tasks.data ?? []).filter(
     (task): task is Task & { work: WorkKind } =>
       Boolean(task.work && task.model && modelOf(data, task.model)) &&
       !task.closedAt &&
-      task.model!.modelId !== routeModel(data, task.work!)?.selection.modelId,
+      !same(task.model, routeModel(data, task.work!)?.selection),
   );
   const work = usage.data;
   const price =
@@ -186,11 +194,17 @@ export function ModelSentences() {
       { usage: work.lanes.schedule, model: routeModel(data, 'schedule')?.selection },
       { usage: work.lanes.background, model: routeModel(data, 'background')?.selection },
       ...(schedules.data ?? [])
-        .filter((schedule) => schedule.model && modelOf(data, schedule.model))
-        .map((schedule) => ({ usage: work.schedules[schedule.id], model: schedule.model })),
+        .filter((schedule) => schedule.model)
+        .map((schedule) => ({
+          usage: work.schedules[schedule.id],
+          model: routeModel(data, 'schedule', { schedule: schedule.model })?.selection,
+        })),
       ...(tasks.data ?? [])
-        .filter((task) => task.work && task.model && modelOf(data, task.model))
-        .map((task) => ({ usage: work.tasks[task.id], model: task.model })),
+        .filter((task) => task.work && task.model)
+        .map((task) => ({
+          usage: work.tasks[task.id],
+          model: routeModel(data, task.work!, { task: task.model })?.selection,
+        })),
     ]);
   return (
     <section className="model-current-section" aria-label="Your models">
@@ -289,6 +303,5 @@ export function useOwnModel(model: ModelSelection | null | undefined, kind: Work
   const data = models.data;
   if (!data || !kind || !model) return undefined;
   const own = modelOf(data, model);
-  const fallback = routeModel(data, kind)?.selection;
-  return own && own.id !== fallback?.modelId ? own.name : undefined;
+  return own && !same(model, routeModel(data, kind)?.selection) ? own.name : undefined;
 }

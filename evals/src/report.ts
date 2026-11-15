@@ -142,6 +142,14 @@ function metrics(runs: Loaded[]): Array<[string, string[]] | undefined> {
   const each = (cell: (summary: RunSummary) => string) => runs.map((run) => cell(run.summary));
   return [
     ['agent', each((summary) => summary.manifest.model)],
+    ...(runs.some((run) => run.summary.manifest.backgroundModel)
+      ? [
+          ['own work', each((summary) => summary.manifest.backgroundModel ?? 'same')] as [
+            string,
+            string[],
+          ],
+        ]
+      : []),
     [
       'attempts completed',
       each((summary) => `${summary.coverage.completed}/${summary.coverage.expected ?? '?'}`),
@@ -333,7 +341,7 @@ export function compareTable(runs: Loaded[]) {
       true,
     ),
     ...values.map((metric) =>
-      metric ? row(...metric, metric[0] === 'agent' || metric[0] === 'source') : '',
+      metric ? row(...metric, ['agent', 'own work', 'source'].includes(metric[0])) : '',
     ),
     '',
   ];
@@ -381,7 +389,7 @@ export function markdown(runs: Loaded[]) {
       ? `### Incomplete run: ${coverage(latest)}`
       : `### ${pct(latest.combined.percent)} of regression attempts pass all required checks (${latest.combined.passed}/${latest.combined.total})${moved ? `, ${moved.delta >= 0 ? '+' : ''}${moved.delta} points vs ${runs[0].summary.manifest.label}` : ''}`,
     '',
-    `\`${latest.manifest.model}\` · judge \`${latest.manifest.judge}\` · ${latest.manifest.repeat} attempt${latest.manifest.repeat === 1 ? '' : 's'} per scenario · ${safety} safety incident${safety === 1 ? '' : 's'} · ${money(spent)} on models`,
+    `\`${latest.manifest.model}\`${latest.manifest.backgroundModel ? ` · own work \`${latest.manifest.backgroundModel}\`` : ''} · judge \`${latest.manifest.judge}\` · ${latest.manifest.repeat} attempt${latest.manifest.repeat === 1 ? '' : 's'} per scenario · ${safety} safety incident${safety === 1 ? '' : 's'} · ${money(spent)} on models`,
     '',
   ];
   for (const run of runs) {

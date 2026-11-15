@@ -272,10 +272,12 @@ export function createTasks(options: {
       if (!exists.rowCount) throw failure('This task has no model of its own to change.', 404);
       return false;
     }
-    options.analytics?.({
-      event: 'setting_changed',
-      properties: { setting: 'task_model', actor, state: model ? 'configured' : 'default' },
-    });
+    afterCommit(client, () =>
+      options.analytics?.({
+        event: 'setting_changed',
+        properties: { setting: 'task_model', actor, state: model ? 'configured' : 'default' },
+      }),
+    );
     return true;
   }
 

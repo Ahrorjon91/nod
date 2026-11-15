@@ -381,6 +381,10 @@ export async function startStack(options: {
         throw new Error(
           `${options.backgroundModel} is not a ${model.provider} model. Use light or a model from the --model provider.`,
         );
+      if (options.backgroundModel === 'light' && !models.view().light)
+        throw new Error(
+          `${model.provider} has no light model that costs no more than ${model.name}, so --background-model light would run ${model.name}.`,
+        );
       await models.setRoute(
         'background',
         options.backgroundModel === 'light'

@@ -235,7 +235,7 @@ If your selected connection is removed or needs reconnecting, the next connectio
 Nod uses your model when you talk to it, in the app, Telegram and WhatsApp, and for tasks you start. Schedules, and work Nod starts on its own, such as checking your apps and the tasks it starts from them, can each use another model. In **Settings > Models**, select the model after **Schedules use** or **Work Nod starts on its own uses**:
 
 - **The same model** uses your model.
-- **The light model** uses the smaller model on your model's connection, such as Claude Haiku 5.5 or GPT-6 Luna, when it costs less than your model. Without one, Nod uses your model.
+- **The light model** uses the smaller model on your model's connection, such as Claude Haiku 5.5 or GPT-6 Luna, when it costs no more than your model. Without one, Nod uses your model.
 - Any connected text model.
 
 A lighter model costs much less, but in Nod's evals it read less and flagged fewer time-sensitive things for you than your main model.
@@ -244,7 +244,7 @@ A schedule or task can have its own model too: in **Scheduled**, open it and sel
 
 You can also tell Nod, for example "Run my schedules on the light model" or "Use Opus for the weekly report", in Nod, Telegram or WhatsApp. Nod replies with the cost change.
 
-A change applies from the next turn. Checking what Nod may do, writing the questions it asks you and reading your answers always use your model. If a model you chose for some work is no longer available, that work fails with the reason instead of switching models. Removing a connection returns the work that used it to your model. An audio model's **Text support** label names its companion from the same connection. Requests without recordings use that companion; follow-ups that still include recordings use the audio model. Your saved model choice stays unchanged.
+A change applies from the next turn. Checking what Nod may do, writing the questions it asks you and reading your answers always use your model. If a model you chose for some work is no longer available, that work fails with the reason instead of switching models. Removing a connection returns the work that used it to its default: the model for its kind of work, else your model. An audio model's **Text support** label names its companion from the same connection. Requests without recordings use that companion; follow-ups that still include recordings use the audio model. Your saved model choice stays unchanged.
 
 If a model request fails, Nod doesn't switch to another connection. It retries a temporary provider error, such as an overload or rate limit, up to three times.
 

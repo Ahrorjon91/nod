@@ -1253,8 +1253,9 @@ export function ModelPicker({
   const triggerTitle = model
     ? `${model.name} · ${sourceDescription}${model.audio ? ` · ${model.textModelName ? `Text support: ${model.textModelName}` : 'Text model unavailable'}` : ''}`
     : undefined;
+  const Wrapper = appearance === 'statement' ? 'span' : 'div';
   return (
-    <div
+    <Wrapper
       className={appearance === 'statement' ? 'model-picker model-picker-inline' : 'model-picker'}
     >
       {appearance === 'statement' ? (
@@ -1555,6 +1556,6 @@ export function ModelPicker({
           <ModelSettings />
         </DialogContent>
       </Dialog>
-    </div>
+    </Wrapper>
   );
 }

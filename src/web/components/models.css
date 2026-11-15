@@ -33,6 +33,10 @@
 .work-model-label {
   color: var(--muted-foreground);
 }
+.work-model-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .work-model-value > strong {
   color: var(--foreground);
   font-weight: 500;

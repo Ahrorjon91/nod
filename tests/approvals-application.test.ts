@@ -828,6 +828,8 @@ test(
             404,
           );
           await request('POST', `/api/tasks/${task.id}/stop`);
+          await pool.query('UPDATE turns SET task_id=NULL WHERE task_id=$1', [task.id]);
+          await pool.query('DELETE FROM tasks WHERE id=$1', [task.id]);
           await request('DELETE', `/api/schedules/${schedule.id}`);
           const reset = await put('/api/models/routes', { lane: 'background', route: null });
           assert.equal(reset.statusCode, 200, reset.body);
