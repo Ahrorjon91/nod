@@ -39,6 +39,8 @@ class FlatpakPowerTest(dbusmock.DBusTestCase):
                 denied = subprocess.run(command + [f"--no-talk-name={name}"] + inhibit,
                                         capture_output=True, text=True, timeout=15)
                 self.assertNotEqual(denied.returncode, 0, denied.stdout)
+                self.assertIn("org.freedesktop.DBus.Error.ServiceUnknown", denied.stderr)
+                self.assertTrue(self.get_dbus(system_bus=False).name_has_owner(name))
                 self.assertEqual(len(mock.GetMethodCalls("Inhibit")), 1)
 
 
