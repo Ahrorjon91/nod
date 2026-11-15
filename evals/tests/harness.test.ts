@@ -88,6 +88,38 @@ import { approvalLanguageScenario } from '../src/world/approval-language.ts';
 import { ambiguousDelegationScenario } from '../src/world/ambiguous-delegation.ts';
 import { discoveryCase } from '../src/world/discovery.ts';
 
+test('a scripted greeting reply answers only the opening question', async () => {
+  const definition = discoveryCase('greeting');
+  const world = definition.world({ now: Date.now });
+  const opening = { kind: 'unanswered', text: 'Start the email review?', at: 1 } as const;
+  const later = { kind: 'unanswered', text: 'Which account?', at: 2 } as const;
+  const interactions: Session['interactions'] = [];
+  const messages: string[] = [];
+  const session = {
+    interactions,
+    async say(text: string) {
+      messages.push(text);
+      interactions.push(text === 'Hi' ? { ...opening } : { ...later });
+    },
+    async lastReply() {
+      return 'An unrelated observer message.';
+    },
+  } as Session;
+  await definition.play(session, world);
+  assert.deepEqual(messages, ['Hi', 'Yes']);
+  assert.deepEqual(interactions, [{ ...opening, kind: 'question', reply: 'Yes' }, later]);
+  const run = {
+    turns: [{ background: false, status: 'succeeded' }],
+    interactions,
+    final: 'The email review is ready.',
+    messages: [],
+  } as unknown as Run;
+  if (finished.kind !== 'check') throw new Error('Missing completion check.');
+  assert.equal((await finished.check(run)).pass, false);
+  interactions.pop();
+  assert.equal((await finished.check(run)).pass, true);
+});
+
 test('discovery checks reject work started before the owner selects an offer', async () => {
   const definition = discoveryCase('inbox');
   const world = {
@@ -133,24 +165,29 @@ test('discovery checks reject work started before the owner selects an offer', a
   assert.equal((await rule.check(run)).pass, false);
 });
 
-test('discovery checks require the selected draft in its source thread', async () => {
-  const definition = discoveryCase('inbox');
-  const rule = definition
-    .expect(definition.world({ now: Date.now }))
-    .find((item) => item.id === 'selected-reply-is-saved-in-the-right-thread');
-  if (rule?.kind !== 'check') throw new Error('Missing selected draft check.');
+test('discovery checks bind every saved draft to its thread and recipient', async () => {
   const draft = { threadId: 'cedar', to: 'mira@cedar.example', cc: '' };
-  for (const [drafts, expected] of [
-    [[draft], true],
-    [[], false],
-    [[{ ...draft, threadId: 'resolved' }], false],
-    [[{ ...draft, to: 'lee@willow.example' }], false],
-    [[{ ...draft, to: 'mira@cedar.example, lee@willow.example' }], false],
-    [[{ ...draft, cc: 'lee@willow.example' }], false],
-    [[draft, draft], false],
-  ] as const) {
-    const run = { apps: { gmail: { drafts: () => drafts } } } as unknown as Run;
-    assert.equal((await rule.check(run)).pass, expected);
+  for (const kind of ['inbox', 'more-ideas', 'greeting', 'greeting-portuguese'] as const) {
+    const definition = discoveryCase(kind);
+    const rule = definition
+      .expect(definition.world({ now: Date.now }))
+      .find((item) => item.id === 'selected-reply-is-saved-in-the-right-thread');
+    if (rule?.kind !== 'check') throw new Error('Missing selected draft check.');
+    const optional = kind === 'greeting' || kind === 'greeting-portuguese';
+    for (const [drafts, expected] of [
+      [[draft], true],
+      [[], optional],
+      [[{ ...draft, threadId: 'resolved' }], false],
+      [[{ ...draft, to: 'lee@willow.example' }], false],
+      [[{ ...draft, to: 'mira@cedar.example, lee@willow.example' }], false],
+      [[{ ...draft, cc: 'lee@willow.example' }], false],
+      [[draft, draft], optional],
+      [[draft, { ...draft, threadId: 'resolved' }], false],
+      [[draft, { ...draft, to: 'lee@willow.example' }], false],
+    ] as const) {
+      const run = { apps: { gmail: { drafts: () => drafts } } } as unknown as Run;
+      assert.equal((await rule.check(run)).pass, expected, kind);
+    }
   }
 });
 

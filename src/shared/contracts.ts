@@ -2,6 +2,7 @@ import type { Presentation } from './presentation';
 import type { TaskSuggestions } from './onboarding';
 import type { TrustBecause } from './trust';
 import type { AnswerChoices } from './answer-choices';
+import type { ModelIssue, ModelSelection, WorkKind } from './models';
 export type TurnStatus = 'queued' | 'running' | 'succeeded' | 'waiting' | 'failed' | 'cancelled';
 export interface Artifact {
   id: string;
@@ -254,6 +255,8 @@ export interface Configuration {
   model: string;
   llmReady: boolean;
   modelReconnect: boolean;
+  modelIssue?: ModelIssue;
+  modelAlternative?: ModelSelection & { label: string };
   integrationsReady: boolean;
   conversationResetEnabled: boolean;
 }
@@ -308,6 +311,9 @@ export interface Task {
   stepIndex?: number;
   revision?: number;
   appliedRevision?: number;
+  model?: ModelSelection | null;
+  work?: WorkKind;
+  scheduleModel?: ModelSelection;
 }
 export interface TaskDetail {
   task: Task;
@@ -346,6 +352,7 @@ export interface Schedule {
   activeRun: { turnId: string; status: 'queued' | 'running' | 'waiting' } | null;
   baselineObservation: ScheduleObservation | null;
   watch: string[] | null;
+  model: ModelSelection | null;
   monthlyUsd: number | null;
 }
 export type ScheduleObservation = {

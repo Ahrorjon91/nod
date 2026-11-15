@@ -348,8 +348,14 @@ export function actionTarget(
     }
     if (action.startsWith('NOD_schedule_'))
       return words(args.title ?? (details?.schedule as { title?: unknown } | undefined)?.title)[0];
-    if (action === 'NOD_model_select')
-      return words((details?.targetModel as { model?: unknown } | undefined)?.model)[0];
+    if (action === 'NOD_model_select') {
+      const target = details?.targetModel as { model?: unknown; for?: unknown } | undefined;
+      const model = words(target?.model)[0];
+      const work = words(target?.for)[0];
+      return model && work && work !== 'when the owner talks to Nod'
+        ? `${model} for ${work}`
+        : model;
+    }
     if (action === 'NOD_limits_update')
       return [
         'monthlyUsd' in args && dollarsOrNone(args.monthlyUsd, 'monthly limit'),

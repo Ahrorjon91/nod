@@ -2881,6 +2881,28 @@ test(
             background: true,
           });
           await completed(ownerResume, 'scheduled', true, 'reply');
+          const signedIn = await thread.enqueueTurn('Synthetic analytics sign-in continuation', {
+            source: 'resume',
+            sourceId: `credentials:${schedule}`,
+            sessionId: schedule,
+            parentTurnId: schedule,
+            background: true,
+          });
+          await completed(signedIn, 'scheduled', false, 'reply');
+          const taskCheck = await thread.enqueueTurn('Synthetic analytics planned check', {
+            source: 'resume',
+            sourceId: `task-check:${randomUUID()}:1`,
+            sessionId: schedule,
+            parentTurnId: schedule,
+            background: true,
+          });
+          await completed(taskCheck, 'scheduled', false, 'reply');
+          assert.deepEqual(
+            [requested.turnId, schedule, task, answer.turnId, signedIn, taskCheck].map(
+              (id) => ran(id)?.automatic,
+            ),
+            [false, true, true, false, false, true],
+          );
           const inspect = inspectObserver;
           try {
             inspectObserver = async (context) => {
@@ -9982,10 +10004,9 @@ test(
           const presentedFailures: string[] = [];
           presentInterruption = async (_threadId, input) => {
             if (input.kind === 'failed') presentedFailures.push(input.error);
-            return input.kind === 'failed' && input.error.includes('503 Service Unavailable')
-              ? 'Synthetic provider failure.'
-              : '';
+            return 'Synthetic presenter text.';
           };
+          dependencies.modelAlternative = () => 'Synthetic alternative connection.';
           const prefix = 'The model request failed: openrouter / anthropic/fixture-model: ';
           const nestedQuota =
             prefix +
@@ -10268,7 +10289,7 @@ test(
                   (
                     await db.pool.query(
                       "SELECT 1 FROM messages WHERE turn_id=$1 AND role='assistant' AND stream_id=$2",
-                      [submitted.turnId, `failure:${submitted.turnId}`],
+                      [submitted.turnId, `model-failure:${submitted.turnId}`],
                     )
                   ).rowCount,
                 ),
@@ -10281,18 +10302,13 @@ test(
               const shown = (
                 await db.pool.query(
                   "SELECT text FROM messages WHERE turn_id=$1 AND role='assistant' AND stream_id=$2",
-                  [submitted.turnId, `failure:${submitted.turnId}`],
+                  [submitted.turnId, `model-failure:${submitted.turnId}`],
                 )
               ).rows[0].text as string;
               assert.equal(turn.status, 'failed');
-              assert.equal(presentedFailures.at(-1), turn.error);
-              assert.ok(
-                shown.includes(
-                  item.prompt === 'model-unavailable-fixture'
-                    ? 'Synthetic provider failure.'
-                    : turn.error,
-                ),
-              );
+              assert.equal(presentedFailures.length, 0);
+              assert.ok(shown.includes(turn.error));
+              assert.match(shown, /Synthetic alternative connection\./);
               assert.match(shown, /\]\(\/settings\/models\)/);
               assert.ok(turn.error.length <= 2000);
               assert.ok(turn.error.startsWith(prefix));
@@ -10311,6 +10327,7 @@ test(
           } finally {
             for (const item of cases) modelErrors.delete(item.prompt);
             presentInterruption = previousPresenter;
+            delete dependencies.modelAlternative;
           }
         },
       );
@@ -10638,6 +10655,10 @@ test(
       await db.initializeDatabase();
       await thread.initializeThreads();
       await tasks.initialize();
+      // Task reads join schedule-origin metadata on current upstream; no schedules are used here.
+      await db.pool.query(
+        'CREATE TABLE schedules (id uuid PRIMARY KEY, owner_id text NOT NULL, model jsonb)',
+      );
       await db.pool.query(
         `INSERT INTO preferences(owner_id,quiet_hours_enabled,quiet_start,quiet_end,time_zone,proactive_paused)
          VALUES($1,true,'00:00','23:59','UTC',false)`,
@@ -12596,6 +12617,83 @@ test(
         false,
       );
     } finally {
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+    }
+  },
+);
+
+test(
+  'the desktop is told the owner has work running for any running turn, and rechecks until it ends',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
+  async () => {
+    const schema = `test_working_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const url = new URL(process.env.TEST_DATABASE_URL!);
+    url.searchParams.set('options', `-c search_path=${schema}`);
+    const pool = new pg.Pool({ connectionString: url.href });
+    const { createActivity } = await import('../src/server/activity.ts');
+    const { refresh } = await import('../src/server/events.ts');
+    const owner = 'working-fixture-owner';
+    const seen: boolean[] = [];
+    const activity = createActivity({
+      pool,
+      ownerId: owner,
+      keepAwake: { set: (working) => seen.push(working) },
+      recheckMs: 50,
+    });
+    const until = async (count: number) => {
+      for (let attempt = 0; attempt < 200 && seen.length < count; attempt++) await delay(10);
+    };
+    try {
+      await pool.query(`CREATE TABLE threads(id uuid PRIMARY KEY, owner_id text NOT NULL, archived_at timestamptz);
+        CREATE TABLE turns(id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid, session_id uuid, source text,
+          status text, channel text DEFAULT 'web', message_id uuid, created_at timestamptz DEFAULT now(), started_at timestamptz);
+        CREATE TABLE tasks(id uuid PRIMARY KEY, owner_id text NOT NULL, session_id uuid, title text, now_text text,
+          message_id uuid, created_at timestamptz DEFAULT now());
+        CREATE TABLE turn_events(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), turn_id uuid, type text, summary text DEFAULT '',
+          site text, call_id uuid, created_at timestamptz DEFAULT now());
+        CREATE TABLE messages(id uuid PRIMARY KEY, owner_id text, turn_id uuid, role text, created_at timestamptz DEFAULT now())`);
+      const threadId = randomUUID();
+      const scheduled = randomUUID();
+      await pool.query('INSERT INTO threads(id,owner_id,archived_at) VALUES($1,$2,now())', [
+        threadId,
+        owner,
+      ]);
+      await pool.query(
+        "INSERT INTO turns(id,owner_id,thread_id,session_id,source,status) VALUES($1,'another-owner',$1,$1,'user','running'),($2,$3,$4,$2,'user','queued')",
+        [randomUUID(), randomUUID(), owner, threadId],
+      );
+      activity.start();
+      refresh();
+      await delay(400);
+      assert.deepEqual(seen, []);
+      await pool.query(
+        "INSERT INTO turns(id,owner_id,thread_id,session_id,source,status,started_at) VALUES($1,$2,$3,$1,'schedule','running',now())",
+        [scheduled, owner, threadId],
+      );
+      assert.deepEqual(await activity.read(), []);
+      refresh();
+      await until(1);
+      assert.deepEqual(seen, [true]);
+      await pool.query('ALTER TABLE turns RENAME TO turns_unavailable');
+      await until(2);
+      assert.deepEqual(seen, [true, false]);
+      await pool.query('ALTER TABLE turns_unavailable RENAME TO turns');
+      await until(3);
+      assert.deepEqual(seen, [true, false, true]);
+      await pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [scheduled]);
+      await until(4);
+      assert.deepEqual(seen, [true, false, true, false]);
+      activity.close();
+      await pool.query("UPDATE turns SET status='running' WHERE id=$1", [scheduled]);
+      refresh();
+      await delay(400);
+      assert.deepEqual(seen, [true, false, true, false]);
+    } finally {
+      activity.close();
       await pool.end();
       await admin.query(`DROP SCHEMA ${schema} CASCADE`);
       await admin.end();

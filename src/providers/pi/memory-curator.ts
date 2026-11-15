@@ -25,6 +25,7 @@ const untraced = new Set([
   'style',
   'skill',
   'classify',
+  'check',
 ]);
 
 const longCache = 55 * 60_000;
@@ -133,7 +134,7 @@ export function createPiMemoryCurator(options: {
     },
     async curate({ task, instructions, input, images, automatic = true }, signal, report) {
       signal?.throwIfAborted();
-      const bounded = task === 'classify' || task === 'attention';
+      const bounded = task === 'classify' || task === 'attention' || task === 'check';
       if (options.resolve) loaded = undefined;
       loaded ??= load(automatic).catch((error) => {
         loaded = undefined;
@@ -228,7 +229,9 @@ export function createPiMemoryCurator(options: {
               ? 'The classification model is unavailable.'
               : task === 'review' || task === 'access'
                 ? 'The action review model is unavailable.'
-                : 'The memory model is unavailable.';
+                : task === 'check'
+                  ? 'The selected model is unavailable.'
+                  : 'The memory model is unavailable.';
         const detail =
           reply.stopReason === 'error' && reply.errorMessage
             ? ` The provider said: ${reply.errorMessage.trim().slice(0, 300)}`

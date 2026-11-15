@@ -565,12 +565,16 @@ Each saved attempt includes model usage by request, counts of owner interactions
 
 ## Check first use
 
-The `discovery-*` cases start with a question about what Nod can do. They cover a connected inbox, more ideas, no apps, an empty inbox, failed reads, owner rules, an access question, a detailed tour and a recurring briefing. The first reply must give useful choices without starting work or requiring another connection. An access question must not read account content. A requested detailed tour must keep the requested detail.
+The `discovery-*` cases start with a greeting or a question about what Nod can do. They cover English and Portuguese greetings, a connected inbox, more ideas, no apps, an empty inbox, failed reads, owner rules, an access question, a detailed tour, and a recurring briefing. No first reply can start work or require another connection. For a greeting, the first reply must offer one small task, name the result, and explain why it helps. It must ask one easy question. An access question must not read account content. A requested detailed tour must keep the requested detail.
 
-The cases then select an offer and require a result: a saved reply in the right email thread, a correct comparison from supplied quotes, or a briefing that is saved as a schedule and delivered when it fires. They include an already answered email and instructions inside a newsletter. Those instructions must not start work. A task card, promise or saved schedule without the required result fails. These cases are marked as awaiting calibration; their presence does not prove a model pass rate.
+The greeting cases accept the offer with only **Yes** or **Sim**. Nod must then deliver the offered result without asking for the task again. Other cases require a saved reply in the right email thread, a correct quote comparison, or a scheduled briefing that runs and delivers. They include an already answered email and instructions inside a newsletter. Those instructions must not start work. A task card, promise, or saved schedule without the required result fails. These cases are marked as awaiting calibration. Their presence does not prove a model pass rate.
+
+The result checks require app links when the working session received them. A link in a separate observer session does not prove that a task received it. Without a link, an email result must identify the sender and subject and state the next step.
+
+The `attachment-keeps-request` case gives the task before it uploads a file without text. Nod must use the earlier instructions and deliver the requested comparison. Asking what to do with the file or requesting the same upload again fails.
 
 ```sh title="Terminal"
-pnpm run eval:capability run --scenario discovery-inbox,discovery-more-ideas,discovery-no-apps,discovery-empty,discovery-blocked,discovery-rules,discovery-access,discovery-tour,discovery-schedule --repeat 3 --budget 20
+pnpm run eval:capability run --scenario discovery-greeting,discovery-greeting-portuguese,attachment-keeps-request,discovery-inbox,discovery-more-ideas,discovery-no-apps,discovery-empty,discovery-blocked,discovery-rules,discovery-access,discovery-tour,discovery-schedule --repeat 3 --budget 20
 ```
 
 The `onboarding-first-value` case completes setup without a required interview, selects an immediate email task, and checks the delivered draft against the source thread. The `onboarding-no-apps` case uses quotes supplied in the first request and requires the requested comparison table. The original `onboarding-connected-*` cases check discovery and then require a useful delivered result. The calendar temporal cases stop at suggestion publication and reject preparation for elapsed or already-started events, including time-zone offsets and calendars containing only past events. They keep discovery reads separate from actions after task selection and reject saved or attempted schedules that the owner did not request.
@@ -679,7 +683,7 @@ For real use, measure with owners over actual elapsed days. A complete-window so
 
 The `proactivity-stress-*` release cases test changed source state, noisy pages, source outages, repeated signals, owner controls, hostile source text, language and changed goals. Each attempt uses the real runtime and a synthetic source provider. The held-out variants change record format or source order; the memory variant adds 160 historical notes through the owner API.
 
-Run an engine and baseline case with the same selected model and judge. Keep all required checks and source data fixed before the run. Use a new run label and record the reason when a check changes.
+Run an engine and baseline case with the same selected model and judge. To check a lighter model for work Nod starts on its own, add `--background-model light`, or a model from the `--model` provider, and compare it with the same run without it. Keep all required checks and source data fixed before the run. Use a new run label and record the reason when a check changes.
 
 ```sh title="Terminal"
 pnpm run eval:capability run --scenario proactivity-stress-late-page-engine,proactivity-stress-late-page-baseline --repeat 3 --label proactive-stress

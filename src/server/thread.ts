@@ -14,7 +14,7 @@ import {
   type QuestionAnswer,
 } from '../shared/answer-choices.ts';
 import { logFailure } from './failure-log.ts';
-import { modelQuotaFailure } from '../shared/model-quota.ts';
+import { modelFailureReason, modelQuotaFailure } from '../shared/model-quota.ts';
 import { pendingAnswerChoicesSql } from './answer-choices.ts';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -24,7 +24,13 @@ import { PgBoss } from 'pg-boss';
 import type { Pool, PoolClient } from 'pg';
 import { cancellationTransaction, pool } from './db.ts';
 import { afterCommit, afterRollback, transaction } from './transaction.ts';
-import { laterSupersedingTurnSql, turnChainSql, withdrawnSql } from './turn-chain.ts';
+import {
+  laterSupersedingTurnSql,
+  turnChainSql,
+  withdrawnSql,
+  workKindSql,
+  workOriginSql,
+} from './turn-chain.ts';
 import { dataRoot, databaseUrl, ownerId } from './config.ts';
 import { delta, refresh, working } from './events.ts';
 import {
@@ -60,6 +66,7 @@ import { inlineAppResult, noMailCheck, type MailCheck } from './integration-resu
 import { saveIntegrationFiles } from './integration-files.ts';
 import { spendingLimitReached, spendingLimitText } from './ledger.ts';
 import type { ExecutionEvent } from '../shared/execution.ts';
+import type { ModelSelection, WorkKind } from '../shared/models.ts';
 import { lockKey } from './locks.ts';
 import { redactSecretText } from './redaction.ts';
 import { resemblesTaskAcknowledgement } from '../shared/task-ack.ts';
@@ -142,6 +149,10 @@ export interface ThreadDependencies {
   proactivity?: (turn: TurnRef, signal: AbortSignal) => Promise<RuntimeContext['proactivity']>;
   analytics?: CaptureAnalytics;
   currentModel?: () => { provider: string; name: string; configured: boolean };
+  workModel?: (
+    turnId: string,
+  ) => Promise<{ selection: ModelSelection; provider: string; name: string } | undefined>;
+  modelAlternative?: () => string | undefined;
   present?: (
     threadId: string,
     input:
@@ -1009,6 +1020,21 @@ export async function reactToAssistantMessage(
   return result;
 }
 
+export async function workOrigin(turnId: string, client: Pool | PoolClient = pool) {
+  const row = (
+    await client.query<{
+      kind: WorkKind;
+      task: ModelSelection | null;
+      schedule: ModelSelection | null;
+    }>(
+      `SELECT ${workKindSql('cur')} AS kind,work_task.model AS task,work_schedule.model AS schedule
+       FROM turns cur ${workOriginSql('cur')} WHERE cur.id=$1 AND cur.owner_id=$2`,
+      [turnId, ownerId],
+    )
+  ).rows[0];
+  return row && { kind: row.kind, task: row.task, schedule: row.schedule };
+}
+
 export async function resumeTurn(
   turnId: string,
   sourceId: string,
@@ -1168,64 +1194,7 @@ function modelRecoveryAdvice(text: string) {
 
 function failureText(error: unknown) {
   let text = error instanceof Error ? error.message || error.name : String(error);
-  if (error instanceof ModelRequestError) {
-    const start = text.indexOf('{');
-    const reasons: string[] = [];
-    const read = (value: unknown, depth = 0): void => {
-      if (depth > 8) return;
-      if (typeof value === 'string') {
-        if (!value.trim()) return;
-        try {
-          read(JSON.parse(value), depth + 1);
-        } catch {
-          reasons.push(value);
-        }
-      } else if (Array.isArray(value)) {
-        for (const item of value.slice(0, 20)) read(item, depth + 1);
-      } else if (value && typeof value === 'object') {
-        const data = value as Record<string, unknown>;
-        for (const key of [
-          'code',
-          'type',
-          'status',
-          'quotaMetric',
-          'quotaId',
-          'quotaValue',
-          'retryDelay',
-        ]) {
-          const field = data[key];
-          if (typeof field === 'string' || typeof field === 'number')
-            reasons.push(
-              key === 'code' && /^[45]\d{2}$/.test(String(field))
-                ? `HTTP ${field}`
-                : `${key}: ${field}`,
-            );
-        }
-        read(data.message, depth + 1);
-        read(data.error, depth + 1);
-        read(data.details, depth + 1);
-        read(data.violations, depth + 1);
-        const metadata = data.metadata as Record<string, unknown> | undefined;
-        if (metadata && typeof metadata === 'object') {
-          for (const key of [
-            'provider_name',
-            'error_type',
-            'provider_code',
-            'limit_source',
-            'reason',
-            'remedy_hint',
-          ])
-            if (typeof metadata[key] === 'string') reasons.push(`${key}: ${metadata[key]}`);
-          read(metadata.raw, depth + 1);
-        }
-      }
-    };
-    if (start !== -1)
-      try {
-        read(JSON.parse(text.slice(start)));
-        if (reasons.length) text = `${text.slice(0, start)}${[...new Set(reasons)].join('; ')}`;
-      } catch {}
-  }
+  if (error instanceof ModelRequestError) text = modelFailureReason(text);
   const advice = error instanceof ModelRequestError ? modelRecoveryAdvice(text) : '';
   const safe = redactSecretText(text).trim().slice(0, 2_000);
   if (!advice || safe.length + advice.length >= 2_000) return safe || 'Unknown error.';
@@ -1280,12 +1249,14 @@ async function failTurn(
   if (!turn) return false;
   if (!turn.owner_started && !turn.work) return true;
   const work = turn.owner_started ? undefined : turn.work!;
-  const presented = await present?.(
-    turn.thread_id,
-    error === interrupted
-      ? { kind: 'interrupted', ...(work ? { work } : {}) }
-      : { kind: 'failed', error, ...(work ? { work } : {}) },
-  ).catch(() => undefined);
+  const presented = modelFailure
+    ? undefined
+    : await present?.(
+        turn.thread_id,
+        error === interrupted
+          ? { kind: 'interrupted', ...(work ? { work } : {}) }
+          : { kind: 'failed', error, ...(work ? { work } : {}) },
+      ).catch(() => undefined);
   const body =
     typeof presented === 'string' && presented.trim()
       ? presented
@@ -1308,7 +1279,7 @@ async function failTurn(
         turnId,
         ownerId,
         turn.thread_id,
-        `failure:${turnId}`,
+        `${modelFailure ? 'model-failure' : 'failure'}:${turnId}`,
         turn.latest_user_message_id,
         Boolean(turn.task_id || work),
         error,
@@ -1320,7 +1291,7 @@ async function failTurn(
         { threadId: turn.thread_id, turnId, taskMessageId: turn.taskMessageId },
         message.trim(),
         [],
-        `failure:${turnId}`,
+        `${modelFailure ? 'model-failure' : 'failure'}:${turnId}`,
       );
   }, pool);
   return true;
@@ -1653,7 +1624,16 @@ async function analyticsWork(turn: any) {
 async function executeTurn(turn: any, dependencies: ThreadDependencies) {
   const startedAt = Date.now();
   const providerChannel = String(turn.channel).split(':')[0];
-  const selectedModel = dependencies.currentModel?.();
+  let routed: Awaited<ReturnType<NonNullable<ThreadDependencies['workModel']>>>;
+  let routeError: unknown;
+  try {
+    routed = await dependencies.workModel?.(turn.id);
+  } catch (error) {
+    routeError = error;
+  }
+  const selectedModel = routed
+    ? { provider: routed.provider, name: routed.name, configured: true }
+    : dependencies.currentModel?.();
   const model = selectedModel?.configured
     ? analyticsModel(selectedModel.provider, selectedModel.name)
     : undefined;
@@ -1977,6 +1957,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       } catch (error) {
         logFailure('schedule_cache_policy_failed', error, { threadId, turnId });
       }
+    if (routeError) throw routeError;
     const result = await dependencies.runTurn({
       threadId,
       turnId,
@@ -1985,6 +1966,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       prompt: turn.prompt,
       background: turn.background,
       ...(scheduleCache ? { scheduleCache } : {}),
+      ...(routed ? { model: routed.selection } : {}),
       channel: String(turn.channel).split(':')[0],
       ...loaded.context,
       speech,
@@ -1994,6 +1976,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       ...(checkIn ? { checkIn } : {}),
       ...(limit ? { spendingLimitReached: { monthlyUsd: limit.monthlyUsd } } : {}),
       currentMessageId: loaded.sourceMessageId ?? undefined,
+      automatic:
+        !loaded.sourceMessageId &&
+        (turn.source !== 'resume' || String(turn.source_id).startsWith('task-check:')),
       ...(loaded.audioCaption !== undefined ? { audioCaption: loaded.audioCaption } : {}),
       replyTo: loaded.replyTo && describe(loaded.replyTo),
       history: loaded.history.map(describe),
@@ -2335,6 +2320,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       if (
         await failTurn(turnId, dependencies.present, failureText(error), {
           modelFailure: failure === 'model',
+          next: failure === 'model' ? dependencies.modelAlternative?.() : undefined,
         })
       )
         logFailure('turn_failed', error, { threadId, turnId, sessionId: turn.session_id });

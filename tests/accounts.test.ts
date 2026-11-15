@@ -2890,7 +2890,12 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     const models = saved.view().connections[0].models;
     assert.deepEqual(
       models.filter((model) => model.id !== 'fixture/small').map((model) => model.pricing),
-      [{ input: 1.25, output: 5 }, { input: 0, output: 0 }, 'variable', 'variable'],
+      [
+        { input: 1.25, output: 5, cacheRead: 0, cacheWrite: 0 },
+        { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        'variable',
+        'variable',
+      ],
     );
     const small = models[1].pricing;
     assert.ok(small && small !== 'variable');
@@ -3050,7 +3055,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     );
     assert.equal((await f.database.query('SELECT * FROM vault_app_grants')).rowCount, 0);
     const removed = await f.create('fixture-environment-owner', backend, modelEnvironment({}));
-    assert.deepEqual(removed.view(), { connections: [], selection: null });
+    assert.deepEqual(removed.view(), { connections: [], selection: null, routes: {}, light: null });
     await assert.rejects(removed.resolve());
     for (const access of captured) assert.equal(await access.read(), undefined);
   });
@@ -3100,174 +3105,161 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     await assert.rejects(owner.resolve());
   });
 
-  test('daily Google quota stops automatic requests across restart and keeps owner recovery available', async (t) => {
+  test('a model request failure that Pi does not retry pauses automatic requests to that model, tries again after a growing wait, and clears on success', async (t) => {
     const f = await fixture(t);
     const { createPiMemoryCurator } = await import('../src/providers/pi/memory-curator.ts');
     const { createPiModelRuntime } = await import('../src/providers/pi/models.ts');
-    const definitions = await f.backend.catalog('google', 'api_key');
-    const definition = definitions.find((item) => item.choice.id === 'gemini-3.8-flash')!;
-    const primary = {
-      ...definition,
-      choice: { ...definition.choice, id: 'fixture-google-primary', name: 'Synthetic primary' },
-      spec: { ...definition.spec, id: 'fixture-google-primary' },
-    };
-    const backend = {
-      ...f.backend,
-      catalog: async () =>
-        [definition, primary].map((item) => ({
-          ...item,
-          spec: {
-            ...item.spec,
-            api: 'openai-completions',
-            baseUrl: 'https://model.example/v1',
-          },
-        })),
-    };
-    let service = await f.create('fixture-quota-owner', backend);
-    await assert.rejects(service.reserve(1), /budget is not configured/);
+    const { lightestEffort } = await import('../src/shared/models.ts');
+    const definitions = (await f.backend.catalog('mistral', 'api_key')).map((item) => ({
+      ...item,
+      spec: { ...item.spec, api: 'openai-completions', baseUrl: 'https://model.example/v1' },
+    }));
+    const backend = { ...f.backend, catalog: async () => definitions };
+    let service = await f.create('fixture-failing-owner', backend);
     service.setRequestBudget(async () => async () => {});
-    const connectionId = await service.addKey('google', 'fixture-quota-key');
-    const other = await f.create('fixture-other-quota-owner', backend);
-    await other.addKey('google', 'fixture-other-quota-key');
+    let checks = 0;
+    await service.setSelectionCheck(async () => {
+      checks++;
+    });
+    const connectionId = await service.addKey('mistral', 'fixture-failing-key');
+    assert.equal(checks, 1);
+    const other = await f.create('fixture-healthy-owner', backend);
+    other.setRequestBudget(async () => async () => {});
+    await other.addKey('mistral', 'fixture-healthy-key');
     const original = globalThis.fetch;
     t.after(() => {
       globalThis.fetch = original;
     });
-    let calls = 0;
-    let rejected = true;
-    let quotaId = 'GenerateRequestsPerDayPerProjectPerModel-FreeTier';
-    let quotaValue = '20';
-    let prepaid = false;
-    globalThis.fetch = async (input) => {
-      assert.ok(String(input).startsWith('https://model.example/'));
-      calls++;
-      if (rejected)
-        return Response.json(
-          {
-            error: {
-              code: prepaid ? 402 : 429,
-              message: prepaid ? 'Your prepayment credits are depleted.' : 'Quota exceeded.',
-              ...(prepaid ? { status: 'RESOURCE_EXHAUSTED' } : {}),
-              details: prepaid
-                ? []
-                : [
-                    {
-                      quotaId,
-                      quotaValue,
-                      retryDelay: '82800.5s',
-                    },
-                  ],
-            },
-          },
-          { status: prepaid ? 402 : 429 },
-        );
-      return new Response(
+    const healthy = () =>
+      new Response(
         'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"{\\"ready\\":true}"}}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
         { headers: { 'content-type': 'text/event-stream' } },
       );
+    let reply = (): Response =>
+      Response.json({ error: { message: 'Synthetic outage.' } }, { status: 503 });
+    let calls = 0;
+    globalThis.fetch = async (input) => {
+      assert.ok(String(input).startsWith('https://model.example/'));
+      calls++;
+      return reply();
     };
-    const curator = createPiMemoryCurator({ provider: 'google', resolve: () => service.resolve() });
+    const ask = async () => {
+      const { runtime, model } = await createPiModelRuntime(await service.resolve());
+      return runtime.completeSimple(model, {
+        messages: [{ role: 'user', content: 'Synthetic question.', timestamp: 1 }],
+      });
+    };
+    const curator = createPiMemoryCurator({
+      provider: 'mistral',
+      resolve: () => service.resolve(),
+    });
     const request = {
       task: 'plan' as const,
       instructions: 'Prepare the synthetic task.',
       input: {},
     };
-    await assert.rejects(curator.curate(request), /quota/i);
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const first = service.view().selection!;
+    const definition = definitions.find((item) => item.choice.id !== first.modelId)!;
+    const second = {
+      connectionId,
+      modelId: definition.choice.id,
+      effort: lightestEffort(definition.choice.efforts),
+    };
+    const allowed = (schedule = first) =>
+      service.automaticRequestsAllowed({ kind: 'schedule', schedule });
+
+    assert.equal((await ask()).stopReason, 'error');
     assert.equal(calls, 1);
-    const selection = service.view().selection!;
-    await service.select({ ...selection, modelId: primary.choice.id });
-    assert.equal(await service.automaticRequestsAllowed(), false);
-    await service.select(selection);
-    await assert.rejects(curator.curate(request), /Automatic requests are paused/);
-    assert.equal(calls, 1);
-    await service.refreshCatalog(connectionId);
-    await assert.rejects(curator.curate(request), /Automatic requests are paused/);
-    await service.close();
-    service = await f.create('fixture-quota-owner', backend);
-    service.setRequestBudget(async () => async () => {});
-    await assert.rejects(curator.curate(request), /Automatic requests are paused/);
-    assert.equal(calls, 1);
-    assert.doesNotMatch(
-      JSON.stringify(service.view()),
-      /credentialTag|requestPauses|fixture-quota-key/,
+    assert.equal(service.view().connections[0]!.issue, undefined);
+    assert.equal(await allowed(), true);
+
+    reply = () =>
+      Response.json(
+        { error: { code: 402, message: 'This request requires more credits.' } },
+        { status: 402 },
+      );
+    const noCredits = reply;
+    assert.equal((await ask()).stopReason, 'error');
+    assert.equal(calls, 2);
+    assert.match(
+      service.view().connections[0]!.issue!.reason,
+      /HTTP 402; This request requires more credits\./,
     );
-    await (await other.resolve()).prepareRequest?.(definition.choice.id, true);
-    rejected = false;
-    const access = await service.resolve();
-    const { runtime, model } = await createPiModelRuntime(access);
+    assert.match(service.current.issue!.reason, /requires more credits/);
+    assert.equal(await allowed(), false);
+    assert.equal(await allowed(second), true);
+    assert.equal(service.paused({ kind: 'schedule', schedule: first }), true);
+    assert.equal(service.paused({ kind: 'schedule', schedule: second }), false);
     assert.equal(
-      (
-        await runtime.completeSimple(model, {
-          messages: [{ role: 'user', content: 'Try the synthetic task again.', timestamp: 1 }],
-        })
-      ).stopReason,
-      'stop',
+      service.paused({ kind: 'schedule', schedule: { ...first, modelId: 'fixture-missing' } }),
+      false,
     );
-    assert.deepEqual(await curator.curate(request), { ready: true });
-    assert.equal(calls, 3);
-    assert.equal(service.view().selection?.connectionId, connectionId);
-    rejected = true;
-    quotaId = 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier';
-    await assert.rejects(curator.curate(request), /quota/i);
-    assert.equal(calls, 4);
-    assert.equal(await service.automaticRequestsAllowed(), true);
-    quotaValue = '0';
-    await assert.rejects(curator.curate(request), /quota/i);
-    assert.equal(calls, 5);
-    assert.equal(await service.automaticRequestsAllowed(), false);
-    await assert.rejects(curator.curate(request), /zero quota/);
-    assert.equal(calls, 5);
+    await assert.rejects(curator.curate(request), /Automatic requests to this model are paused/);
+    assert.equal(calls, 2);
     const ledger = createLedger({
       pool: { query: async () => ({ rows: [] }) } as never,
-      ownerId: 'fixture-quota-owner',
+      ownerId: 'fixture-failing-owner',
     });
-    const scoped = ledger.curator(curator);
+    await assert.rejects(ledger.curator(curator).curate(request), /paused/);
+    assert.equal(calls, 2);
     await assert.rejects(
-      ledger.withTurn(randomUUID(), () => scoped.curate(request)),
-      /zero quota/,
+      ledger.forOwner(() => ledger.curator(curator).curate(request)),
+      /requires more credits/,
     );
-    rejected = false;
-    assert.deepEqual(
-      await ledger.withTurn(randomUUID(), () => scoped.curate(request), false, false),
-      { ready: true },
+    assert.equal(calls, 3);
+    assert.equal(await allowed(), false);
+    assert.equal(await other.automaticRequestsAllowed({ kind: 'background' }, true), true);
+    assert.doesNotMatch(
+      JSON.stringify(service.view()),
+      /credentialTag|requestFailures|fixture-failing-key/,
     );
-    assert.equal(calls, 6);
-    assert.equal(await service.automaticRequestsAllowed(), true);
-    rejected = prepaid = true;
-    await assert.rejects(curator.curate(request), /prepayment credits are depleted/);
-    assert.equal(calls, 7);
+
     await service.close();
-    service = await f.create('fixture-quota-owner', backend);
+    service = await f.create('fixture-failing-owner', backend);
     service.setRequestBudget(async () => async () => {});
-    await service.select({ ...selection, modelId: primary.choice.id });
-    const paused = await service.resolve();
-    await assert.rejects(
-      paused.prepareRequest!(primary.choice.id, true),
-      /prepayment credits.*Automatic requests are paused/,
-    );
-    assert.equal(await service.automaticRequestsAllowed(), false);
+    await service.setSelectionCheck(async () => {
+      checks++;
+    });
+    assert.equal(await allowed(), false);
+    t.mock.timers.tick(120_001);
+    assert.equal(await allowed(), true);
+    await assert.rejects(curator.curate(request), /requires more credits/);
+    assert.equal(calls, 4);
+    t.mock.timers.tick(120_001);
+    assert.equal(await allowed(), false);
+    t.mock.timers.tick(240_000);
+    assert.equal(await allowed(), true);
+    await assert.rejects(curator.curate(request), /requires more credits/);
+    assert.equal(calls, 5);
+    assert.equal(await allowed(), false);
+
+    assert.equal(checks, 2);
+    await service.select(second);
+    assert.equal(checks, 3);
+    assert.equal(service.current.issue, undefined);
+    reply = healthy;
+    assert.equal((await ask()).stopReason, 'stop');
+    assert.equal(calls, 6);
+    assert.equal(await allowed(), false);
+    reply = noCredits;
+    assert.equal((await ask()).stopReason, 'error');
     assert.equal(calls, 7);
-    rejected = false;
-    const recovered = await createPiModelRuntime(paused);
-    assert.equal(
-      (
-        await recovered.runtime.completeSimple(recovered.model, {
-          messages: [
-            { role: 'user', content: 'Check the repaired synthetic account.', timestamp: 2 },
-          ],
-        })
-      ).stopReason,
-      'stop',
-    );
+    assert.match(service.current.issue!.reason, /requires more credits/);
+    reply = healthy;
+    assert.equal((await ask()).stopReason, 'stop');
     assert.equal(calls, 8);
-    assert.equal(await service.automaticRequestsAllowed(), true);
-    const concurrent = await service.resolve();
-    const ownerCompleted = await concurrent.prepareRequest!(primary.choice.id, false);
-    const automaticCompleted = await concurrent.prepareRequest!(definition.choice.id, true);
-    await automaticCompleted('Your prepayment credits are depleted.');
-    assert.equal(await service.automaticRequestsAllowed(), false);
-    await ownerCompleted();
-    assert.equal(await service.automaticRequestsAllowed(), true);
+    assert.equal(service.current.issue, undefined);
+    assert.equal(await allowed(), true);
+    assert.match(service.view().connections[0]!.issue!.reason, /requires more credits/);
+    await service.select(first);
+    assert.equal(checks, 4);
+    await service.select(first);
+    assert.equal(checks, 5);
+    assert.deepEqual(await curator.curate(request), { ready: true });
+    assert.equal(calls, 9);
+    assert.equal(service.view().connections[0]!.issue, undefined);
+    assert.equal(service.current.issue, undefined);
   });
 
   test('model setup chooses capable defaults, preserves explicit choices and requires valid cloud accounts', async (t) => {
@@ -3417,6 +3409,111 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     assert.equal(await access.read(), undefined);
     assert.equal(owner.hasImageModel(), false);
     assert.equal((await owner.resolve()).definition.choice.images, false);
+  });
+
+  test('work models follow own choices and lanes while checks keep the owner model', async (t) => {
+    const f = await fixture(t);
+    const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
+    let listed = ['gpt-6.1-sol', 'gpt-6-luna', 'gpt-audio-1.5'];
+    const backend = createPiModelBackend({
+      fetch: async () => Response.json({ data: listed.map((id) => ({ id })) }),
+    });
+    const owner = await f.create('fixture-work-model-owner', backend);
+    const events: Array<{ event: string; properties?: Record<string, unknown> }> = [];
+    const app = Fastify();
+    owner.register(app, (event) => void events.push(event));
+    t.after(() => app.close());
+    const route = (lane: string, value: unknown) =>
+      app.inject({ method: 'PUT', url: '/api/models/routes', payload: { lane, route: value } });
+    const connectionId = await owner.addKey('openai', 'fixture-work-model-key');
+    const main = { connectionId, modelId: 'gpt-6.1-sol', effort: 'high' as const };
+    await owner.select(main);
+    const light = owner.view().light!;
+    assert.equal(light.modelId, 'gpt-6-luna');
+    for (const kind of ['chat', 'schedule', 'background'] as const)
+      assert.deepEqual(owner.workModel({ kind }), { selection: main, follows: 'chat' });
+
+    assert.equal((await route('background', 'light')).statusCode, 200);
+    assert.deepEqual(owner.workModel({ kind: 'background' }), {
+      selection: light,
+      follows: 'light',
+    });
+    assert.deepEqual(owner.workModel({ kind: 'schedule' }).selection, main);
+    assert.equal((await owner.resolve()).definition.choice.id, 'gpt-6.1-sol');
+    assert.equal(
+      (await owner.resolve(false, owner.workModel({ kind: 'background' }).selection)).definition
+        .choice.id,
+      'gpt-6-luna',
+    );
+    assert.equal(await owner.automaticRequestsAllowed({ kind: 'background' }, true), true);
+
+    const pinned = { ...main, effort: 'low' as const };
+    assert.deepEqual(owner.workModel({ kind: 'background', task: pinned }), {
+      selection: pinned,
+      follows: 'task',
+    });
+    assert.deepEqual(owner.workModel({ kind: 'schedule', schedule: light }), {
+      selection: light,
+      follows: 'schedule',
+    });
+    assert.deepEqual(owner.workModel({ kind: 'chat', schedule: light }).selection, main);
+
+    const audio = owner
+      .view()
+      .connections[0]!.models.find((model) => model.id === 'gpt-audio-1.5')!;
+    for (const invalid of [
+      { ...main, modelId: audio.id, effort: audio.efforts[0] ?? 'high' },
+      { ...main, modelId: 'fixture-missing-model' },
+      { ...main, effort: 'off' },
+      { ...main, connectionId: randomUUID() },
+      'heavy',
+    ])
+      assert.equal((await route('schedule', invalid)).statusCode, 400, JSON.stringify(invalid));
+    assert.deepEqual(owner.view().routes, { background: 'light' });
+
+    assert.equal((await route('schedule', light)).statusCode, 200);
+    assert.deepEqual(owner.workModel({ kind: 'schedule' }), { selection: light, follows: 'lane' });
+
+    listed = ['gpt-6.1-sol'];
+    await owner.refreshCatalog(connectionId);
+    assert.equal(owner.view().light, null);
+    assert.deepEqual(owner.workModel({ kind: 'background' }), { selection: main, follows: 'chat' });
+    assert.throws(() => owner.workModel({ kind: 'schedule' }), /gpt-6-luna/);
+    assert.throws(() => owner.workModel({ kind: 'chat', task: light }), /gpt-6-luna/);
+    assert.equal(await owner.automaticRequestsAllowed({ kind: 'background' }, true), true);
+    listed = ['gpt-6.1-sol', 'gpt-6-luna'];
+    await owner.refreshCatalog(connectionId);
+
+    await f.database.query('UPDATE model_settings SET routes=$2 WHERE owner_id=$1', [
+      'fixture-work-model-owner',
+      JSON.stringify({ background: 'light', schedule: { ...main, effort: 'off' } }),
+    ]);
+    const restarted = await f.create('fixture-work-model-owner', backend);
+    assert.deepEqual(restarted.workModel({ kind: 'schedule' }).selection, main);
+
+    const second = await owner.addKey('openai', 'fixture-work-model-second');
+    assert.equal((await route('schedule', { ...main, connectionId: second })).statusCode, 200);
+    await owner.remove(second);
+    assert.deepEqual(owner.view().routes, { background: 'light' });
+    assert.deepEqual(
+      owner.workModel({ kind: 'schedule', schedule: { ...main, connectionId: second } }),
+      { selection: main, follows: 'chat' },
+    );
+
+    assert.equal((await route('background', null)).statusCode, 200);
+    assert.deepEqual(owner.view().routes, { background: null });
+    assert.deepEqual(owner.workModel({ kind: 'background' }).selection, main);
+    const routeEvents = events
+      .filter(({ event }) => event === 'setting_changed')
+      .map(({ properties }) => properties)
+      .filter((properties) => String(properties?.setting).startsWith('model_route'));
+    assert.deepEqual(routeEvents, [
+      { setting: 'model_route_background', actor: 'owner', state: 'light' },
+      { setting: 'model_route_schedule', actor: 'owner', state: 'configured' },
+      { setting: 'model_route_schedule', actor: 'owner', state: 'configured' },
+      { setting: 'model_route_background', actor: 'owner', state: 'default' },
+    ]);
+    assert.doesNotMatch(JSON.stringify(routeEvents), /gpt-|[0-9a-f]{8}-/);
   });
 
   test('classification resolves an approved small model only on the selected owned connection', async (t) => {

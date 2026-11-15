@@ -9546,6 +9546,63 @@ test(
   },
 );
 
+for (const [status, code] of [
+  [429, 'installation_busy'],
+  [503, 'service_unavailable'],
+] as const) {
+  test(
+    `a ${status} on session create marks an approved write as not run`,
+    { skip: !process.env.TEST_DATABASE_URL },
+    async (t) => {
+      const f = await appsFixture(t);
+      const slack = await f.connect('slack');
+      t.mock.method(globalThis, 'fetch', async () => {
+        throw new Error('Unexpected external request in the session refusal test.');
+      });
+      const root = await mkdtemp(join(tmpdir(), 'nod-session-refusal-'));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      let userId = '';
+      const paths: string[] = [];
+      const proxy = createComposioProxy({
+        dataRoot: root,
+        ownerId: 'local-development',
+        keyStore: installationKeyStore,
+        checkpoint: fixtureIdentityCheckpoint,
+        url: 'https://proxy.example.test',
+        request: async (input, init) => {
+          const url = new URL(new Request(input, init).url);
+          if (url.pathname === '/v2/access/enroll')
+            return Response.json({ state: 'enabled', userId });
+          paths.push(url.pathname);
+          return Response.json({ error: code }, { status });
+        },
+      });
+      await proxy.initialize();
+      userId = proxy.userId;
+      const real = createComposioProvider({ proxy });
+      f.provider.createSession = (...input) => real.createSession(...input);
+      f.provider.connectionBackoff = real.connectionBackoff;
+      assert.equal(f.provider.connectionBackoff!(), undefined);
+      await assert.rejects(
+        f.service.execute('local-development', 'SLACK_SEND_MESSAGE', {
+          connectionId: slack.connectionId,
+          channel: 'C0SYNTHETIC',
+          text: 'Synthetic update',
+        }),
+        (error: Error & { notRun?: boolean; upstreamStatus?: number }) => {
+          assert.match(error.message, new RegExp(`${code}. HTTP ${status}`));
+          assert.equal(error.upstreamStatus, status);
+          assert.equal(error.notRun, true);
+          return true;
+        },
+      );
+      assert.deepEqual(paths, ['/v2/api/v3.1/tool_router/session']);
+      assert.equal(f.executed.length, 0);
+      assert.equal(f.provider.connectionBackoff!()?.status, status);
+    },
+  );
+}
+
 test('Composio proxy sessions omit SDK metadata and refuse unsupported webhooks', async (t) => {
   const client = new Composio({
     apiKey: 'fixture-key-never-live',

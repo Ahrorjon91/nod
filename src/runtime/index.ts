@@ -887,7 +887,8 @@ export function createAgentRuntime(dependencies: {
         try {
           child = await agent.open({
             ...source,
-            automatic: !context.currentMessageId,
+            ...(context.model ? { model: context.model } : {}),
+            automatic: Boolean(context.automatic),
             ephemeral: true,
             systemPrompt: system,
             ownerContext: ownerContext(context),
@@ -1056,7 +1057,8 @@ export function createAgentRuntime(dependencies: {
       await context.emit('agent_start', 'Main agent', { execution });
       const opening = agent.open({
         ...execution,
-        automatic: !context.currentMessageId,
+        ...(context.model ? { model: context.model } : {}),
+        automatic: Boolean(context.automatic),
         ...(context.proactivity ? { restricted: true, restartable: !context.resumed } : {}),
         ...(context.scheduleCache ? { scheduleCache: context.scheduleCache } : {}),
         ...(sessionId === threadId && !context.proactivity && dependencies.keepWarm
@@ -1211,7 +1213,7 @@ export function createAgentRuntime(dependencies: {
       session = await opening;
       signal.throwIfAborted();
       const resumed = session.resumed;
-      const compact = Boolean(session.contextWindow && session.contextWindow < 65_536);
+      const compact = session.compactContext === true;
       const { images, omitted, analysis } = await inline(context.attachments, context.prompt);
       const requestContext = compact
         ? {

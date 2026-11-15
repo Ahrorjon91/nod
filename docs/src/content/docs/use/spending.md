@@ -35,6 +35,8 @@ Chat messages don't include cost or action receipts. Review spending and app act
 
 With an API model selected, select this month's total to see a chart and a forecast, such as "On track for $12.40". It also says how much was background work: source checks, schedules and tasks Nod started, plus work that runs outside any of them, such as email checks, memory upkeep and writing style. Point to or select a day on the chart to see that day’s spend and the total so far. You can also focus the chart and use the arrow keys. Every app action is recorded, reads included.
 
+To spend less on work you don't watch, choose a lighter model for schedules or for work Nod starts on its own. See [Models for each kind of work](/connect/models/#models-for-each-kind-of-work).
+
 ## How each model is priced
 
 How Nod counts usage depends on how you pay for the model.
