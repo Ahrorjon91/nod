@@ -382,7 +382,7 @@ export interface AgentSession {
   resumed: boolean;
   readsImages?: boolean;
   readsAudio?: boolean;
-  contextWindow?: number;
+  compactContext?: boolean;
   prompt(
     text: string,
     images: AgentImage[],

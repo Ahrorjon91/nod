@@ -1219,7 +1219,7 @@ export function createPiAgent(options: {
         resumed,
         readsImages: model.input.includes('image'),
         readsAudio: readsNativeAudio(model) && Boolean(input.readAudio),
-        contextWindow: model.contextWindow,
+        compactContext: budget.compact,
         async prompt(text, images, audio, stablePrefixes) {
           cached.stable = stablePrefixes;
           const owner = input.ownerContext;

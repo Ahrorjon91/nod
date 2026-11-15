@@ -8376,13 +8376,12 @@ test('native audio reaches the selected Pi model with tools and survives a reope
 test('the runtime sends a recording caption natively while retaining its trusted transcript and text-only fallback', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-native-context-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  for (const [native, contextWindow] of [
-    [false, 32_000],
-    [true, 32_000],
-    [false, 131_072],
-    [true, 131_072],
+  for (const [native, compact] of [
+    [false, true],
+    [true, true],
+    [false, false],
+    [true, false],
   ] as const) {
-    const compact = contextWindow < 65_536;
     const prompts: Array<{
       text: string;
       audio?: import('../src/ports/agent.ts').AgentAudioInput;
@@ -8394,7 +8393,7 @@ test('the runtime sends a recording caption natively while retaining its trusted
       agent: {
         open: async (input) => ({
           resumed: compact,
-          contextWindow,
+          compactContext: compact,
           readsAudio: native,
           abort() {},
           dispose() {},
