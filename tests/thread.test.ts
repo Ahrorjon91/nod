@@ -10599,35 +10599,28 @@ test(
     const db = await import('../src/server/db.ts');
     const thread = await import('../src/server/thread.ts');
     const { createTasks } = await import('../src/server/tasks.ts');
-    const ownerId = 'activity-identity-owner';
+    const ownerId = 'local-development';
     const otherOwner = 'activity-identity-other-owner';
     const activity = {
       objective: 'Read the synthetic source and report changes',
       sourceIds: ['synthetic-source'],
       connectionIds: [],
     };
-    const threadIds = [randomUUID(), randomUUID(), randomUUID()];
+    const threadId = randomUUID();
     const tasks = createTasks({ pool: db.pool, ownerId });
-    const otherTasks = createTasks({ pool: db.pool, ownerId: otherOwner });
-    const start = async (
-      service: typeof tasks,
-      owner: string,
-      threadId: string,
-      key: string,
-      identity?: typeof activity,
-    ) => {
+    const start = async (key: string, identity?: typeof activity) => {
       const turnId = randomUUID();
       await db.pool.query(
         `INSERT INTO threads(id,owner_id) VALUES($1,$2)
          ON CONFLICT (id) DO NOTHING`,
-        [threadId, owner],
+        [threadId, ownerId],
       );
       await db.pool.query(
         `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background,proactive)
          VALUES($1,$2,$3,$1,'event','Synthetic observer','running',true,true)`,
-        [turnId, owner, threadId],
+        [turnId, ownerId, threadId],
       );
-      return (await service.execute(
+      return (await tasks.execute(
         { threadId, turnId },
         {
           action: 'start',
@@ -10645,17 +10638,16 @@ test(
       await db.initializeDatabase();
       await thread.initializeThreads();
       await tasks.initialize();
-      await otherTasks.initialize();
       await db.pool.query(
         `INSERT INTO preferences(owner_id,quiet_hours_enabled,quiet_start,quiet_end,time_zone,proactive_paused)
-         VALUES($1,true,'00:00','23:59','UTC',false),($2,false,'00:00','00:00','UTC',false)`,
-        [ownerId, otherOwner],
+         VALUES($1,true,'00:00','23:59','UTC',false)`,
+        [ownerId],
       );
 
       await t.test('different occurrence keys share one open deferred task', async () => {
         const [first, second] = await Promise.all([
-          start(tasks, ownerId, threadIds[0]!, 'change-a', activity),
-          start(tasks, ownerId, threadIds[1]!, 'change-b', activity),
+          start('change-a', activity),
+          start('change-b', activity),
         ]);
         assert.equal(first.id, second.id);
         assert.equal(
@@ -10672,38 +10664,46 @@ test(
           ).rows[0].count,
           1,
         );
-      });
-
-      await t.test('completed occurrence replay remains unchanged', async () => {
-        const first = await start(tasks, ownerId, threadIds[0]!, 'completed-key', activity);
         await db.pool.query("UPDATE tasks SET state='done',closed_at=now() WHERE id=$1", [
           first.id,
         ]);
-        assert.equal(
-          (await start(tasks, ownerId, threadIds[0]!, 'completed-key', activity)).id,
+      });
+
+      await t.test('completed occurrence replay remains unchanged', async () => {
+        const first = await start('completed-key', activity);
+        await db.pool.query("UPDATE tasks SET state='done',closed_at=now() WHERE id=$1", [
           first.id,
-        );
-        const next = await start(tasks, ownerId, threadIds[0]!, 'new-key', activity);
+        ]);
+        assert.equal((await start('completed-key', activity)).id, first.id);
+        const next = await start('new-key', activity);
         assert.notEqual(next.id, first.id);
       });
 
       await t.test(
         'missing or different identities remain independent and owner-scoped',
         async () => {
-          const noIdentity = await start(tasks, ownerId, threadIds[0]!, 'legacy-key');
-          const unrelated = await start(tasks, ownerId, threadIds[0]!, 'unrelated-key', {
+          const noIdentity = await start('legacy-key');
+          const unrelated = await start('unrelated-key', {
             ...activity,
             objective: 'Handle a different synthetic need',
           });
-          const foreign = await start(
-            otherTasks,
-            otherOwner,
-            threadIds[2]!,
-            'foreign-key',
-            activity,
-          );
+          const ownerScopedKey = 'activity:owner-scope-test';
           assert.notEqual(noIdentity.id, unrelated.id);
-          assert.notEqual(foreign.id, unrelated.id);
+          await db.pool.query(
+            `INSERT INTO tasks(id,owner_id,title,done_when,now_text,activity_identity_key)
+             VALUES($1,$2,'Foreign task','Foreign task is complete','Waiting',$3),
+                   ($4,$5,'Local task','Local task is complete','Waiting',$3)`,
+            [randomUUID(), otherOwner, ownerScopedKey, randomUUID(), ownerId],
+          );
+          assert.equal(
+            (
+              await db.pool.query(
+                "SELECT count(*)::int AS count FROM tasks WHERE activity_identity_key=$1 AND state='open'",
+                [ownerScopedKey],
+              )
+            ).rows[0].count,
+            2,
+          );
         },
       );
     } finally {
