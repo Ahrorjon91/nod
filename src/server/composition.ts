@@ -66,7 +66,7 @@ import { createN8nFeedback } from '../providers/n8n/feedback.ts';
 import { createN8nTraces } from '../providers/n8n/traces.ts';
 import { createOtlpTelemetry } from '../providers/otlp/telemetry.ts';
 import type { UsageTelemetry } from '../ports/provider-usage.ts';
-import { agentModels } from '../shared/model-defaults.ts';
+import { agentModels, defaultEffort, defaultModel } from '../shared/model-defaults.ts';
 import { createChatSdkTransport } from '../providers/chat-sdk/index.ts';
 import { createWhatsAppLinkedTransport } from '../providers/chat-sdk/whatsapp.ts';
 import { combineMessagingTransports } from '../providers/chat-sdk/combined.ts';
@@ -663,6 +663,27 @@ export function createDefaultAdapters(
       return models.current;
     },
   };
+}
+
+function alternativeModel(models: ApplicationAdapters['models']) {
+  const view = models?.view();
+  const other = view?.connections.find(
+    (item) =>
+      item.id !== view.selection?.connectionId &&
+      item.status === 'connected' &&
+      !item.issue &&
+      item.models.length > 0,
+  );
+  const choice =
+    other && (defaultModel(other.provider, other.models, other.method) ?? other.models[0]);
+  return other && choice
+    ? {
+        connectionId: other.id,
+        modelId: choice.id,
+        effort: defaultEffort(other.provider, choice),
+        label: `${modelProviderNames[other.provider]} · ${choice.name}`,
+      }
+    : undefined;
 }
 
 export async function createApplication(
@@ -2064,16 +2085,9 @@ async function initializeApplication(
           }
         : {}),
       modelAlternative: () => {
-        const view = adapters.models?.view();
-        const other = view?.connections.find(
-          (item) =>
-            item.id !== view.selection?.connectionId &&
-            item.status === 'connected' &&
-            !item.issue &&
-            item.models.length > 0,
-        );
+        const other = alternativeModel(adapters.models);
         return other
-          ? `Your ${modelProviderNames[other.provider]} connection is also set up: you can switch to it in Settings > Models.`
+          ? `Your ${other.label} connection is also set up: you can switch to it in Settings > Models.`
           : undefined;
       },
       taskClassification: true,
@@ -2737,15 +2751,18 @@ async function initializeApplication(
     activity: activity.current,
     planningTasks: onboardingSuggestions.planning,
     computer,
-    configuration: () =>
-      configuration({
+    configuration: () => {
+      const alternative = adapters.model.issue && alternativeModel(adapters.models);
+      return configuration({
         provider: adapters.model.provider,
         model: adapters.model.name,
         llmReady: adapters.model.configured,
         modelReconnect: adapters.model.reconnect === true,
         ...(adapters.model.issue ? { modelIssue: adapters.model.issue } : {}),
+        ...(alternative ? { modelAlternative: alternative } : {}),
         integrationsReady: adapters.integrations.configured,
-      }),
+      });
+    },
   });
   adapters.models?.register(app, captureAnalytics);
   proactivity.registerRoutes(app);

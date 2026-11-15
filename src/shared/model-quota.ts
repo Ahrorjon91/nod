@@ -85,7 +85,10 @@ function readFailure(text: string) {
 
 export function modelFailureReason(text: string) {
   const { start, end, reasons } = readFailure(text);
-  return reasons.length
-    ? `${text.slice(0, start)}${[...new Set(reasons)].join('; ')}${text.slice(end + 1)}`
-    : text;
+  if (!reasons.length) return text;
+  const rest = reasons.reduce(
+    (value, reason) => value.replace(` (${reason})`, ''),
+    text.slice(end + 1),
+  );
+  return `${text.slice(0, start)}${[...new Set(reasons)].join('; ')}${rest}`;
 }

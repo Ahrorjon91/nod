@@ -405,6 +405,13 @@ input[type='range']:disabled {
   right: 5px;
   transform: translateY(-50%);
 }
+.notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
 .notice a {
   text-decoration: underline;
   text-underline-offset: 3px;

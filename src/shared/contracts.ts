@@ -1,9 +1,8 @@
-import type { ModelIssue } from './models';
 import type { Presentation } from './presentation';
 import type { TaskSuggestions } from './onboarding';
 import type { TrustBecause } from './trust';
 import type { AnswerChoices } from './answer-choices';
-import type { ModelSelection, WorkKind } from './models';
+import type { ModelIssue, ModelSelection, WorkKind } from './models';
 export type TurnStatus = 'queued' | 'running' | 'succeeded' | 'waiting' | 'failed' | 'cancelled';
 export interface Artifact {
   id: string;
@@ -257,6 +256,7 @@ export interface Configuration {
   llmReady: boolean;
   modelReconnect: boolean;
   modelIssue?: ModelIssue;
+  modelAlternative?: ModelSelection & { label: string };
   integrationsReady: boolean;
   conversationResetEnabled: boolean;
 }
