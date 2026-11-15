@@ -352,6 +352,7 @@ export function createModelService(options: {
     keyEnding?: string;
     issue?: ModelIssue;
     issues?: Record<string, ModelIssue>;
+    retry?: Record<string, number>;
   })[] = [];
   let selectionCheck: (() => Promise<unknown>) | undefined;
   let checked: string | undefined;
@@ -429,6 +430,7 @@ export function createModelService(options: {
           ? {
               issue: { reason: failed[0]![1].reason },
               issues: Object.fromEntries(failed.map(([id, item]) => [id, { reason: item.reason }])),
+              retry: Object.fromEntries(failed.map(([id, item]) => [id, item.retryAt])),
             }
           : {}),
       };
@@ -447,6 +449,12 @@ export function createModelService(options: {
     pendingCheck = selectionCheck().catch((error: unknown) =>
       logFailure('model_check_failed', error),
     );
+  }
+  function requested(row: ModelRecord | undefined, modelId: string | undefined) {
+    const chosen = row?.models.find((model) => model.choice.id === modelId);
+    if (!row || !chosen) return [];
+    const companion = chosen.choice.audio ? textCompanion(row)?.choice.id : undefined;
+    return companion ? [chosen.choice.id, companion] : [chosen.choice.id];
   }
   function credential(row: ModelRecord | undefined) {
     if (!row) return undefined;
@@ -478,17 +486,16 @@ export function createModelService(options: {
             rows.find((item) => item.id === row.id),
             tag,
           );
-          if (!error && !recorded.some(([id, item]) => id === modelId || item.retryAt > Date.now()))
-            return;
+          if (!error && !recorded.some(([id]) => id === modelId)) return;
           try {
             await store.change((state) => {
               const saved = state.connections.find((item) => item.id === row.id);
               if (!saved || credentialTag(credential(saved)) !== tag) return;
               const current = new Map(failures(saved, tag));
               if (!error) {
-                current.delete(modelId);
-                for (const item of current.values())
-                  item.retryAt = Math.min(item.retryAt, Date.now());
+                if (current.delete(modelId))
+                  for (const item of current.values())
+                    item.retryAt = Math.min(item.retryAt, Date.now());
                 saved.requestFailures = Object.fromEntries(current);
                 return;
               }
@@ -1042,16 +1049,25 @@ export function createModelService(options: {
     get current() {
       const row = rows.find((item) => item.id === selection?.connectionId);
       const chosen = row?.models.find((model) => model.choice.id === selection?.modelId);
-      const target =
-        chosen?.choice.audio && row ? textCompanion(row)?.choice.id : chosen?.choice.id;
       return {
         provider: row?.provider ?? 'unconfigured',
         name: selection?.modelId ?? 'Unconfigured',
         label: chosen?.choice.name ?? selection?.modelId,
         configured: service.configured,
         reconnect: row?.status === 'reconnect',
-        issue: target ? row?.issues?.[target] : undefined,
+        issue: requested(row, selection?.modelId)
+          .map((id) => row?.issues?.[id])
+          .find(Boolean),
       };
+    },
+    paused(origin: WorkOrigin) {
+      try {
+        const { selection: work } = service.workModel(origin);
+        const row = rows.find((item) => item.id === work.connectionId);
+        return requested(row, work.modelId).some((id) => (row?.retry?.[id] ?? 0) > Date.now());
+      } catch {
+        return false;
+      }
     },
     async automaticRequestsAllowed(origin: WorkOrigin, auxiliary = false) {
       try {

@@ -1103,8 +1103,8 @@ async function initializeApplication(
       ? {
           validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice),
           workPricing: (own: ModelSelection | null) => adapters.models!.pricing('schedule', own),
-          modelReady: (model: ModelSelection | null) =>
-            adapters.models!.automaticRequestsAllowed({ kind: 'schedule', schedule: model }),
+          modelPaused: (model: ModelSelection | null) =>
+            adapters.models!.paused({ kind: 'schedule', schedule: model }),
         }
       : {}),
     watchable: async (connectionIds) => integrations.watchable(connectionIds),

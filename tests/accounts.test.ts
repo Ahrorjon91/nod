@@ -3105,7 +3105,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     await assert.rejects(owner.resolve());
   });
 
-  test('a model request failure that Pi does not retry pauses automatic requests to that model, tries again after a growing wait and clears on success', async (t) => {
+  test('a model request failure that Pi does not retry pauses automatic requests to that model, tries again after a growing wait, and clears on success', async (t) => {
     const f = await fixture(t);
     const { createPiMemoryCurator } = await import('../src/providers/pi/memory-curator.ts');
     const { createPiModelRuntime } = await import('../src/providers/pi/models.ts');
@@ -3179,6 +3179,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
         { error: { code: 402, message: 'This request requires more credits.' } },
         { status: 402 },
       );
+    const noCredits = reply;
     assert.equal((await ask()).stopReason, 'error');
     assert.equal(calls, 2);
     assert.match(
@@ -3188,6 +3189,12 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     assert.match(service.current.issue!.reason, /requires more credits/);
     assert.equal(await allowed(), false);
     assert.equal(await allowed(second), true);
+    assert.equal(service.paused({ kind: 'schedule', schedule: first }), true);
+    assert.equal(service.paused({ kind: 'schedule', schedule: second }), false);
+    assert.equal(
+      service.paused({ kind: 'schedule', schedule: { ...first, modelId: 'fixture-missing' } }),
+      false,
+    );
     await assert.rejects(curator.curate(request), /Automatic requests to this model are paused/);
     assert.equal(calls, 2);
     const ledger = createLedger({
@@ -3234,6 +3241,15 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     reply = healthy;
     assert.equal((await ask()).stopReason, 'stop');
     assert.equal(calls, 6);
+    assert.equal(await allowed(), false);
+    reply = noCredits;
+    assert.equal((await ask()).stopReason, 'error');
+    assert.equal(calls, 7);
+    assert.match(service.current.issue!.reason, /requires more credits/);
+    reply = healthy;
+    assert.equal((await ask()).stopReason, 'stop');
+    assert.equal(calls, 8);
+    assert.equal(service.current.issue, undefined);
     assert.equal(await allowed(), true);
     assert.match(service.view().connections[0]!.issue!.reason, /requires more credits/);
     await service.select(first);
@@ -3241,7 +3257,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     await service.select(first);
     assert.equal(checks, 5);
     assert.deepEqual(await curator.curate(request), { ready: true });
-    assert.equal(calls, 7);
+    assert.equal(calls, 9);
     assert.equal(service.view().connections[0]!.issue, undefined);
     assert.equal(service.current.issue, undefined);
   });

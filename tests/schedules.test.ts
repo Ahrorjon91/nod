@@ -47,7 +47,7 @@ test(
     };
     let failAfterTask = false;
     const watched = new Map<string, string>();
-    let modelReady = true;
+    let modelPaused = false;
     const personal = createPersonalService({
       pool: db.pool,
       ownerId: 'local-development',
@@ -56,7 +56,7 @@ test(
       watchable: async (ids) => ids.every((id) => watched.has(id)),
       watchState: async (ids) =>
         ids.every((id) => watched.has(id)) ? ids.map((id) => watched.get(id)).join() : null,
-      modelReady: async () => modelReady,
+      modelPaused: () => modelPaused,
       enqueueTurn: async (...args) => {
         assert.ok(args[1]?.client);
         const id = await thread.enqueueTurn(...args);
@@ -1110,7 +1110,7 @@ test(
         },
       );
       await t.test(
-        'a recurring schedule skips fires while its model is paused and Run now still runs',
+        'a recurring schedule skips planned fires while its model is paused, and Run now still starts a run',
         async () => {
           const before = clock;
           const schedule = await create({ cron: '*/15 * * * *' });
@@ -1120,7 +1120,7 @@ test(
             await deliver([job]);
             return (await runs(schedule.id)).length;
           };
-          modelReady = false;
+          modelPaused = true;
           try {
             assert.equal(await fire(), 0);
             assert.equal(await fire(), 0);
@@ -1131,7 +1131,7 @@ test(
               manual.json().turnId,
             ]);
           } finally {
-            modelReady = true;
+            modelPaused = false;
           }
           assert.equal(await fire(), 2);
           await request('DELETE', `/api/schedules/${schedule.id}`);

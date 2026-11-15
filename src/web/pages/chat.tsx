@@ -700,10 +700,13 @@ export function Chat({
   const lastMessage = allMessages.at(-1);
   const beforeLast = allMessages.at(-2);
   const modelFailed =
-    lastMessage?.role === 'assistant' && lastMessage.streamId?.startsWith('model-failure:');
+    lastMessage?.role === 'assistant' &&
+    lastMessage.streamId?.startsWith('model-failure:') &&
+    beforeLast?.role === 'user' &&
+    beforeLast.turnId === lastMessage.turnId;
   const failedRequest =
     modelFailed &&
-    beforeLast?.role === 'user' &&
+    beforeLast &&
     !beforeLast.attachments.length &&
     !beforeLast.replyToMessageId &&
     !beforeLast.choiceAnswer &&

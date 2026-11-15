@@ -2407,11 +2407,16 @@ test(
             const failure = (await pool.query('SELECT error FROM turns WHERE id=$1', [turnId]))
               .rows[0];
             assert.match(failure.error, reason);
-            const notices = (
-              await pool.query("SELECT text FROM messages WHERE turn_id=$1 AND role='assistant'", [
-                turnId,
-              ])
-            ).rows;
+            let notices: { text: string }[] = [];
+            for (let attempt = 0; attempt < 250 && !notices.length; attempt++) {
+              notices = (
+                await pool.query(
+                  "SELECT text FROM messages WHERE turn_id=$1 AND role='assistant'",
+                  [turnId],
+                )
+              ).rows;
+              if (!notices.length) await delay(20);
+            }
             assert.equal(notices.length, 1);
             assert.ok(notices[0].text.includes(title));
             assert.match(notices[0].text, reason);

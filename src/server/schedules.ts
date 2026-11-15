@@ -105,7 +105,7 @@ export interface ScheduleDependencies {
   sessionCosts?(sessionIds: string[]): Promise<Record<string, number | null>>;
   watchable?(connectionIds: string[]): Promise<boolean>;
   watchState?(connectionIds: string[]): Promise<string | null>;
-  modelReady?(model: ModelSelection | null): Promise<boolean>;
+  modelPaused?(model: ModelSelection | null): boolean;
   recentTurnCost?(turnId?: string): Promise<number | null>;
   validateModel?(choice: ModelSelection): ModelSelection;
   sessionUsage?(sessionIds: string[]): Promise<Record<string, WorkUsage>>;
@@ -439,7 +439,7 @@ export function createSchedules(dependencies: ScheduleDependencies) {
         ? await dependencies.watchState?.(watched.watch).catch(() => null)
         : null;
     const paused =
-      watched?.kind === 'recurring' && !(await (dependencies.modelReady?.(watched.model) ?? true));
+      watched?.kind === 'recurring' && Boolean(dependencies.modelPaused?.(watched.model));
     job.signal.throwIfAborted();
     const accepted = await transaction(async (client) => {
       const row = (
