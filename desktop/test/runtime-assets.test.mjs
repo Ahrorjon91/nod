@@ -3378,6 +3378,78 @@ test('Mac startup repairs existing guests before Docker and refuses failed or st
   }
 });
 
+test('a computer whose first start failed is removed so Try again recreates it, and an existing computer is kept', async (t) => {
+  const failure = 'copy_file_range failed: invalid argument';
+  for (const scenario of [
+    { name: 'first start fails', created: true, removed: true },
+    { name: 'existing computer fails to start', created: false, removed: false },
+    { name: 'first start is stopped', created: true, aborted: true, removed: false },
+    { name: 'removal fails too', created: true, removed: true, removalFails: true },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'nod-guest-first-start-'));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      const assets = join(root, 'assets');
+      const dataRoot = join(root, 'profile');
+      const identity = createHash('sha256').update(dataRoot).digest('hex').slice(0, 12);
+      const limaHome = join(root, '.nod-desktop', identity);
+      await mkdir(join(limaHome, 'nod'), { recursive: true });
+      await mkdir(join(assets, 'lima/bin'), { recursive: true });
+      await mkdir(join(dataRoot, 'desktop-runtime'), { recursive: true });
+      await writeFile(join(assets, 'lima/bin/limactl'), 'Synthetic Lima executable');
+      await writeFile(
+        join(assets, 'manifest.json'),
+        JSON.stringify({
+          version: 1,
+          platform: `darwin-${process.arch}`,
+          guest: { file: 'guest.img', sha256: '1'.repeat(64) },
+          dockerGuest: { file: 'docker-guest.tar.gz', sha256: '2'.repeat(64) },
+          images: [],
+        }),
+      );
+      await writeFile(
+        join(dataRoot, 'desktop-runtime/state.json'),
+        JSON.stringify({ version: 1, limaHome, port: 54329, password: '3'.repeat(64) }),
+      );
+      if (!scenario.created)
+        await writeFile(
+          join(limaHome, 'nod/lima.yaml'),
+          JSON.stringify({
+            mounts: [{ location: assets, mountPoint: '/opt/nod-assets', writable: false }],
+          }),
+        );
+      const controller = new AbortController();
+      const calls = [];
+      const prepare = await macRuntimePrepare(root, assets, {
+        execute: async (command, args) => {
+          calls.push(Array.from(args).slice(0, 3).join(' '));
+          if (args[0] === 'start') {
+            if (scenario.aborted) {
+              controller.abort(new Error('Synthetic stop'));
+              throw controller.signal.reason;
+            }
+            throw new Error(failure);
+          }
+          if (args[0] === 'delete' && scenario.removalFails)
+            throw new Error('Synthetic removal failure');
+          return '';
+        },
+        finishRuntime: async () => calls.push('database'),
+      });
+      await assert.rejects(
+        prepare(
+          { dataRoot, resourcesPath: root, preserveRuntimeCache: true, signal: controller.signal },
+          () => {},
+        ),
+        scenario.aborted ? /Synthetic stop/ : new RegExp(failure),
+      );
+      assert.equal(calls.includes('delete --force nod'), scenario.removed);
+      assert.equal(calls.includes('create --name nod'), scenario.created);
+      assert.equal(calls.at(-1), scenario.removed ? 'delete --force nod' : 'start --tty=false nod');
+    });
+  }
+});
+
 test('Mac runtime updates stop the old guest before changing its assets mount', async (t) => {
   for (const initial of ['Running', 'Broken', 'Stopped', 'refused', 'stop-error', 'aborted']) {
     await t.test(initial, async (t) => {
