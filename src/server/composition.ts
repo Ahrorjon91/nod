@@ -2754,7 +2754,7 @@ async function initializeApplication(
     planningTasks: onboardingSuggestions.planning,
     computer,
     configuration: () => {
-      const alternative = adapters.model.issue && alternativeModel(adapters.models);
+      const alternative = alternativeModel(adapters.models);
       return configuration({
         provider: adapters.model.provider,
         model: adapters.model.name,

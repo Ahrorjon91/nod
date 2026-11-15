@@ -699,9 +699,10 @@ export function Chat({
   const working = live.some((item) => !item.background);
   const lastMessage = allMessages.at(-1);
   const beforeLast = allMessages.at(-2);
+  const modelFailed =
+    lastMessage?.role === 'assistant' && lastMessage.streamId?.startsWith('model-failure:');
   const failedRequest =
-    lastMessage?.role === 'assistant' &&
-    lastMessage.streamId?.startsWith('model-failure:') &&
+    modelFailed &&
     beforeLast?.role === 'user' &&
     !beforeLast.attachments.length &&
     !beforeLast.replyToMessageId &&
@@ -2470,37 +2471,40 @@ export function Chat({
               {connectionNotice.text}
             </Notice>
           )}
-          {state.configuration.llmReady && state.configuration.modelIssue && (
-            <Notice kind="info">
-              Your model’s last request failed:{' '}
-              {state.configuration.modelIssue.reason.replace(/(?<![.!?])$/, '.')}
-              <span className="notice-actions">
-                {state.configuration.modelAlternative && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    disabled={recovering || working || sending}
-                    onClick={() => void recover(state.configuration.modelAlternative)}
-                  >
-                    Use {state.configuration.modelAlternative.label}
-                  </Button>
-                )}
-                {failedRequest && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    disabled={recovering || working || sending}
-                    onClick={() => void recover()}
-                  >
-                    Try again
-                  </Button>
-                )}
-                <a href="/settings/models">Settings &gt; Models</a>
-              </span>
-            </Notice>
-          )}
+          {state.configuration.llmReady &&
+            (state.configuration.modelIssue ||
+              (modelFailed && (failedRequest || state.configuration.modelAlternative))) && (
+              <Notice kind="info">
+                {state.configuration.modelIssue
+                  ? `Your model’s last request failed: ${state.configuration.modelIssue.reason.replace(/(?<![.!?])$/, '.')}`
+                  : 'Your model’s last request failed.'}
+                <span className="notice-actions">
+                  {state.configuration.modelAlternative && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={recovering || working || sending}
+                      onClick={() => void recover(state.configuration.modelAlternative)}
+                    >
+                      Use {state.configuration.modelAlternative.label}
+                    </Button>
+                  )}
+                  {failedRequest && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={recovering || working || sending}
+                      onClick={() => void recover()}
+                    >
+                      Try again
+                    </Button>
+                  )}
+                  <a href="/settings/models">Settings &gt; Models</a>
+                </span>
+              </Notice>
+            )}
           {spendingPaused && trust?.limit && (
             <Notice kind="info">
               You reached your {money(trust.limit.monthlyUsd)} monthly spending limit. Raise or
