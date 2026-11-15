@@ -581,6 +581,8 @@ test('server configuration refuses remote exposure without a valid token and an 
     { NOD_AUTH_TOKEN: `${key}\n` },
     { NOD_HOST: 'attacker.example', NOD_AUTH_TOKEN: key },
     ...['0', '-1', '65536', '4310.5', 'not-a-port', ''].map((PORT) => ({ PORT })),
+    { PORT: '80' },
+    { PORT: '80', NOD_AUTH_TOKEN: key },
   ])
     assert.throws(() => serverNetwork(environment));
   for (const NOD_PUBLIC_URL of [

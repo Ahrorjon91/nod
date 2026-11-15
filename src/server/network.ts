@@ -18,7 +18,9 @@ export function serverNetwork(environment: Record<string, string | undefined>) {
   }
   const local = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
   const withDefaultPort = `${url.protocol}//${url.hostname}:${url.protocol === 'https:' ? 443 : 80}`;
-  const spellings = [url.origin, withDefaultPort].flatMap((origin) => [origin, `${origin}/`]);
+  const origins =
+    environment.NOD_PUBLIC_URL === undefined ? [url.origin] : [url.origin, withDefaultPort];
+  const spellings = origins.flatMap((origin) => [origin, `${origin}/`]);
   if (
     !['http:', 'https:'].includes(url.protocol) ||
     !spellings.includes(address) ||
