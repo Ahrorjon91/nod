@@ -30,7 +30,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime, localModelSilenceMs } from './models.ts';
 import { modelContext } from './context.ts';
-import { audioContext, audioMessage, readsNativeAudio } from './audio.ts';
+import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
 import { piModelTrace } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
 import type { ModelAccess } from '../../ports/models.ts';
@@ -792,7 +792,7 @@ export function createPiAgent(options: {
           ownerContextCopies(input.ownerContext),
           (pi: ExtensionAPI) =>
             pi.on('session_before_compact', async ({ preparation, customInstructions, signal }) => {
-              const target = session.model ?? model;
+              const target = readsNativeAudio(model) ? model : (session.model ?? model);
               try {
                 return {
                   compaction: await compact(
@@ -979,12 +979,31 @@ export function createPiAgent(options: {
       const systemPrompt = guidelines.length
         ? `${input.systemPrompt}\n\nTool guidelines:\n${guidelines.map((rule) => `- ${rule}`).join('\n')}`
         : input.systemPrompt;
+      let sessionModel = model;
+      if (connection?.textModel && readsNativeAudio(model)) {
+        const textModel = connection.textModel;
+        const id = `nod/${model.id}`;
+        runtime.registerVirtualModel({
+          provider: model.provider,
+          id,
+          name: model.name,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+          input: model.input,
+          thinkingLevels: ['off'],
+          route: ({ reason, thinkingLevel }) =>
+            reason !== 'direct' && input.readAudio && audioEntries(manager).length
+              ? { model, thinkingLevel }
+              : { model: textModel, thinkingLevel: access?.textModel?.effort ?? thinkingLevel },
+        });
+        sessionModel = runtime.getModel(model.provider, id)!;
+      }
       const resumed = !restart && manager.buildSessionContext().messages.length > 0;
       const { session } = await (options.createSession ?? createAgentSession)({
         cwd: input.workspace.path,
         agentDir: directory,
         modelRuntime: runtime,
-        model,
+        model: sessionModel,
         thinkingLevel: access?.effort ?? 'high',
         tools: [
           ...tools

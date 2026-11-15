@@ -4466,6 +4466,57 @@ async function contextRecoveryServer(
   };
 }
 
+test('Pi recovers a text companion overflow under an audio model selection', async (t) => {
+  const { nativeAudioModel } = await import('../src/providers/pi/model-catalog.ts');
+  const { bodies, summary, url, close } = await contextRecoveryServer(0, 1, 1);
+  t.after(close);
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-companion-overflow-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const text = smallContextAccess('compatible', 'fixture-text', 8192).definition;
+  text.spec = { ...text.spec, provider: 'openai', baseUrl: url };
+  const events: AgentEvent[] = [];
+  const agent = createPiAgent({
+    provider: 'openai',
+    sessionRoot: directory,
+    resolve: async () => ({
+      provider: 'openai',
+      method: 'api_key',
+      effort: 'off',
+      read: async () => ({ type: 'api_key', key: 'fixture-key' }),
+      definition: {
+        choice: { ...text.choice, id: nativeAudioModel.id, audio: true },
+        spec: { ...nativeAudioModel, baseUrl: url },
+      },
+      textModel: { definition: text, effort: 'off' },
+    }),
+  });
+  t.after(() => agent.dispose());
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    restricted: true,
+    systemPrompt: 'Synthetic instructions.',
+    workspace: recordingWorkspace().workspace,
+    tools: [],
+    runTool: async (_name, _params, run) => run(),
+    shouldStop: () => false,
+    onEvent: (event) => events.push(event),
+  });
+  t.after(() => session.dispose());
+  await session.prompt('Answer the synthetic typed request.', []);
+  assert.deepEqual(bodies.map(summary), [false, true, false]);
+  assert.ok(bodies.every((body) => body.model === 'fixture-text'));
+  assert.equal(events.findLast((event) => event.type === 'final')?.text, 'Synthetic answer');
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === 'provider_usage' &&
+        event.usage.operation === 'compaction' &&
+        event.usage.model === 'fixture-text' &&
+        event.usage.status === 'succeeded',
+    ),
+  );
+});
+
 test('a provider-reported mid-turn context overflow compacts without repeating tools', async (t) => {
   for (const variant of ['summary', 'summary-overflow', 'short-history'] as const)
     await t.test(variant, async (t) => {

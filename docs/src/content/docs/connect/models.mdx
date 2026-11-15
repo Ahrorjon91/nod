@@ -232,7 +232,7 @@ If your selected connection is removed or needs reconnecting, the next connectio
 
 ## One model for everything
 
-Nod uses the same model choice in the app, Telegram and WhatsApp. A task that's already running keeps the model it started with. An audio model's **Text support** label names its companion from the same connection. Requests without recordings use that companion; follow-ups that still include recordings use the audio model. Your saved model choice stays unchanged.
+Nod uses the same model choice in the app, Telegram and WhatsApp. A task that's already running keeps the model it started with. An audio model's **Text support** label names its companion from the same connection. Requests without recordings use that companion; follow-ups that still include recordings use the audio model. Both use the smaller context and output limits of the pair. Your saved model choice stays unchanged.
 
 If a model request fails, Nod doesn't switch to another connection. It retries a temporary provider error, such as an overload or rate limit, up to three times.
 
