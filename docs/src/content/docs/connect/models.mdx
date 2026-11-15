@@ -244,7 +244,7 @@ A schedule or task can have its own model too: in **Scheduled**, open it and sel
 
 You can also tell Nod, for example "Run my schedules on the light model" or "Use Opus for the weekly report", in Nod, Telegram or WhatsApp. Nod replies with the cost change.
 
-A change applies from the next turn. Checking what Nod may do, writing the questions it asks you and reading your answers always use your model. If a model you chose for some work is no longer available, that work fails with the reason instead of switching models, and **Settings > Models** shows it as unavailable so you can choose another. Removing a connection returns the work that used it to its default: the model for its kind of work, else your model. An audio model's **Text support** label names its companion from the same connection. Requests without recordings use that companion; follow-ups that still include recordings use the audio model. Your saved model choice stays unchanged.
+A change applies from the next turn; work that's already running keeps its model until then. Checking what Nod may do, writing the questions it asks you and reading your answers always use your model. If a model you chose for some work is no longer available, that work fails with the reason instead of switching models, and **Settings > Models** shows it as unavailable so you can choose another. Removing a connection returns the work that used it to its default: the model for its kind of work, else your model. An audio model's **Text support** label names its companion from the same connection. Requests without recordings use that companion; follow-ups that still include recordings use the audio model. Both use the smaller context and output limits of the pair. Your saved model choice stays unchanged.
 
 If a model request fails, Nod doesn't switch to another connection. It retries a temporary provider error, such as an overload or rate limit, up to three times.
 
@@ -254,9 +254,9 @@ Background work, such as memory upkeep, uses a smaller model from the same conne
 
 For a context window below 65,536 tokens, Nod uses short instructions and loads one detailed tool at a time. It reads guides, saved memory and older messages when needed. Large tool results stay in workspace files, with a short preview in the conversation.
 
-Nod reserves space for the reply and starts history compaction earlier. It keeps your current request and rules complete. If a request still does not fit, Nod asks for a shorter request or a model with a larger context window. Large images and tool schemas can need a larger window. Token estimates cannot guarantee that every provider accepts a request.
+Nod limits reply size and asks Pi to start history compaction earlier. Pi handles context limits from the provider and can summarize older work before continuing. Large images, tool schemas or a request that cannot be summarized can still need a larger window. A failure keeps the provider's or compaction's specific reason.
 
-Switching to a model with a smaller window can reduce the older context before the next reply. The full chat stays saved, and Nod can search it when it needs earlier details. If an unfinished request alone exceeds the new window, choose a model with more context or reset the conversation.
+Pi also manages saved context when you switch models. The full chat stays saved, and Nod can search earlier details. If the request or its summary cannot fit the new model, choose a model with more context or shorten the request.
 
 The same server checks still decide app actions, sign-ins and payments. A smaller context window does not change those checks. Model ability still affects whether Nod can complete a task.
 

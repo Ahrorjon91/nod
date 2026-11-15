@@ -1213,7 +1213,7 @@ export function createAgentRuntime(dependencies: {
       session = await opening;
       signal.throwIfAborted();
       const resumed = session.resumed;
-      const compact = Boolean(session.contextWindow && session.contextWindow < 65_536);
+      const compact = session.compactContext === true;
       const { images, omitted, analysis } = await inline(context.attachments, context.prompt);
       const requestContext = compact
         ? {
