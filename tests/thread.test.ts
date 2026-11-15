@@ -10576,6 +10576,149 @@ test(
   },
 );
 
+test(
+  'observer activity identity deduplicates pending quiet-hour work without changing occurrence replay',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
+  async (t) => {
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
+    const schema = `test_activity_identity_${suffix}`;
+    const bossSchema = `test_activity_identity_boss_${suffix}`;
+    const root = await mkdtemp(join(tmpdir(), 'activity-identity-test-'));
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const previous = {
+      DATABASE_URL: process.env.DATABASE_URL,
+      PGBOSS_SCHEMA: process.env.PGBOSS_SCHEMA,
+      NOD_DATA_ROOT: process.env.NOD_DATA_ROOT,
+    };
+    const url = new URL(process.env.TEST_DATABASE_URL!);
+    url.searchParams.set('options', `-c search_path=${schema}`);
+    process.env.DATABASE_URL = url.href;
+    process.env.PGBOSS_SCHEMA = bossSchema;
+    process.env.NOD_DATA_ROOT = root;
+    const db = await import('../src/server/db.ts');
+    const thread = await import('../src/server/thread.ts');
+    const { createTasks } = await import('../src/server/tasks.ts');
+    const ownerId = 'activity-identity-owner';
+    const otherOwner = 'activity-identity-other-owner';
+    const activity = {
+      objective: 'Read the synthetic source and report changes',
+      sourceIds: ['synthetic-source'],
+      connectionIds: [],
+    };
+    const threadIds = [randomUUID(), randomUUID(), randomUUID()];
+    const tasks = createTasks({ pool: db.pool, ownerId });
+    const otherTasks = createTasks({ pool: db.pool, ownerId: otherOwner });
+    const start = async (
+      service: typeof tasks,
+      owner: string,
+      threadId: string,
+      key: string,
+      identity?: typeof activity,
+    ) => {
+      const turnId = randomUUID();
+      await db.pool.query(
+        `INSERT INTO threads(id,owner_id) VALUES($1,$2)
+         ON CONFLICT (id) DO NOTHING`,
+        [threadId, owner],
+      );
+      await db.pool.query(
+        `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background,proactive)
+         VALUES($1,$2,$3,$1,'event','Synthetic observer','running',true,true)`,
+        [turnId, owner, threadId],
+      );
+      return (await service.execute(
+        { threadId, turnId },
+        {
+          action: 'start',
+          title: 'Synthetic monitoring task',
+          key,
+          ...(identity ? { activity: identity } : {}),
+          message: 'Read the synthetic source.',
+          doneWhen: 'The synthetic change is reported.',
+          now: 'Waiting for quiet hours to end.',
+        },
+        null,
+      )) as { id: string };
+    };
+    try {
+      await db.initializeDatabase();
+      await thread.initializeThreads();
+      await tasks.initialize();
+      await otherTasks.initialize();
+      await db.pool.query(
+        `INSERT INTO preferences(owner_id,quiet_hours_enabled,quiet_start,quiet_end,time_zone,proactive_paused)
+         VALUES($1,true,'00:00','23:59','UTC',false),($2,false,'00:00','00:00','UTC',false)`,
+        [ownerId, otherOwner],
+      );
+
+      await t.test('different occurrence keys share one open deferred task', async () => {
+        const [first, second] = await Promise.all([
+          start(tasks, ownerId, threadIds[0]!, 'change-a', activity),
+          start(tasks, ownerId, threadIds[1]!, 'change-b', activity),
+        ]);
+        assert.equal(first.id, second.id);
+        assert.equal(
+          (await db.pool.query("SELECT count(*)::int AS count FROM tasks WHERE state='open'"))
+            .rows[0].count,
+          1,
+        );
+        assert.equal(
+          (
+            await db.pool.query(
+              'SELECT count(*)::int AS count FROM turns WHERE session_id=$1 AND start_after IS NOT NULL',
+              [first.id],
+            )
+          ).rows[0].count,
+          1,
+        );
+      });
+
+      await t.test('completed occurrence replay remains unchanged', async () => {
+        const first = await start(tasks, ownerId, threadIds[0]!, 'completed-key', activity);
+        await db.pool.query("UPDATE tasks SET state='done',closed_at=now() WHERE id=$1", [
+          first.id,
+        ]);
+        assert.equal(
+          (await start(tasks, ownerId, threadIds[0]!, 'completed-key', activity)).id,
+          first.id,
+        );
+        const next = await start(tasks, ownerId, threadIds[0]!, 'new-key', activity);
+        assert.notEqual(next.id, first.id);
+      });
+
+      await t.test(
+        'missing or different identities remain independent and owner-scoped',
+        async () => {
+          const noIdentity = await start(tasks, ownerId, threadIds[0]!, 'legacy-key');
+          const unrelated = await start(tasks, ownerId, threadIds[0]!, 'unrelated-key', {
+            ...activity,
+            objective: 'Handle a different synthetic need',
+          });
+          const foreign = await start(
+            otherTasks,
+            otherOwner,
+            threadIds[2]!,
+            'foreign-key',
+            activity,
+          );
+          assert.notEqual(noIdentity.id, unrelated.id);
+          assert.notEqual(foreign.id, unrelated.id);
+        },
+      );
+    } finally {
+      await thread.stopThreadWorkers();
+      await db.pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+      for (const [key, value] of Object.entries(previous))
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
 const memoryFixture = async (tables: string[] = []) => {
   const schema = `test_memory_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
   const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
