@@ -229,6 +229,31 @@ test('contact previews read vCard 2.1, 3.0 and 4.0 without treating field values
   );
 });
 
+const vcardOf = (...lines: string[]) => ['BEGIN:VCARD', ...lines, 'END:VCARD'].join('\r\n');
+
+test('contact previews read LF-only exports and unfold folded lines', () => {
+  assert.equal(contactCards('BEGIN:VCARD\nFN:Synthetic Lf\nEND:VCARD')[0].name, 'Synthetic Lf');
+  const [folded] = contactCards(vcardOf('FN:Synthetic', '  Folded', 'TEL:+3460', ' 0000000'));
+  assert.equal(folded.name, 'Synthetic Folded');
+  assert.deepEqual(folded.phones, ['+34600000000']);
+});
+
+test('contact previews take only whole BEGIN and END lines as card boundaries', () => {
+  const cards = contactCards(
+    vcardOf('FN:Synthetic', 'X-NOTE:BEGIN:VCARD', 'X-NOTE:END:VCARD', 'BEGIN:VCARDX', 'END:VCARDX'),
+  );
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].name, 'Synthetic');
+});
+
+test('contact previews refuse the whole set when any card is unterminated, unopened, nameless or holds a NUL byte', () => {
+  assert.equal(contactCards(vcardOf('FN:One') + '\r\n' + vcardOf('FN:Two')).length, 2);
+  assert.deepEqual(contactCards(vcardOf('FN:One') + '\r\nEND:VCARD'), []);
+  assert.deepEqual(contactCards(vcardOf('FN:One') + '\r\nBEGIN:VCARD\r\nFN:Unterminated'), []);
+  assert.deepEqual(contactCards(vcardOf('FN:One') + '\r\n' + vcardOf('TEL:+34600000000')), []);
+  assert.deepEqual(contactCards('BEGIN:VCARD\r\nFN:Synthetic\0\r\nEND:VCARD'), []);
+});
+
 test('audio waveform reads refuse foreign URLs, oversized streams, redirects and cancelled work', async (t) => {
   const ids = Array.from({ length: 5 }, () => randomUUID());
   const opus = (count: number, granule = 0n) => {
