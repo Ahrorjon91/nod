@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type {
@@ -12,11 +12,16 @@ import { ModelAuthError, ModelWorkspaceSelectionError } from '../ports/models.ts
 import { ModelRequestError } from '../ports/agent.ts';
 import type { CredentialKeyStore } from '../ports/key-store.ts';
 import type {
+  ModelLane,
   ModelMethod,
   ModelChoice,
   ModelProvider,
+  ModelRoute,
+  ModelRoutes,
   ModelSelection,
   ModelsResponse,
+  WorkKind,
+  WorkModel,
 } from '../shared/models.ts';
 import {
   apiKeyConnectionProviders,
@@ -28,6 +33,7 @@ import {
   lightestEffort,
   modelSource,
   openAIRegions,
+  routeModel,
 } from '../shared/models.ts';
 import { signInPage } from '../shared/sign-in-page.ts';
 import { modelKeyError } from '../shared/model-keys.ts';
@@ -43,6 +49,7 @@ import type { SettingActor } from './analytics-settings.ts';
 import { logFailure } from './failure-log.ts';
 import { modelQuotaFailure } from '../shared/model-quota.ts';
 import { createTextRedactor } from './redaction.ts';
+import { afterCommit } from './transaction.ts';
 
 const keySchema = z
   .object({
@@ -69,11 +76,36 @@ class ConnectionError extends ModelRequestError {}
 function modelPricing(model: ModelDefinition): ModelChoice['pricing'] {
   if (model.choice.id === 'openrouter/auto') return 'variable';
   const cost = z
-    .object({ input: z.number().finite(), output: z.number().finite() })
+    .object({
+      input: z.number().finite(),
+      output: z.number().finite(),
+      cacheRead: z.number().finite().optional(),
+      cacheWrite: z.number().finite().optional(),
+    })
     .safeParse(model.spec.cost).data;
   if (!cost) return undefined;
-  return cost.input < 0 || cost.output < 0 ? 'variable' : cost;
+  if (Object.values(cost).some((value) => value < 0)) return 'variable';
+  return {
+    input: cost.input,
+    output: cost.output,
+    ...(cost.cacheRead !== undefined ? { cacheRead: cost.cacheRead } : {}),
+    ...(cost.cacheWrite !== undefined ? { cacheWrite: cost.cacheWrite } : {}),
+  };
 }
+
+export const modelRouteInput = z.union([modelSelectionInput, z.literal('light'), z.null()]);
+
+export interface WorkOrigin {
+  kind: WorkKind;
+  task?: ModelSelection | null;
+  schedule?: ModelSelection | null;
+}
+
+const workNames = {
+  task: 'This task',
+  schedule: 'This schedule',
+  lane: { schedule: 'Schedules', background: 'Work Nod starts on its own' },
+} as const;
 
 export function endpointAddress(address: string) {
   let url: URL;
@@ -303,6 +335,7 @@ export function createModelService(options: {
   }
   let rows: (ModelRecord & { keyEnding?: string })[] = [];
   let selection: ModelSelection | null = null;
+  let routes: ModelRoutes = {};
   let starting: Promise<unknown> = Promise.resolve();
   const pendingControllers = new Set<AbortController>();
   let closed = false;
@@ -366,6 +399,7 @@ export function createModelService(options: {
         : row;
     });
     selection = state.selection;
+    routes = state.routes;
     options.changed?.();
   }
   function credential(row: ModelRecord | undefined) {
@@ -516,6 +550,64 @@ export function createModelService(options: {
         continue;
       return { row, definition };
     }
+  }
+  async function settle(client: PoolClient | undefined, apply: () => void) {
+    if (!client) return reload();
+    afterCommit(client, () => {
+      apply();
+      options.changed?.();
+      void reload().catch((error: unknown) => logFailure('model_settings_reload_failed', error));
+    });
+  }
+  function lightModel(): ModelSelection | null {
+    const candidate = classificationModel();
+    if (!candidate) return null;
+    const { row, definition } = candidate;
+    if (row.id === selection?.connectionId && definition.choice.id === selection.modelId)
+      return null;
+    return {
+      connectionId: row.id,
+      modelId: definition.choice.id,
+      effort: defaultEffort(row.provider, definition.choice),
+    };
+  }
+  function textChoice(
+    connections: ModelRecord[],
+    value: ModelSelection,
+  ): { row: ModelRecord; definition: ModelDefinition } {
+    const row = connections.find((item) => item.id === value.connectionId);
+    const definition =
+      row?.status === 'connected' &&
+      row.models.find((item) => item.choice.id === value.modelId && !item.choice.audio);
+    if (!row || !definition || !definition.choice.efforts.includes(value.effort))
+      throw Object.assign(new ConnectionError('Choose an available text model and effort.'), {
+        statusCode: 400,
+      });
+    return { row, definition };
+  }
+  function routeState(value: ModelRoute | null | undefined) {
+    return value === 'light' ? 'light' : value ? 'configured' : 'default';
+  }
+  function unavailable(work: WorkModel, kind: WorkKind, row: ModelRecord | undefined) {
+    const name =
+      work.follows === 'task' || work.follows === 'schedule'
+        ? workNames[work.follows]
+        : kind === 'chat'
+          ? 'This work'
+          : workNames.lane[kind];
+    const place =
+      work.follows === 'task' || work.follows === 'schedule'
+        ? 'choose another model for it in Scheduled'
+        : 'choose another model in Settings > Models';
+    if (row && row.status !== 'connected') {
+      const reason = attention(row).message;
+      return new ConnectionError(
+        `${name} uses a model on a connection that needs attention. ${reason}`,
+      );
+    }
+    return new ConnectionError(
+      `${name} uses ${row ? `${row.provider} / ` : ''}${work.selection.modelId}, which is no longer available. Reload its models or ${place}.`,
+    );
   }
   async function read(id: string) {
     const result = await store.change(async (state) => {
@@ -676,6 +768,12 @@ export function createModelService(options: {
       !choice.efforts.includes(selected.effort)
     )
       selected.effort = lightestEffort(choice.efforts);
+    for (const route of Object.values(state.routes)) {
+      if (!route || route === 'light' || route.connectionId !== id) continue;
+      const routed = choices.find((model) => model.id === route.modelId);
+      if (routed?.efforts.length && !routed.efforts.includes(route.effort))
+        route.effort = lightestEffort(routed.efforts);
+    }
     const configuredModel =
       managed && options.bootstrap?.provider === provider ? options.bootstrap.model : undefined;
     const preferred = configuredModel
@@ -907,10 +1005,13 @@ export function createModelService(options: {
         reconnect: rows.find((row) => row.id === selection?.connectionId)?.status === 'reconnect',
       };
     },
-    async automaticRequestsAllowed() {
+    async automaticRequestsAllowed(kind: WorkKind = 'chat') {
       try {
-        for (const auxiliary of [false, true]) {
-          const access = await service.resolve(auxiliary);
+        const work = service.workModel({ kind });
+        for (const access of [
+          await service.resolve(false, work.selection),
+          await service.resolve(true),
+        ]) {
           await access.prepareRequest?.(
             access.textModel?.definition.choice.id ?? access.definition.choice.id,
             true,
@@ -920,6 +1021,86 @@ export function createModelService(options: {
       } catch {
         return false;
       }
+    },
+    light: lightModel,
+    priceOf(choice: ModelSelection | null | undefined) {
+      const definition = rows
+        .find((row) => row.id === choice?.connectionId)
+        ?.models.find((model) => model.choice.id === choice?.modelId);
+      return definition && { modelId: definition.choice.id, pricing: modelPricing(definition) };
+    },
+    pricing(kind: WorkKind, own: ModelSelection | null = null) {
+      return service.priceOf(
+        routeModel({ connections: rows, selection, routes, light: lightModel() }, kind, {
+          schedule: own,
+        })?.selection,
+      );
+    },
+    describe(choice: ModelSelection) {
+      const row = rows.find((item) => item.id === choice.connectionId);
+      return {
+        provider: row?.provider ?? 'unconfigured',
+        name: choice.modelId,
+        label:
+          row?.models.find((model) => model.choice.id === choice.modelId)?.choice.name ??
+          choice.modelId,
+        configured: usable(rows, choice),
+      };
+    },
+    validateChoice(value: ModelSelection) {
+      const choice = modelSelectionInput.parse(value);
+      textChoice(rows, choice);
+      return choice;
+    },
+    workModel(origin: WorkOrigin): WorkModel {
+      const work = routeModel(
+        { connections: rows, selection, routes, light: lightModel() },
+        origin.kind,
+        origin,
+      );
+      if (!work)
+        throw new ConnectionError('Open Settings > Models. Connect a service and choose a model.');
+      if (work.follows === 'chat' || work.follows === 'light') return work;
+      const row = rows.find((item) => item.id === work.selection.connectionId);
+      const definition = row?.models.find((model) => model.choice.id === work.selection.modelId);
+      if (row?.status !== 'connected' || !definition || definition.choice.audio)
+        throw unavailable(work, origin.kind, row);
+      if (definition.choice.efforts.includes(work.selection.effort)) return work;
+      return {
+        ...work,
+        selection: { ...work.selection, effort: defaultEffort(row.provider, definition.choice) },
+      };
+    },
+    async setRoute(
+      lane: ModelLane,
+      value: ModelRoute | null,
+      actor: SettingActor = 'owner',
+      client?: PoolClient,
+    ) {
+      const route = modelRouteInput.parse(value);
+      const capture = snapshotAnalytics(analytics);
+      const changed = await store.change(
+        (state) => {
+          if (route && route !== 'light') textChoice(state.connections, route);
+          const before = JSON.stringify(state.routes[lane] ?? null);
+          state.routes = { ...state.routes, [lane]: route };
+          return { changed: before !== JSON.stringify(route), routes: state.routes };
+        },
+        undefined,
+        client,
+      );
+      if (changed.changed)
+        capture?.({
+          event: 'setting_changed',
+          properties: {
+            setting: lane === 'schedule' ? 'model_route_schedule' : 'model_route_background',
+            actor,
+            state: routeState(route),
+          },
+        });
+      await settle(client, () => {
+        routes = changed.routes;
+      });
     },
     onSecrets(observer: (values: string[]) => void) {
       observers.add(observer);
@@ -938,7 +1119,7 @@ export function createModelService(options: {
             managed,
             models: models.map((model) => ({
               ...model.choice,
-              ...(provider === 'openrouter' ? { pricing: modelPricing(model) } : {}),
+              pricing: modelPricing(model),
               ...(model.choice.audio
                 ? { textModelName: textCompanion({ provider, method, models })?.choice.name }
                 : {}),
@@ -947,6 +1128,8 @@ export function createModelService(options: {
           }),
         ),
         selection,
+        routes,
+        light: lightModel(),
       };
     },
     async initialize() {
@@ -1045,27 +1228,34 @@ export function createModelService(options: {
         return save('compatible', 'api_key', value, definitions);
       });
     },
-    async select(input: ModelSelection, actor: SettingActor = 'owner') {
+    async select(input: ModelSelection, actor: SettingActor = 'owner', client?: PoolClient) {
       const value = modelSelectionInput.parse(input);
       const capture = snapshotAnalytics(analytics);
-      const changed = await store.change((state) => {
-        const row = state.connections.find((item) => item.id === value.connectionId);
-        const model =
-          row?.status === 'connected' &&
-          row.models.find((item) => item.choice.id === value.modelId);
-        if (!row || !model || !model.choice.efforts.includes(value.effort))
-          throw new ConnectionError('Choose an available model and effort.');
-        if (model.choice.audio && !textCompanion(row)) throw missingTextCompanion();
-        const changed = {
-          model:
-            state.selection?.connectionId !== value.connectionId ||
-            state.selection?.modelId !== value.modelId,
-          effort: state.selection?.effort !== value.effort,
-        };
-        state.selection = value;
-        state.selectionSet = true;
-        return changed;
-      });
+      const changed = await store.change(
+        (state) => {
+          const row = state.connections.find((item) => item.id === value.connectionId);
+          const model =
+            row?.status === 'connected' &&
+            row.models.find((item) => item.choice.id === value.modelId);
+          if (!row || !model || !model.choice.efforts.includes(value.effort))
+            throw new ConnectionError('Choose an available model and effort.');
+          if (model.choice.audio && !textCompanion(row)) throw missingTextCompanion();
+          const changed = {
+            model:
+              state.selection?.connectionId !== value.connectionId ||
+              state.selection?.modelId !== value.modelId,
+            effort: state.selection?.effort !== value.effort,
+          };
+          state.selection = value;
+          state.selectionSet = true;
+          return changed;
+        },
+        undefined,
+        client,
+      );
+      const apply = () => {
+        selection = value;
+      };
       if (changed.model)
         capture?.({
           event: 'setting_changed',
@@ -1076,7 +1266,7 @@ export function createModelService(options: {
           event: 'setting_changed',
           properties: { setting: 'model_effort', actor, state: value.effort },
         });
-      await reload();
+      await settle(client, apply);
     },
     async remove(id: string) {
       const capture = snapshotAnalytics(analytics);
@@ -1088,6 +1278,11 @@ export function createModelService(options: {
         state.connections = state.connections.filter((item) => item.id !== id);
         const selectionCleared = state.selection?.connectionId === id;
         if (selectionCleared) state.selection = null;
+        state.routes = Object.fromEntries(
+          Object.entries(state.routes).filter(
+            ([, route]) => route === 'light' || route?.connectionId !== id,
+          ),
+        );
         return { row, selectionCleared };
       });
       if (removed.selectionCleared)
@@ -1169,8 +1364,11 @@ export function createModelService(options: {
     setRequestBudget(reserve: NonNullable<ModelAccess['reserve']>) {
       requestBudget = reserve;
     },
-    async resolve(auxiliary = false): Promise<ModelAccess> {
-      const selected = selection && { ...selection };
+    async resolve(
+      auxiliary = false,
+      choice: ModelSelection | null = selection,
+    ): Promise<ModelAccess> {
+      const selected = auxiliary ? selection && { ...selection } : choice && { ...choice };
       const row = rows.find((row) => row.id === selected?.connectionId);
       if (!row || !selected)
         throw new ConnectionError('Open Settings > Models. Connect a service and choose a model.');
@@ -1250,6 +1448,14 @@ export function createModelService(options: {
         });
         routes.put('/api/models/selection', async (request) => {
           await service.select(modelSelectionInput.parse(request.body));
+          return service.view();
+        });
+        routes.put('/api/models/routes', async (request) => {
+          const input = z
+            .object({ lane: z.enum(['schedule', 'background']), route: modelRouteInput })
+            .strict()
+            .parse(request.body);
+          await service.setRoute(input.lane, input.route);
           return service.view();
         });
         routes.delete<{ Params: { id: string } }>(

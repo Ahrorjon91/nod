@@ -1,3 +1,4 @@
+import { transaction } from './transaction.ts';
 import { mkdir } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
@@ -16,6 +17,8 @@ import {
   modelProviderInfo,
   modelProviders,
   modelSource,
+  repriceUsd,
+  type ModelSelection,
 } from '../shared/models.ts';
 import type { ProductAnalytics } from '../ports/analytics.ts';
 import { createPostHogAnalytics } from '../providers/posthog/analytics.ts';
@@ -134,6 +137,7 @@ import { lockProactivity } from './locks.ts';
 import { createObservationSources } from './observation-sources.ts';
 import { createTaskObservations } from './task-observations.ts';
 import type { TrustBasis } from './trust-basis.ts';
+import { validateScheduledInstructions } from './owner-instructions.ts';
 import { localArtifacts } from './artifacts.ts';
 import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
 import { createChannels } from './channels.ts';
@@ -191,6 +195,7 @@ import {
   stopSignal,
   stopThreadWorkers,
   withTurnLock,
+  workOrigin,
   type TurnRef,
 } from './thread.ts';
 import type { VaultActivityReason } from '../shared/contracts.ts';
@@ -476,7 +481,7 @@ export function createDefaultAdapters(
     },
     models,
     agent: createPiAgent({
-      resolve: () => models.resolve(),
+      resolve: (choice) => models.resolve(false, choice),
       provider,
       model,
       sessionRoot: join(dataRoot, 'sessions'),
@@ -1021,8 +1026,54 @@ async function initializeApplication(
     models: adapters.models,
     consumers,
     stopConsumer: (id) => boss.offWork('scheduled-task', { id, wait: true }),
+    taskModels: {
+      list: () => tasks.ownModels(),
+      title: (id) => tasks.modelTask(id),
+      set: (client, id, model) => tasks.setModel(client ?? pool, id, model, 'agent'),
+    },
+    modelProjection: async (scope, id, model) => {
+      const models = adapters.models;
+      if (!models) return null;
+      const usage = await ledger.workUsage();
+      const spent =
+        scope === 'schedule'
+          ? usage.schedules[id!]
+          : scope === 'task'
+            ? usage.tasks[id!]
+            : usage.lanes[
+                scope === 'schedules' ? 'schedule' : scope === 'background' ? 'background' : 'chat'
+              ];
+      const last30Usd = spent ? spent.agentUsd + spent.otherUsd : 0;
+      if (!spent || last30Usd <= 0) return null;
+      const origin =
+        scope === 'schedules' || scope === 'schedule'
+          ? { kind: 'schedule' as const }
+          : scope === 'background'
+            ? { kind: 'background' as const }
+            : scope === 'task'
+              ? ((await tasks.workOf(id!)) ?? { kind: 'chat' as const })
+              : { kind: 'chat' as const };
+      const target = models.priceOf(
+        model === 'light'
+          ? (models.light() ?? models.view().selection)
+          : (model ?? models.workModel(origin).selection),
+      );
+      if (!target) return null;
+      const withChoiceUsd =
+        spent.models.length === 1 && spent.models[0] === target.modelId
+          ? last30Usd
+          : repriceUsd(spent, target.pricing);
+      return { last30Usd, withChoiceUsd };
+    },
     sessionCosts: ledger.sessionCosts,
+    sessionUsage: ledger.sessionUsage,
     recentTurnCost: ledger.recentTurnCost,
+    ...(adapters.models
+      ? {
+          validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice),
+          workPricing: (own: ModelSelection | null) => adapters.models!.pricing('schedule', own),
+        }
+      : {}),
     watchable: async (connectionIds) => integrations.watchable(connectionIds),
     watchState: async (connectionIds) => integrations.watchState(connectionIds),
   });
@@ -1033,8 +1084,56 @@ async function initializeApplication(
     analytics: captureAnalytics,
     refresh,
     clearBrowser: (id) => adapters.computer.clear(id),
+    ...(adapters.models
+      ? { validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice) }
+      : {}),
   });
   await tasks.initialize();
+  async function describeModelChoice(input: Record<string, unknown>) {
+    const models = adapters.models;
+    if (!models) return undefined;
+    const view = models.view();
+    const scope = String(input.scope ?? 'chat');
+    const id = typeof input.id === 'string' ? input.id : undefined;
+    const lane = scope === 'schedules' || scope === 'schedule' ? 'schedule' : 'background';
+    const choice =
+      input.use === 'light'
+        ? (view.light ?? view.selection)
+        : input.use === 'same'
+          ? scope === 'schedule' || scope === 'task'
+            ? models.workModel(
+                scope === 'task' && id
+                  ? ((await tasks.workOf(id)) ?? { kind: 'chat' })
+                  : { kind: lane },
+              ).selection
+            : view.selection
+          : { connectionId: String(input.connectionId), modelId: String(input.modelId) };
+    const connection = view.connections.find((item) => item.id === choice?.connectionId);
+    const model = connection?.models.find((item) => item.id === choice?.modelId);
+    if (!connection || !model) return undefined;
+    const work =
+      scope === 'schedule'
+        ? id
+          ? `the schedule "${(await personal.getSchedule(id)).title}"`
+          : 'the schedule being created'
+        : scope === 'task'
+          ? id
+            ? `the task "${await tasks.modelTask(id)}"`
+            : 'the task being started'
+          : {
+              chat: 'when the owner talks to Nod',
+              schedules: 'schedules without their own model',
+              background: 'work Nod starts on its own',
+            }[scope];
+    return {
+      service: modelSource(connection),
+      account: connection.label,
+      model: model.name,
+      for: work,
+      ...(input.use === 'light' ? { choice: 'the light model' } : {}),
+      ...(input.use === 'same' ? { choice: 'back to the default' } : {}),
+    };
+  }
   const activity = createActivity({
     pool,
     ownerId,
@@ -1337,13 +1436,36 @@ async function initializeApplication(
           : action === 'NOD_limits_update'
             ? withTurnLock(turnLock, (client) => ledger.setLimits(args, 'agent', client))
             : scheduleWrite
-              ? withTurnLock(turnLock, (client) =>
-                  personal.manage(action.slice('NOD_'.length), args, provenance, { client }),
+              ? transaction(
+                  async (client) => {
+                    if ((await lockThread(client)).id !== provenance.threadId)
+                      throw Object.assign(
+                        new Error('The instruction conversation is no longer active.'),
+                        { notRun: true },
+                      );
+                    return withTurnLock(
+                      turnLock,
+                      (locked) =>
+                        personal.manage(action.slice('NOD_'.length), args, provenance, {
+                          client: locked,
+                        }),
+                      client,
+                    );
+                  },
+                  pool,
+                  provenance.signal,
                 )
               : lockedWrite
                 ? withTurnLock(turnLock, (client) =>
                     personal.manage(action.slice('NOD_'.length), args, provenance, {
                       client,
+                      ...(provenance.details?.currentNotificationRule === undefined
+                        ? {}
+                        : {
+                            expectedNotificationRule: String(
+                              provenance.details.currentNotificationRule,
+                            ),
+                          }),
                       ...(provenance.details?.currentRules === undefined
                         ? {}
                         : { expectedRules: String(provenance.details.currentRules) }),
@@ -1809,7 +1931,7 @@ async function initializeApplication(
     modelAvailable: async () =>
       !(await ledger.preparationLimit()).reached &&
       (adapters.models
-        ? await adapters.models.automaticRequestsAllowed()
+        ? await adapters.models.automaticRequestsAllowed('background')
         : adapters.model.configured),
     redact: createTextRedactor(secrets),
     sources: (client) => observations.sources(client),
@@ -1921,6 +2043,17 @@ async function initializeApplication(
       taskChecks: tasks.resumeDue,
       analytics: captureAnalytics,
       currentModel: () => adapters.model,
+      ...(adapters.models
+        ? {
+            workModel: async (turnId: string) => {
+              const origin = await workOrigin(turnId);
+              if (!origin) return undefined;
+              const { selection } = adapters.models!.workModel(origin);
+              const { provider, name } = adapters.models!.describe(selection);
+              return { selection, provider, name };
+            },
+          }
+        : {}),
       taskClassification: true,
       observeTurn: (turnId, operation) =>
         analytics
@@ -1988,8 +2121,47 @@ async function initializeApplication(
       taskContext: tasks.context,
       settleTask: tasks.settle,
       taskLedger: tasks.read,
-      task: tasks.execute,
-      startTurn: tasks.inherit,
+      task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
+        const request = raw as { action?: unknown; model?: unknown } | undefined;
+        if (request?.action === 'start' && request.model) {
+          const current = (
+            await pool.query<{ proactive: boolean; chat: boolean }>(
+              'SELECT proactive,session_id=thread_id AS chat FROM turns WHERE id=$1 AND owner_id=$2',
+              [turn.turnId, ownerId],
+            )
+          ).rows[0];
+          if (!current?.chat || current.proactive)
+            throw new Error('Only a task the owner starts from chat can have its own model.');
+          const choice = await personal.validateReview('model_select', {
+            scope: 'chat',
+            ...(request.model as Record<string, unknown>),
+          });
+          const verdict = await trust.check(turn, 'NOD_model_select', {
+            ...choice,
+            scope: 'task',
+            targetModel: await describeModelChoice({ ...choice, scope: 'task' }),
+          });
+          if (verdict.confirm)
+            throw new Error(
+              'The owner did not ask for a model for this task. Start it without model, or ask the owner first.',
+            );
+          const { connectionId, modelId, effort } = choice as Record<string, unknown>;
+          return tasks.execute(
+            turn,
+            { ...(raw as object), model: { connectionId, modelId, effort } },
+            sourceMessageId,
+            priorMessageId,
+            priorHandoff,
+          );
+        }
+        return tasks.execute(turn, raw, sourceMessageId, priorMessageId, priorHandoff);
+      },
+      startTurn: async (turn) => {
+        const origin = await turnOrigin(turn.turnId);
+        if (origin?.source === 'schedule')
+          await validateScheduledInstructions(pool, ownerId, origin.scheduleInstruction);
+        await tasks.inherit(turn);
+      },
       connections: async (...args) => {
         const result = await integrations.manageConnections(...args);
         if (!('url' in result) || !('name' in result) || typeof result.name !== 'string')
@@ -2155,61 +2327,59 @@ async function initializeApplication(
             throw new Error(
               'A scheduled run cannot create schedules. Do the work this schedule asks for in this run instead.',
             );
-          const input = await personal.validateReview(action, args);
-          const schedule =
-            action === 'schedule_pause' || action === 'schedule_update'
-              ? await personal.getSchedule(String(input.id))
-              : undefined;
-          if (action === 'schedule_pause' && schedule && !schedule.enabled) return schedule;
-          const current = schedule
-            ? {
-                title: schedule.title,
-                prompt: schedule.prompt,
-                cron: schedule.cron,
-                runAt: schedule.runAt,
-                timeZone: schedule.timeZone,
-              }
+          const prepared = action.startsWith('schedule_')
+            ? await personal.prepareScheduleChange(action, args)
             : undefined;
+          const input: Record<string, unknown> =
+            prepared?.input ?? (await personal.validateReview(action, args));
+          const current = prepared?.before ?? undefined;
+          if (action === 'schedule_pause' && current?.enabled === false)
+            return personal.getSchedule(String(input.id));
           const preferences =
             action === 'notification_preferences_update'
               ? await triage.getPreferences()
               : undefined;
           const rule = 'notificationRule' in input ? preferences?.notificationRule : undefined;
           const rules = 'rules' in input ? preferences?.rules : undefined;
-          const connection =
+          const targetModel =
             action === 'model_select'
-              ? adapters.models?.view().connections.find((item) => item.id === input.connectionId)
-              : undefined;
-          const targetModel = connection
-            ? {
-                service: modelSource(connection),
-                account: connection.label,
-                model: connection.models.find((item) => item.id === input.modelId)!.name,
-              }
-            : undefined;
-          const verdict = await trust.check(turn, `NOD_${action}`, {
-            ...input,
-            ...(targetModel ? { targetModel } : {}),
-            ...(current ? { currentSchedule: current } : {}),
-            ...(rule === undefined ? {} : { currentNotificationRule: rule }),
-            ...(rules === undefined ? {} : { currentRules: rules }),
-          });
+              ? await describeModelChoice(input)
+              : action === 'schedule_create' && input.model
+                ? await describeModelChoice({
+                    scope: 'schedule',
+                    ...(input.model as ModelSelection),
+                  })
+                : undefined;
+          const verdict = await trust.check(
+            turn,
+            `NOD_${action}`,
+            {
+              ...input,
+              ...(targetModel ? { targetModel } : {}),
+              ...(current ? { currentSchedule: current } : {}),
+              ...(rule === undefined ? {} : { currentNotificationRule: rule }),
+              ...(rules === undefined ? {} : { currentRules: rules }),
+            },
+            undefined,
+            prepared,
+          );
           return approvals.request(turn, `NOD_${action}`, input, {
             ...provenance,
             allowed: !verdict.confirm,
             ...(verdict.confirm ? {} : { basis: verdict.basis }),
             expectedChatRevision: verdict.chatRevision,
             admit,
-            expectedRevision: schedule?.revision,
-            validate: schedule
+            instructionChange: verdict.instructionChange,
+            expectedRevision: prepared?.revision,
+            validate: prepared?.before
               ? async (client) => {
                   const current = (
                     await client.query(
                       'SELECT revision FROM schedules WHERE id=$1 AND owner_id=$2 FOR SHARE',
-                      [schedule.id, ownerId],
+                      [input.id, ownerId],
                     )
                   ).rows[0];
-                  if (current?.revision !== schedule.revision)
+                  if (current?.revision !== prepared.revision)
                     throw Object.assign(
                       new Error('The schedule changed. Review it before asking again.'),
                       { statusCode: 409 },

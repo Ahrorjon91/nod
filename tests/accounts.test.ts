@@ -548,14 +548,23 @@ test('decision trust never calls an LLM for uncertainty, missing results or fail
       assert.fail('Decision checks must not call an LLM.');
     },
   });
-  assert.equal(trustBasis(await review(instructions, input), words, ['message'])?.kind, 'message');
+  assert.equal(
+    trustBasis(await review(instructions, input), withOwnerIds(words, ['message']))?.kind,
+    'message',
+  );
   assert.equal(calls, 0);
   probability = 0.8;
-  assert.equal(trustBasis(await review(instructions, input), words, ['message']), undefined);
+  assert.equal(
+    trustBasis(await review(instructions, input), withOwnerIds(words, ['message'])),
+    undefined,
+  );
   assert.equal(calls, 0);
   choice = 'ask';
   probability = 0.995;
-  assert.equal(trustBasis(await review(instructions, input), words, ['message']), undefined);
+  assert.equal(
+    trustBasis(await review(instructions, input), withOwnerIds(words, ['message'])),
+    undefined,
+  );
   assert.equal(calls, 0);
   fail = true;
   await assert.rejects(review(instructions, input));
@@ -622,9 +631,10 @@ test('uncertain effects cannot authorize a change through confident permission',
     return { run: false };
   };
   assert.equal(
-    trustBasis(await createTrustReview({ decisions, review })('Original policy', input), input, [
-      'message',
-    ]),
+    trustBasis(
+      await createTrustReview({ decisions, review })('Original policy', input),
+      withOwnerIds(input, ['message']),
+    ),
     undefined,
   );
   assert.equal(calls, 0);
@@ -710,7 +720,10 @@ test('batched trust validates all answers, records one request, and refuses conf
       });
       const input = { ...words, action: { name: 'list_projects', arguments: {} } };
       assert.equal(
-        trustBasis(await review('Complete permission policy', input), words, ['message'])?.kind,
+        trustBasis(
+          await review('Complete permission policy', input),
+          withOwnerIds(words, ['message']),
+        )?.kind,
         'read',
       );
       assert.equal(usage.length, 1);
@@ -718,7 +731,10 @@ test('batched trust validates all answers, records one request, and refuses conf
       primary = 0.995;
       conflict = true;
       assert.equal(
-        trustBasis(await review('Complete permission policy', input), words, ['message']),
+        trustBasis(
+          await review('Complete permission policy', input),
+          withOwnerIds(words, ['message']),
+        ),
         undefined,
       );
       assert.equal(usage.length, 2);
@@ -792,7 +808,7 @@ test('pure decision checks bind the evaluated model, preserve target checks and 
   });
   const allowed = () =>
     review('Apply the permission policy.', input).then((answer) =>
-      trustBasis(answer, input, ['message']),
+      trustBasis(answer, withOwnerIds(input, ['message'])),
     );
   assert.equal((await allowed())?.kind, 'message');
   assert.equal(events.length, 1);
@@ -837,7 +853,7 @@ test('pure decision checks bind the evaluated model, preserve target checks and 
 test('trust calendar facts preserve whole inputs and use the local run date across leap days and DST', () => {
   const input = {
     userMessages: [{ at: '2028-02-28T23:30:00Z', text: 'Tomorrow in Madrid.' }],
-    scheduledTaskInstruction: 'Send the report tomorrow.',
+    scheduledInstructions: [{ at: '2026-11-14T00:00:00Z', text: 'Send the report tomorrow.' }],
     scheduledFor: '2028-02-28T23:30:00Z',
     timeZone: 'Europe/Madrid',
     action: {
@@ -903,23 +919,51 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     userRules: 'Ask before deleting files.',
   };
   const decision = trustDecision(words);
-  assert.deepEqual(trustBasis(decision.result({ trust: 'message:0' }), words, ['owner-message']), {
-    kind: 'message',
-    messageId: 'owner-message',
-    quote: 'Send the report to ana@example.test',
-  });
+  assert.deepEqual(
+    trustBasis(decision.result({ trust: 'message:0' }), withOwnerIds(words, ['owner-message'])),
+    {
+      kind: 'message',
+      messageId: 'owner-message',
+      quote: 'Send the report to ana@example.test',
+    },
+  );
   for (const value of ['message:1', 'assistant', 'Send the report', true, null])
     assert.equal(decision.result({ trust: value }), undefined);
   assert.deepEqual(decision.result({ trust: 'rule' }), { run: false, rule: true });
   assert.deepEqual(decision.result({ trust: 'read' }), { run: true, because: 'read' });
   for (const [source, input, kind] of [
-    ['schedule', { scheduledTaskInstruction: 'Send the weekly report.' }, 'schedule'],
+    [
+      'schedule:0',
+      { scheduledInstructions: [{ at: '2026-11-14T00:00:00Z', text: 'Send the weekly report.' }] },
+      'schedule',
+    ],
     ['standing', { standingInstruction: 'Reply to delivery questions.' }, 'standing'],
     ['rules', { userRules: 'Archive delivery notices.' }, 'rule'],
   ] as const) {
     const gate = trustDecision(input);
-    assert.equal(trustBasis(gate.result({ trust: source }), input, [])?.kind, kind);
+    assert.equal(trustBasis(gate.result({ trust: source }), input)?.kind, kind);
   }
+  const scheduled = {
+    scheduledInstructions: [
+      { at: '2026-11-14T00:00:00Z', text: 'Check it every morning.' },
+      { at: '2026-11-14T00:01:00Z', text: 'Make it cheaper.' },
+      { at: '2026-11-13T00:00:00Z', text: 'Look at the budget folder.', canAuthorize: false },
+      { at: '2026-11-13T00:01:00Z', text: 'Send Lena the report.', canAuthorize: false },
+    ],
+  };
+  for (const [because, kind] of [
+    ['Check it every morning', 'schedule'],
+    ['Make it cheaper', 'schedule'],
+    ['Send Lena the report', undefined],
+    ['Look at the budget folder', undefined],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, scheduled)?.kind, kind);
+  assert.equal(
+    trustDecision(scheduled).question.choices.some(({ value }) =>
+      String(value).startsWith('message:'),
+    ),
+    false,
+  );
   let output: unknown = { readOnly: true };
   let currentRules: string | undefined = words.userRules;
   let holdReview = false;
@@ -2516,6 +2560,26 @@ test('server model credentials reject invalid destinations and cloud accounts be
   );
 });
 
+test('secret redaction finishes for long malformed Basic credentials', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  await promisify(execFile)(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      '--input-type=module',
+      '-e',
+      `import { redactSecretText } from ${JSON.stringify(new URL('../src/server/redaction.ts', import.meta.url).href)};
+       const tail = '='.repeat(300_000) + 'a';
+       for (const token of [tail, Buffer.from('synthetic:synthetic').toString('base64') + tail]) {
+         redactSecretText('Basic ' + token);
+       }`,
+    ],
+    { timeout: 5000 },
+  );
+});
+
 test('secret redaction keeps valid tokens when another token is missing', () => {
   const secrets = [' fixture-access-token ', undefined, null, 42] as unknown as string[];
   const text = createTextRedactor(secrets);
@@ -2826,7 +2890,12 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     const models = saved.view().connections[0].models;
     assert.deepEqual(
       models.filter((model) => model.id !== 'fixture/small').map((model) => model.pricing),
-      [{ input: 1.25, output: 5 }, { input: 0, output: 0 }, 'variable', 'variable'],
+      [
+        { input: 1.25, output: 5, cacheRead: 0, cacheWrite: 0 },
+        { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        'variable',
+        'variable',
+      ],
     );
     const small = models[1].pricing;
     assert.ok(small && small !== 'variable');
@@ -2986,7 +3055,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     );
     assert.equal((await f.database.query('SELECT * FROM vault_app_grants')).rowCount, 0);
     const removed = await f.create('fixture-environment-owner', backend, modelEnvironment({}));
-    assert.deepEqual(removed.view(), { connections: [], selection: null });
+    assert.deepEqual(removed.view(), { connections: [], selection: null, routes: {}, light: null });
     await assert.rejects(removed.resolve());
     for (const access of captured) assert.equal(await access.read(), undefined);
   });
@@ -3353,6 +3422,111 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     assert.equal(await access.read(), undefined);
     assert.equal(owner.hasImageModel(), false);
     assert.equal((await owner.resolve()).definition.choice.images, false);
+  });
+
+  test('work models follow own choices and lanes while checks keep the owner model', async (t) => {
+    const f = await fixture(t);
+    const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
+    let listed = ['gpt-6.1-sol', 'gpt-6-luna', 'gpt-audio-1.5'];
+    const backend = createPiModelBackend({
+      fetch: async () => Response.json({ data: listed.map((id) => ({ id })) }),
+    });
+    const owner = await f.create('fixture-work-model-owner', backend);
+    const events: Array<{ event: string; properties?: Record<string, unknown> }> = [];
+    const app = Fastify();
+    owner.register(app, (event) => void events.push(event));
+    t.after(() => app.close());
+    const route = (lane: string, value: unknown) =>
+      app.inject({ method: 'PUT', url: '/api/models/routes', payload: { lane, route: value } });
+    const connectionId = await owner.addKey('openai', 'fixture-work-model-key');
+    const main = { connectionId, modelId: 'gpt-6.1-sol', effort: 'high' as const };
+    await owner.select(main);
+    const light = owner.view().light!;
+    assert.equal(light.modelId, 'gpt-6-luna');
+    for (const kind of ['chat', 'schedule', 'background'] as const)
+      assert.deepEqual(owner.workModel({ kind }), { selection: main, follows: 'chat' });
+
+    assert.equal((await route('background', 'light')).statusCode, 200);
+    assert.deepEqual(owner.workModel({ kind: 'background' }), {
+      selection: light,
+      follows: 'light',
+    });
+    assert.deepEqual(owner.workModel({ kind: 'schedule' }).selection, main);
+    assert.equal((await owner.resolve()).definition.choice.id, 'gpt-6.1-sol');
+    assert.equal(
+      (await owner.resolve(false, owner.workModel({ kind: 'background' }).selection)).definition
+        .choice.id,
+      'gpt-6-luna',
+    );
+    assert.equal(await owner.automaticRequestsAllowed('background'), true);
+
+    const pinned = { ...main, effort: 'low' as const };
+    assert.deepEqual(owner.workModel({ kind: 'background', task: pinned }), {
+      selection: pinned,
+      follows: 'task',
+    });
+    assert.deepEqual(owner.workModel({ kind: 'schedule', schedule: light }), {
+      selection: light,
+      follows: 'schedule',
+    });
+    assert.deepEqual(owner.workModel({ kind: 'chat', schedule: light }).selection, main);
+
+    const audio = owner
+      .view()
+      .connections[0]!.models.find((model) => model.id === 'gpt-audio-1.5')!;
+    for (const invalid of [
+      { ...main, modelId: audio.id, effort: audio.efforts[0] ?? 'high' },
+      { ...main, modelId: 'fixture-missing-model' },
+      { ...main, effort: 'off' },
+      { ...main, connectionId: randomUUID() },
+      'heavy',
+    ])
+      assert.equal((await route('schedule', invalid)).statusCode, 400, JSON.stringify(invalid));
+    assert.deepEqual(owner.view().routes, { background: 'light' });
+
+    assert.equal((await route('schedule', light)).statusCode, 200);
+    assert.deepEqual(owner.workModel({ kind: 'schedule' }), { selection: light, follows: 'lane' });
+
+    listed = ['gpt-6.1-sol'];
+    await owner.refreshCatalog(connectionId);
+    assert.equal(owner.view().light, null);
+    assert.deepEqual(owner.workModel({ kind: 'background' }), { selection: main, follows: 'chat' });
+    assert.throws(() => owner.workModel({ kind: 'schedule' }), /gpt-6-luna/);
+    assert.throws(() => owner.workModel({ kind: 'chat', task: light }), /gpt-6-luna/);
+    assert.equal(await owner.automaticRequestsAllowed('background'), true);
+    listed = ['gpt-6.1-sol', 'gpt-6-luna'];
+    await owner.refreshCatalog(connectionId);
+
+    await f.database.query('UPDATE model_settings SET routes=$2 WHERE owner_id=$1', [
+      'fixture-work-model-owner',
+      JSON.stringify({ background: 'light', schedule: { ...main, effort: 'off' } }),
+    ]);
+    const restarted = await f.create('fixture-work-model-owner', backend);
+    assert.deepEqual(restarted.workModel({ kind: 'schedule' }).selection, main);
+
+    const second = await owner.addKey('openai', 'fixture-work-model-second');
+    assert.equal((await route('schedule', { ...main, connectionId: second })).statusCode, 200);
+    await owner.remove(second);
+    assert.deepEqual(owner.view().routes, { background: 'light' });
+    assert.deepEqual(
+      owner.workModel({ kind: 'schedule', schedule: { ...main, connectionId: second } }),
+      { selection: main, follows: 'chat' },
+    );
+
+    assert.equal((await route('background', null)).statusCode, 200);
+    assert.deepEqual(owner.view().routes, { background: null });
+    assert.deepEqual(owner.workModel({ kind: 'background' }).selection, main);
+    const routeEvents = events
+      .filter(({ event }) => event === 'setting_changed')
+      .map(({ properties }) => properties)
+      .filter((properties) => String(properties?.setting).startsWith('model_route'));
+    assert.deepEqual(routeEvents, [
+      { setting: 'model_route_background', actor: 'owner', state: 'light' },
+      { setting: 'model_route_schedule', actor: 'owner', state: 'configured' },
+      { setting: 'model_route_schedule', actor: 'owner', state: 'configured' },
+      { setting: 'model_route_background', actor: 'owner', state: 'default' },
+    ]);
+    assert.doesNotMatch(JSON.stringify(routeEvents), /gpt-|[0-9a-f]{8}-/);
   });
 
   test('classification resolves an approved small model only on the selected owned connection', async (t) => {
@@ -6328,8 +6502,7 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
       const saved = await preferences.update(
         { notificationRule: 'Synthetic accepted notification' },
         'agent',
-        rules,
-        client,
+        { expectedRules: rules, client },
       );
       assert.equal(saved.notificationRule, 'Synthetic accepted notification');
       assert.equal((await preferences.get()).notificationRule, 'Synthetic original notification');
@@ -6341,7 +6514,10 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     ]);
     await assert.rejects(
       transaction(async (client) => {
-        await preferences.update({ rules: 'Synthetic rolled-back rules' }, 'agent', rules, client);
+        await preferences.update({ rules: 'Synthetic rolled-back rules' }, 'agent', {
+          expectedRules: rules,
+          client,
+        });
         assert.equal(f.changes().length, 1);
         throw new Error('Synthetic outer preference rollback');
       }, f.database),
@@ -6352,22 +6528,33 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     await assert.rejects(
       transaction(
         (client) =>
-          preferences.update(
-            { notificationRule: 'Synthetic unauthorized notification' },
-            'agent',
-            'Synthetic stale reviewed rules',
+          preferences.update({ notificationRule: 'Synthetic unauthorized notification' }, 'agent', {
+            expectedRules: 'Synthetic stale reviewed rules',
             client,
-          ),
+          }),
         f.database,
       ),
-      { statusCode: 409, message: 'Your rules changed. Review them before asking again.' },
+      {
+        statusCode: 409,
+        message: 'The saved owner instructions changed. Review them before asking again.',
+      },
     );
     assert.equal((await preferences.get()).notificationRule, 'Synthetic accepted notification');
     assert.equal(f.changes().length, 1);
+    await assert.rejects(
+      preferences.update({ notificationRule: 'Synthetic stale replacement' }, 'agent', {
+        expectedNotificationRule: 'Synthetic original notification',
+      }),
+      { statusCode: 409 },
+    );
+    assert.equal((await preferences.get()).notificationRule, 'Synthetic accepted notification');
     for (const enabled of [true, false]) {
       f.analytics.setUsageData(f.owner, enabled);
       await transaction(async (client) => {
-        await preferences.update({ proactivePaused: enabled }, 'agent', rules, client);
+        await preferences.update({ proactivePaused: enabled }, 'agent', {
+          expectedRules: rules,
+          client,
+        });
         f.analytics.setUsageData(f.owner, false);
         f.analytics.setUsageData(f.owner, true);
         assert.equal(f.changes().length, 1);
@@ -6376,7 +6563,8 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
       assert.equal(f.changes().length, 1);
     }
     await transaction(
-      (client) => preferences.update({ proactivePaused: true }, 'agent', rules, client),
+      (client) =>
+        preferences.update({ proactivePaused: true }, 'agent', { expectedRules: rules, client }),
       f.database,
     );
     assert.deepEqual(f.changes().slice(1), [
@@ -6643,3 +6831,12 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     }
   });
 });
+
+function withOwnerIds<
+  T extends { userMessages?: ReadonlyArray<{ at: string; text: string; canAuthorize?: boolean }> },
+>(words: T, ids: readonly string[]) {
+  return {
+    ...words,
+    userMessages: words.userMessages?.map((message, index) => ({ ...message, id: ids[index] })),
+  };
+}

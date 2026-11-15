@@ -7,15 +7,16 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
-  getSupportedThinkingLevels,
   InMemoryCredentialStore,
   isContextOverflow,
+  isRecoverableLength,
   type AssistantMessage,
 } from '@earendil-works/pi-ai';
 import { Agent as Connections, Dispatcher1Wrapper, buildConnector } from 'undici';
 import { Compile } from 'typebox/compile';
 import {
   compact,
+  estimateTokens,
   createAgentSession,
   createCodemodeExtension,
   createToolSearchExtension,
@@ -27,13 +28,9 @@ import {
   type ResourceLoader,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import {
-  createPiModelRuntime,
-  estimateModelTokens,
-  localModelSilenceMs,
-  modelContextBudget,
-} from './models.ts';
-import { audioContext, audioMessage, readsNativeAudio } from './audio.ts';
+import { createPiModelRuntime, localModelSilenceMs } from './models.ts';
+import { modelContext } from './context.ts';
+import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
 import { piModelTrace } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
 import type { ModelAccess } from '../../ports/models.ts';
@@ -49,7 +46,7 @@ import {
 import { threadIdentity } from '../../ports/thread-identity.ts';
 import { createPiUsageTracker, piUsageMetrics, usageId } from './usage.ts';
 import { agentModels } from '../../shared/model-defaults.ts';
-import { lightestEffort } from '../../shared/models.ts';
+import type { ModelSelection } from '../../shared/models.ts';
 import { createSandbox, workspaceOutputs, writeWorkspaceFile } from './sandbox.ts';
 import { untrustedBlock } from '../../shared/untrusted.ts';
 import { isPublicAddress, publicLookup } from '../agent-browser/network.ts';
@@ -388,8 +385,7 @@ function completeAssistantMessages(pi: ExtensionAPI) {
   });
 }
 
-const oversizedHistoryCheckpoint =
-  'Older session context does not fit this model. It remains in the saved transcript. Use history_search for earlier messages and read workspace files for work results. Do not infer missing facts or repeat uncertain actions. Follow the current owner instruction and rules.';
+const tokenRateLimit = /\b(?:tokens? per (?:minute|day)|[tr]p[md])\b/i;
 
 const imageOutputExtensions: Record<string, string> = {
   'image/png': 'png',
@@ -400,44 +396,9 @@ const imageOutputExtensions: Record<string, string> = {
   'image/bmp': 'bmp',
 };
 
-function checkpointOversizedHistory(
-  manager: SessionManager,
-  budget: ReturnType<typeof modelContextBudget>,
-  historyTokens: number,
-  keepRecentTokens = budget.recent,
-) {
-  const entries = manager.buildContextEntries();
-  const lastAnswer = entries.findLastIndex(
-    (entry) =>
-      entry.type === 'message' &&
-      entry.message.role === 'assistant' &&
-      ['stop', 'length'].includes(entry.message.stopReason),
-  );
-  const firstPending = entries
-    .slice(lastAnswer + 1)
-    .find(
-      (entry) =>
-        (entry.type === 'message' && entry.message.role === 'user') ||
-        (entry.type === 'custom_message' && entry.customType === 'nod-audio-input'),
-    );
-  let recentTokens = 0;
-  let firstKept: string | null = null;
-  for (const entry of entries.toReversed()) {
-    if (entry.type !== 'message') continue;
-    recentTokens += estimateModelTokens(entry.message);
-    if (recentTokens > keepRecentTokens) break;
-    if (entry.message.role === 'user') firstKept = entry.id;
-  }
-  manager.appendCompaction(
-    oversizedHistoryCheckpoint,
-    entries.find((entry) => entry.id === firstKept || entry.id === firstPending?.id)?.id ?? null,
-    historyTokens,
-  );
-}
-
 export function createPiAgent(options: {
   provider: string;
-  resolve?: () => Promise<ModelAccess>;
+  resolve?: (choice?: ModelSelection) => Promise<ModelAccess>;
   model?: string;
   apiKey?: string;
   sessionRoot: string;
@@ -455,7 +416,7 @@ export function createPiAgent(options: {
   return {
     async open(input) {
       if (disposed) throw new Error('The agent service has stopped.');
-      const access = await options.resolve?.();
+      const access = await options.resolve?.(input.model);
       if (input.automatic) await access?.prepareRequest?.(access.definition.choice.id, true);
       if (!access && !options.apiKey)
         throw new Error('Configure the selected model provider to enable the assistant.');
@@ -538,10 +499,10 @@ export function createPiAgent(options: {
         connection?.model ?? (modelId ? runtime.getModel(options.provider, modelId) : undefined);
       if (!selectedModel)
         throw new Error('The configured model is not present in the installed Pi catalog.');
-      const model =
+      const { model, ...budget } = modelContext(
         selectedModel.provider === 'openai' &&
-        selectedModel.api === 'openai-responses' &&
-        selectedModel.id === agentModels.openai
+          selectedModel.api === 'openai-responses' &&
+          selectedModel.id === agentModels.openai
           ? {
               ...selectedModel,
               samplingParams: {
@@ -552,14 +513,9 @@ export function createPiAgent(options: {
                 },
               },
             }
-          : selectedModel;
-      const budget = modelContextBudget({
-        ...model,
-        contextWindow: Math.min(
-          model.contextWindow,
-          connection?.textModel?.contextWindow ?? model.contextWindow,
-        ),
-      });
+          : selectedModel,
+        connection?.textModel,
+      );
       if (budget.compact && input.compactInstructions)
         input = { ...input, ...input.compactInstructions };
       const boundedOutput = async (
@@ -576,37 +532,16 @@ export function createPiAgent(options: {
           .join('\n');
         const images = result.content.filter((part) => part.type === 'image');
         if (!text && !images.length) return result;
-        const history = manager.buildSessionContext().messages;
-        const lastCompleted = history.findLastIndex(
-          (message) =>
-            message.role === 'assistant' && ['stop', 'length'].includes(message.stopReason),
-        );
-        const pending = history.slice(lastCompleted + 1);
-        const lastAssistant = pending.findLastIndex((message) => message.role === 'assistant');
-        const ownerCopy = input.ownerContext ? history.findLastIndex(isOwnerContext) : -1;
-        const active = history.filter(
-          (message, index) => message.role !== 'system' && index !== ownerCopy,
-        );
-        const assistant = pending[lastAssistant];
-        const remainingCalls = Math.max(
-          1,
-          (assistant?.role === 'assistant'
-            ? assistant.content.filter((part) => part.type === 'toolCall').length
-            : 1) -
-            pending.slice(lastAssistant + 1).filter((message) => message.role === 'toolResult')
-              .length,
-        );
-        const overheadTokens = requestOverheadTokens();
-        const pointerTokens = Math.max(
-          0,
-          Math.floor(
-            (budget.window - overheadTokens - estimateModelTokens(active)) / remainingCalls,
-          ),
-        );
         if (
-          text.length <= Math.floor(budget.window / 2) &&
-          estimateModelTokens(text) + (images.length ? estimateModelTokens(images) : 0) <=
-            pointerTokens
+          Buffer.byteLength(text) <= budget.toolOutput.maxBytes &&
+          estimateTokens({
+            role: 'toolResult',
+            toolCallId: '',
+            toolName: name,
+            content: result.content,
+            isError: result.isError ?? false,
+            timestamp: 0,
+          }) <= budget.toolOutput.maxTokens
         )
           return result;
         signal?.throwIfAborted();
@@ -658,20 +593,12 @@ export function createPiAgent(options: {
             Buffer.from(text),
             signal,
           );
-        let preview = text.slice(0, 1000);
-        const reference = (excerpt: string) =>
-          JSON.stringify(
-            excerpt
-              ? { workspaceFile: file, characters: text.length, preview: excerpt }
-              : { workspaceFile: file },
-          );
-        let saved = reference(preview);
-        let pointer = result.isError ? saved : untrustedBlock(name, saved);
-        while (preview && estimateModelTokens(pointer) > pointerTokens) {
-          preview = preview.slice(0, Math.floor(preview.length / 2));
-          saved = reference(preview);
-          pointer = result.isError ? saved : untrustedBlock(name, saved);
-        }
+        const saved = JSON.stringify({
+          workspaceFile: file,
+          characters: text.length,
+          preview: text.slice(0, budget.toolOutput.previewCharacters),
+        });
+        const pointer = result.isError ? saved : untrustedBlock(name, saved);
         return {
           ...result,
           content: [{ type: 'text' as const, text: pointer }],
@@ -684,11 +611,17 @@ export function createPiAgent(options: {
       closeInterruptedCalls(manager);
       const prior = manager.buildSessionContext().messages;
       const last = prior.findLast((message) => message.role === 'assistant');
-      const priorTokens = input.restartable === true ? estimateModelTokens(prior) : 0;
+      const priorTokens =
+        input.restartable === true
+          ? prior.reduce((total, message) => total + estimateTokens(message), 0)
+          : 0;
       const restart =
         input.restartable === true &&
         prior.length > 0 &&
-        (!last || Date.now() - last.timestamp >= warmCache || priorTokens > budget.recent);
+        (!last ||
+          Date.now() - last.timestamp >= warmCache ||
+          priorTokens > budget.compaction.keepRecentTokens ||
+          ![model.id, connection?.textModel?.id].includes((last as { model?: string }).model));
       const cached: { owner?: string; stable?: string[] } = { owner: input.ownerContext };
       const keepCache =
         restart &&
@@ -707,9 +640,6 @@ export function createPiAgent(options: {
           null,
           priorTokens,
         );
-      const historyTokens = estimateModelTokens(manager.buildSessionContext().messages);
-      if (budget.compact && historyTokens > budget.window / 2)
-        checkpointOversizedHistory(manager, budget, historyTokens);
       const sandboxTools = input.restricted ? [] : createSandbox(input.workspace, input.timeZone);
       const tools: ToolDefinition[] = [
         ...sandboxTools.map((definition): ToolDefinition => ({
@@ -791,11 +721,7 @@ export function createPiAgent(options: {
       const deferred =
         !input.restricted || budget.compact || input.tools.some((tool) => tool.deferred);
       const settings = SettingsManager.inMemory({
-        compaction: {
-          enabled: true,
-          reserveTokens: budget.reserve,
-          keepRecentTokens: budget.recent,
-        },
+        compaction: budget.compaction,
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
@@ -867,18 +793,8 @@ export function createPiAgent(options: {
             : []),
           ownerContextCopies(input.ownerContext),
           (pi: ExtensionAPI) =>
-            pi.on('session_before_compact', async ({ preparation, reason, signal }) => {
-              if (
-                reason === 'threshold' &&
-                !budget.compact &&
-                session.agent.state.isStreaming &&
-                preparation.tokensBefore + budget.output + budget.margin <= budget.window &&
-                preparation.tokensBefore <= budget.window - budget.reserve + budget.recent
-              ) {
-                compaction = undefined;
-                return { cancel: true };
-              }
-              const target = session.model ?? model;
+            pi.on('session_before_compact', async ({ preparation, customInstructions, signal }) => {
+              const target = readsNativeAudio(model) ? model : (session.model ?? model);
               try {
                 return {
                   compaction: await compact(
@@ -886,52 +802,50 @@ export function createPiAgent(options: {
                     target,
                     undefined,
                     undefined,
-                    undefined,
+                    customInstructions,
                     signal,
-                    lightestEffort(getSupportedThinkingLevels(target)),
+                    session.thinkingLevel,
                     session.agent.streamFunction,
                     undefined,
                     settings.getRetrySettings(),
                   ),
                 };
               } catch (error) {
+                if (signal.aborted) return { cancel: true };
                 const message = error instanceof Error ? error.message : String(error);
                 if (
-                  signal.aborted ||
+                  tokenRateLimit.test(message) ||
                   !isContextOverflow({
                     stopReason: 'error',
                     errorMessage: message,
                     provider: target.provider,
                   } as AssistantMessage)
-                )
-                  throw error;
-                const entries = manager.buildSessionProjection().entries;
-                const cut = entries.findIndex(
-                  (entry) => entry.sourceEntry.id === preparation.firstKeptEntryId,
-                );
-                const lastAnswer = entries.findLastIndex((entry) =>
-                  entry.messages.some(
-                    (message) =>
-                      message.role === 'assistant' &&
-                      ['stop', 'length'].includes(message.stopReason),
-                  ),
-                );
-                const firstPending = entries.findIndex(
-                  (entry, index) =>
-                    index > lastAnswer &&
-                    entry.messages.some(
-                      (message) =>
-                        message.role === 'user' ||
-                        (message.role === 'custom' && message.customType === 'nod-audio-input'),
-                    ),
-                );
+                ) {
+                  compaction!.error = `Compaction failed: ${message}`;
+                  return { cancel: true };
+                }
+                const request = preparation.turnPrefixMessages
+                  .flatMap((message) => {
+                    if (
+                      message.role !== 'user' &&
+                      (message.role !== 'custom' || message.customType !== 'nod-audio-input')
+                    )
+                      return [];
+                    return [
+                      typeof message.content === 'string'
+                        ? message.content
+                        : message.content
+                            .flatMap((part) => (part.type === 'text' ? [part.text] : []))
+                            .join('\n'),
+                    ];
+                  })
+                  .join('\n\n');
                 return {
                   compaction: {
-                    summary: oversizedHistoryCheckpoint,
-                    firstKeptEntryId:
-                      firstPending >= 0 && firstPending < cut
-                        ? entries[firstPending]!.sourceEntry.id
-                        : preparation.firstKeptEntryId,
+                    summary:
+                      'Earlier context remains in the saved transcript. Use history_search for earlier owner instructions and action results. Do not infer missing facts or repeat completed or uncertain actions.' +
+                      (request ? `\n\nOwner input before the retained work:\n${request}` : ''),
+                    firstKeptEntryId: preparation.firstKeptEntryId,
                     tokensBefore: preparation.tokensBefore,
                   },
                 };
@@ -1067,12 +981,31 @@ export function createPiAgent(options: {
       const systemPrompt = guidelines.length
         ? `${input.systemPrompt}\n\nTool guidelines:\n${guidelines.map((rule) => `- ${rule}`).join('\n')}`
         : input.systemPrompt;
+      let sessionModel = model;
+      if (connection?.textModel && readsNativeAudio(model)) {
+        const textModel = connection.textModel;
+        const id = `nod/${model.id}`;
+        runtime.registerVirtualModel({
+          provider: model.provider,
+          id,
+          name: model.name,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+          input: model.input,
+          thinkingLevels: ['off'],
+          route: ({ reason, thinkingLevel }) =>
+            reason !== 'direct' && input.readAudio && audioEntries(manager).length
+              ? { model, thinkingLevel }
+              : { model: textModel, thinkingLevel: access?.textModel?.effort ?? thinkingLevel },
+        });
+        sessionModel = runtime.getModel(model.provider, id)!;
+      }
       const resumed = !restart && manager.buildSessionContext().messages.length > 0;
       const { session } = await (options.createSession ?? createAgentSession)({
         cwd: input.workspace.path,
         agentDir: directory,
         modelRuntime: runtime,
-        model: { ...model, contextWindow: budget.window },
+        model: sessionModel,
         thinkingLevel: access?.effort ?? 'high',
         tools: [
           ...tools
@@ -1092,19 +1025,6 @@ export function createPiAgent(options: {
       });
       if (budget.compact)
         session.setActiveToolsByName([...sandboxTools.map((tool) => tool.name), 'nod_tool_search']);
-      const requestOverheadTokens = () =>
-        estimateModelTokens({
-          systemPrompt,
-          ownerContext: input.ownerContext,
-          tools: session.getActiveToolNames().flatMap((name) => {
-            const tool = session.getToolDefinition(name);
-            return tool
-              ? [{ name: tool.name, description: tool.description, parameters: tool.parameters }]
-              : [];
-          }),
-        }) +
-        budget.margin +
-        128;
       if (disposed) {
         session.dispose();
         throw new Error('The agent service has stopped.');
@@ -1145,7 +1065,7 @@ export function createPiAgent(options: {
       };
       let textBlock: number | undefined;
       let thinking = { index: -1, text: '', scanned: 0 };
-      let compaction: { id: string; started: number } | undefined;
+      let compaction: { id: string; started: number; error?: string } | undefined;
       const auxiliarySeen = new Set(manager.getEntries().map((entry) => entry.id));
       const observeUsage = createPiUsageTracker({
         sessionId: manager.getSessionId(),
@@ -1160,22 +1080,30 @@ export function createPiAgent(options: {
       const unsubscribe = session.subscribe((event) => {
         if (event.type === 'compaction_start')
           compaction = { id: randomUUID(), started: performance.now() };
-        if (event.type === 'compaction_end' && compaction) {
+        if (event.type === 'compaction_end') {
+          settings.applyOverrides({ compaction: budget.compaction });
           const target = readsNativeAudio(model) ? (connection?.textModel ?? model) : model;
-          input.onEvent({
-            type: 'provider_usage',
-            usage: {
-              id: compaction.id,
-              provider: target.provider,
-              category: 'agent',
-              operation: 'compaction',
-              model: target.id,
-              turnId: input.turnId,
-              status: event.aborted ? 'cancelled' : event.errorMessage ? 'failed' : 'succeeded',
-              durationMs: performance.now() - compaction.started,
-              ...piUsageMetrics(event.result?.usage),
-            },
-          });
+          const error = compaction?.error ?? event.errorMessage;
+          if (error)
+            input.onEvent({
+              type: 'error',
+              message: `${target.provider} / ${target.id}: ${error}`,
+            });
+          if (compaction)
+            input.onEvent({
+              type: 'provider_usage',
+              usage: {
+                id: compaction.id,
+                provider: target.provider,
+                category: 'agent',
+                operation: 'compaction',
+                model: target.id,
+                turnId: input.turnId,
+                status: error ? 'failed' : event.aborted ? 'cancelled' : 'succeeded',
+                durationMs: performance.now() - compaction.started,
+                ...piUsageMetrics(event.result?.usage),
+              },
+            });
           compaction = undefined;
         }
         if (
@@ -1243,6 +1171,16 @@ export function createPiAgent(options: {
           }
         }
         if (event.type === 'message_end' && event.message.role === 'assistant') {
+          if (
+            event.message.stopReason === 'error' &&
+            tokenRateLimit.test(event.message.errorMessage ?? '')
+          )
+            settings.applyOverrides({ compaction: { enabled: false } });
+          else if (
+            isContextOverflow(event.message, model.contextWindow) ||
+            isRecoverableLength(event.message, model.maxTokens)
+          )
+            settings.applyOverrides({ compaction: { keepRecentTokens: 0 } });
           const usage = observeUsage(event.message);
           if (usage) input.onEvent(usage);
           if (event.message.stopReason === 'error')
@@ -1271,7 +1209,7 @@ export function createPiAgent(options: {
           const contextExhausted =
             status === 'incomplete' &&
             tokens.input + tokens.cacheRead + tokens.cacheWrite + tokens.output >=
-              budget.window - budget.margin;
+              model.contextWindow - budget.margin;
           input.onEvent({
             type: 'message_end',
             ...(status ? { status } : {}),
@@ -1302,84 +1240,9 @@ export function createPiAgent(options: {
         resumed,
         readsImages: model.input.includes('image'),
         readsAudio: readsNativeAudio(model) && Boolean(input.readAudio),
-        contextWindow: budget.window,
+        compactContext: budget.compact,
         async prompt(text, images, audio, stablePrefixes) {
           cached.stable = stablePrefixes;
-          if (
-            budget.compact &&
-            Math.ceil(Buffer.byteLength(text) / 3) + budget.output + budget.margin > budget.window
-          )
-            throw new Error(
-              `This request does not fit the model's ${budget.window}-token context. Use a model with a larger context or a shorter request.`,
-            );
-          const overheadTokens = requestOverheadTokens();
-          const incomingTokens = estimateModelTokens({ text, images, audio });
-          const currentHistory = manager.buildSessionContext().messages;
-          const lastCompleted = currentHistory.findLastIndex(
-            (message) =>
-              message.role === 'assistant' && ['stop', 'length'].includes(message.stopReason),
-          );
-          const unfinished = currentHistory.slice(lastCompleted + 1);
-          if (
-            unfinished.some(
-              (message) =>
-                message.role === 'user' ||
-                (message.role === 'custom' && message.customType === 'nod-audio-input'),
-            ) &&
-            estimateModelTokens(unfinished) + incomingTokens + overheadTokens >= budget.window
-          )
-            throw new Error(
-              `The unfinished request does not fit this model's ${budget.window}-token context. Use a model with a larger context or reset the conversation.`,
-            );
-          if (
-            !budget.compact &&
-            currentHistory.length > 0 &&
-            estimateModelTokens(currentHistory) + incomingTokens + overheadTokens >= budget.window
-          ) {
-            try {
-              await session.compact();
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              if (
-                message !== 'Nothing to compact (session too small)' &&
-                message !== 'Already compacted' &&
-                !isContextOverflow({
-                  stopReason: 'error',
-                  errorMessage: message,
-                  provider: model.provider,
-                } as AssistantMessage)
-              )
-                throw error;
-            }
-            const remaining = estimateModelTokens(manager.buildSessionContext().messages);
-            if (remaining + incomingTokens + overheadTokens >= budget.window) {
-              checkpointOversizedHistory(
-                manager,
-                budget,
-                remaining,
-                Math.min(
-                  budget.recent,
-                  Math.max(
-                    0,
-                    budget.window -
-                      incomingTokens -
-                      overheadTokens -
-                      estimateModelTokens(oversizedHistoryCheckpoint),
-                  ),
-                ),
-              );
-              session.refreshContext();
-              if (
-                estimateModelTokens(manager.buildSessionContext().messages) +
-                  incomingTokens +
-                  overheadTokens >=
-                budget.window
-              )
-                throw new Error(
-                  `This request does not fit this model's ${budget.window}-token context after reducing saved history. Use a model with a larger context or a shorter request.`,
-                );
-            }
-          }
           const owner = input.ownerContext;
           const copy = manager.buildSessionContext().messages.findLast(isOwnerContext);
           if (owner && (copy as { content?: unknown } | undefined)?.content !== owner)
@@ -1387,12 +1250,16 @@ export function createPiAgent(options: {
               { customType: ownerContextType, content: owner, display: false },
               prior.length ? undefined : { deliverAs: 'nextTurn' },
             );
-          if (audio && readsNativeAudio(model))
-            await session.sendCustomMessage(audioMessage(text, images, audio), {
-              triggerTurn: true,
-            });
-          else await session.prompt(text, { images, expandPromptTemplates: false });
-          if (dropFailedInput(manager)) session.refreshContext();
+          try {
+            if (audio && readsNativeAudio(model))
+              await session.sendCustomMessage(audioMessage(text, images, audio), {
+                triggerTurn: true,
+              });
+            else await session.prompt(text, { images, expandPromptTemplates: false });
+          } finally {
+            settings.applyOverrides({ compaction: budget.compaction });
+            if (dropFailedInput(manager)) session.refreshContext();
+          }
         },
         async abort() {
           await session.abort();

@@ -32,7 +32,7 @@ const help = `Nod capability evals
     run [--tier pr|full|release|live]  run the suite and print the pass rate, trust profile and what went wrong
     list                       show every scenario
     decisions --model <provider/name>  compare trust checks with main using live models and synthetic inputs
-                               (--baseline main, --repeat 3, --scenario a,b, --arms main-llm,branch-llm,gpt-decisions,jev-openrouter, --decision-model provider/model, --label name, --out directory)
+                               (--baseline main, --repeat 3, --scenario a,b, --arms main-llm,selected-llm,branch-llm,gpt-decisions,jev-openrouter, --decision-model provider/model, --label name, --out directory)
     longmemeval --data <file>  run the LongMemEval-S memory benchmark on the real Nod, graded by the official judge
                                (--setups memory,chat, --sample 30, --chat-sample 10, --questions a,b,
                                 --concurrency 6, --budget 50, --label name, --resume)
@@ -70,6 +70,7 @@ const help = `Nod capability evals
 
   Common options for run, models and refs
     --model <provider/name>    agent model (default from LLM_PROVIDER, LLM_MODEL or the keys you have)
+    --background-model <name>  model for work Nod starts on its own: light, or a model on the --model provider
     --judge <provider/name>    judge model (default ${defaultJudge}, kept fixed so runs stay comparable)
     --tier pr|full|release|live  default full: all controlled cases except the release suite, including
                                pending cases; pr is the small suite; release adds the release suite;
@@ -98,6 +99,7 @@ function runOptions(args: Args): RunOptions {
   return {
     root: resultsRoot(text(args, 'out')),
     model: text(args, 'model'),
+    backgroundModel: text(args, 'background-model'),
     ...(text(args, 'effort')
       ? {
           effort: choice(

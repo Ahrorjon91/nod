@@ -132,6 +132,7 @@ export function createStackRequest(baseUrl: string, cookie: string): Stack['requ
 
 export async function startStack(options: {
   model: Model;
+  backgroundModel?: string;
   integrations: IntegrationProvider;
   observations?: import('../../src/ports/proactivity.ts').ObservationProvider[];
   proactiveBaseline?: boolean;
@@ -371,6 +372,30 @@ export async function startStack(options: {
       },
     });
     await models.initialize();
+    if (options.backgroundModel) {
+      if (!('setRoute' in models))
+        throw new Error('--background-model needs app code that supports model routes.');
+      const connection = models.view().connections.find((row) => row.provider === model.provider);
+      const choice = connection?.models.find((item) => item.id === options.backgroundModel);
+      if (options.backgroundModel !== 'light' && !choice)
+        throw new Error(
+          `${options.backgroundModel} is not a ${model.provider} model. Use light or a model from the --model provider.`,
+        );
+      if (options.backgroundModel === 'light' && !models.view().light)
+        throw new Error(
+          `${model.provider} has no light model that costs no more than ${model.name}, so --background-model light would run ${model.name}.`,
+        );
+      await models.setRoute(
+        'background',
+        options.backgroundModel === 'light'
+          ? 'light'
+          : {
+              connectionId: connection!.id,
+              modelId: choice!.id,
+              effort: choice!.efforts.includes('high') ? 'high' : choice!.efforts[0]!,
+            },
+      );
+    }
     const computer = createContainerBrowserComputer({
       dataRoot: join(directory, '.local'),
       container: browserContainer,
@@ -387,12 +412,16 @@ export async function startStack(options: {
             provider: model.provider,
             model: model.name,
             apiKey: model.apiKey,
-            resolve: () => models.resolve(),
+            resolve: (choice) => models.resolve(false, choice),
             sessionRoot,
             ...(model.effort
               ? {
                   createSession: (input) =>
-                    createAgentSession({ ...input, thinkingLevel: model.effort }),
+                    createAgentSession(
+                      input?.model?.id === model.name
+                        ? { ...input, thinkingLevel: model.effort }
+                        : input,
+                    ),
                 }
               : {}),
           }),

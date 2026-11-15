@@ -9546,6 +9546,63 @@ test(
   },
 );
 
+for (const [status, code] of [
+  [429, 'installation_busy'],
+  [503, 'service_unavailable'],
+] as const) {
+  test(
+    `a ${status} on session create marks an approved write as not run`,
+    { skip: !process.env.TEST_DATABASE_URL },
+    async (t) => {
+      const f = await appsFixture(t);
+      const slack = await f.connect('slack');
+      t.mock.method(globalThis, 'fetch', async () => {
+        throw new Error('Unexpected external request in the session refusal test.');
+      });
+      const root = await mkdtemp(join(tmpdir(), 'nod-session-refusal-'));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      let userId = '';
+      const paths: string[] = [];
+      const proxy = createComposioProxy({
+        dataRoot: root,
+        ownerId: 'local-development',
+        keyStore: installationKeyStore,
+        checkpoint: fixtureIdentityCheckpoint,
+        url: 'https://proxy.example.test',
+        request: async (input, init) => {
+          const url = new URL(new Request(input, init).url);
+          if (url.pathname === '/v2/access/enroll')
+            return Response.json({ state: 'enabled', userId });
+          paths.push(url.pathname);
+          return Response.json({ error: code }, { status });
+        },
+      });
+      await proxy.initialize();
+      userId = proxy.userId;
+      const real = createComposioProvider({ proxy });
+      f.provider.createSession = (...input) => real.createSession(...input);
+      f.provider.connectionBackoff = real.connectionBackoff;
+      assert.equal(f.provider.connectionBackoff!(), undefined);
+      await assert.rejects(
+        f.service.execute('local-development', 'SLACK_SEND_MESSAGE', {
+          connectionId: slack.connectionId,
+          channel: 'C0SYNTHETIC',
+          text: 'Synthetic update',
+        }),
+        (error: Error & { notRun?: boolean; upstreamStatus?: number }) => {
+          assert.match(error.message, new RegExp(`${code}. HTTP ${status}`));
+          assert.equal(error.upstreamStatus, status);
+          assert.equal(error.notRun, true);
+          return true;
+        },
+      );
+      assert.deepEqual(paths, ['/v2/api/v3.1/tool_router/session']);
+      assert.equal(f.executed.length, 0);
+      assert.equal(f.provider.connectionBackoff!()?.status, status);
+    },
+  );
+}
+
 test('Composio proxy sessions omit SDK metadata and refuse unsupported webhooks', async (t) => {
   const client = new Composio({
     apiKey: 'fixture-key-never-live',
@@ -9915,6 +9972,36 @@ test(
           .entries.map((entry: TrustEntry) => entry.id),
         [scheduled],
       );
+      const scheduleSignIn = randomUUID();
+      const scheduleBasis = {
+        kind: 'schedule',
+        messageId: said,
+        quote: 'Tell Sam we take the quote',
+      };
+      await pool.query(
+        "INSERT INTO vault_activity(id,owner_id,action,origin,item_kind,task,reason,basis) VALUES($1,'owner','sign_in','https://shop.example.test','login','Synthetic schedule','said_yes',$2)",
+        [scheduleSignIn, scheduleBasis],
+      );
+      const vaultPages = [
+        () => vaultAccess.within(null, null, null),
+        () => vaultAccess.ascending(null, null, null, 100),
+        () => vaultAccess.activity({}),
+      ];
+      for (const read of vaultPages)
+        assert.deepEqual(
+          (await read()).entries.find((entry) => entry.id === scheduleSignIn)?.because,
+          { kind: 'schedule', text: scheduleBasis.quote },
+        );
+      await pool.query('UPDATE vault_activity SET basis=$2 WHERE id=$1', [
+        scheduleSignIn,
+        { ...scheduleBasis, messageId: foreignSaid },
+      ]);
+      for (const read of vaultPages)
+        assert.equal(
+          (await read()).entries.find((entry) => entry.id === scheduleSignIn)?.because,
+          undefined,
+        );
+      await pool.query('DELETE FROM vault_activity WHERE id=$1', [scheduleSignIn]);
       await pool.query(
         `INSERT INTO vault_activity(id,owner_id,action,origin,item_kind,task,reason,amount_minor,currency) VALUES
           ($1,'owner','card','https://shop.example.test','card','=HYPERLINK("https://attacker.example.test")','said_yes',1200,'EUR'),
