@@ -417,7 +417,11 @@ export async function startStack(options: {
             ...(model.effort
               ? {
                   createSession: (input) =>
-                    createAgentSession({ ...input, thinkingLevel: model.effort }),
+                    createAgentSession(
+                      input?.model?.id === model.name
+                        ? { ...input, thinkingLevel: model.effort }
+                        : input,
+                    ),
                 }
               : {}),
           }),

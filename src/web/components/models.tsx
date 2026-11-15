@@ -1292,11 +1292,14 @@ export function ModelPicker({
           )}
         </Button>
       )}
-      {!target && surface === 'settings' && model && connection?.status === 'reconnect' && (
-        <a className="model-needs-reconnect" href="/settings/models">
-          Reconnect in Settings &gt; Models
-        </a>
-      )}
+      {(!target || appearance !== 'statement') &&
+        surface === 'settings' &&
+        model &&
+        connection?.status === 'reconnect' && (
+          <a className="model-needs-reconnect" href="/settings/models">
+            Reconnect in Settings &gt; Models
+          </a>
+        )}
       <Dialog
         open={open}
         onOpenChange={(value) => {

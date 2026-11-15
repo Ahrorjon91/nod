@@ -885,9 +885,10 @@ test(
           const connectionId = randomUUID();
           const main = { connectionId, modelId: 'gpt-6.1-sol', effort: 'high' };
           const light = { connectionId, modelId: 'gpt-6-luna', effort: 'low' };
-          const prices: Record<string, { input: number; output: number }> = {
+          const prices: Record<string, { input: number; output: number } | null> = {
             'gpt-6.1-sol': { input: 2, output: 10 },
             'gpt-6-luna': { input: 0.1, output: 0.5 },
+            'fixture-local': null,
           };
           const modelled = createPersonalService({
             pool: db.pool,
@@ -899,7 +900,7 @@ test(
             sessionCosts: ledger.sessionCosts,
             sessionUsage: ledger.sessionUsage,
             validateModel: (choice) => {
-              if (!prices[choice.modelId])
+              if (!(choice.modelId in prices))
                 throw Object.assign(new Error('Choose an available text model and effort.'), {
                   statusCode: 400,
                 });
@@ -907,7 +908,7 @@ test(
             },
             workPricing: (own) => {
               const modelId = own?.modelId ?? main.modelId;
-              return { modelId, pricing: prices[modelId] };
+              return { modelId, pricing: prices[modelId] ?? undefined };
             },
           });
           const modelledApp = Fastify();
@@ -1001,6 +1002,8 @@ test(
           await setModel(schedule.id, light);
           const onLight = await monthly();
           assert.ok(Math.abs(onLight / onMain - (0.1 + 0.05 + 0.01) / 3.01) < 1e-9);
+          await setModel(schedule.id, { ...light, modelId: 'fixture-local' });
+          assert.equal((await modelled.getSchedule(schedule.id)).monthlyUsd ?? null, null);
           await setModel(schedule.id, null);
           assert.equal((await modelled.getSchedule(schedule.id)).model, null);
           assert.equal(await monthly(), onMain);

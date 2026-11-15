@@ -513,7 +513,14 @@ export function changes(a: Loaded, b: Loaded) {
 export function runsTable(
   runs: Array<{
     label: string;
-    manifest: { model: string; ref?: string; commit: string; startedAt: string; judge: string };
+    manifest: {
+      model: string;
+      backgroundModel?: string;
+      ref?: string;
+      commit: string;
+      startedAt: string;
+      judge: string;
+    };
     summary: RunSummary;
   }>,
 ) {
@@ -523,7 +530,7 @@ export function runsTable(
     `  ${'label'.padEnd(width)}  ${'when'.padEnd(16)}  ${'agent'.padEnd(28)} ${'source'.padEnd(12)} all required checks`,
     ...runs.map(
       (run) =>
-        `  ${run.label.padEnd(width)}  ${run.manifest.startedAt.slice(0, 16).replace('T', ' ')}  ${run.manifest.model.padEnd(28)} ${(run.manifest.ref ?? run.manifest.commit.slice(0, 7)).slice(0, 12).padEnd(12)} ${pct(run.summary.combined.percent)} (${run.summary.combined.passed}/${run.summary.combined.total}), ${money(run.summary.costUsd)}, ${minutes(run.summary.seconds)}`,
+        `  ${run.label.padEnd(width)}  ${run.manifest.startedAt.slice(0, 16).replace('T', ' ')}  ${`${run.manifest.model}${run.manifest.backgroundModel ? ` + ${run.manifest.backgroundModel}` : ''}`.padEnd(28)} ${(run.manifest.ref ?? run.manifest.commit.slice(0, 7)).slice(0, 12).padEnd(12)} ${pct(run.summary.combined.percent)} (${run.summary.combined.passed}/${run.summary.combined.total}), ${money(run.summary.costUsd)}, ${minutes(run.summary.seconds)}`,
     ),
   ].join('\n');
 }
@@ -551,7 +558,7 @@ ${attempt.error ? `<p class="fail">${escape(attempt.error)}</p>` : ''}${attempt.
     })
     .join('');
   return `<!doctype html><meta charset="utf-8"><title>${escape(manifest.label)}</title><style>body{font:15px/1.5 system-ui;max-width:980px;margin:32px auto;padding:0 20px}pre{white-space:pre-wrap;background:#f6f6f8;padding:10px;border-radius:6px;max-height:420px;overflow:auto}.pass{color:#0a7a3d}.fail{color:#b00020}.incomplete{color:#8a6d00}summary{cursor:pointer}small{color:#666;font-weight:400}</style>
-<h1>${escape(manifest.label)}</h1><p>${escape(manifest.model)} · judge ${escape(manifest.judge)} · ${escape(manifest.ref ?? manifest.commit)} · ${manifest.startedAt}</p>
+<h1>${escape(manifest.label)}</h1><p>${escape(manifest.model)}${manifest.backgroundModel ? ` · own work ${escape(manifest.backgroundModel)}` : ''} · judge ${escape(manifest.judge)} · ${escape(manifest.ref ?? manifest.commit)} · ${manifest.startedAt}</p>
 <p class="${summary.coverage.missing.length || summary.coverage.incomplete ? 'incomplete' : 'pass'}"><b>${coverage(summary)}</b></p>${summary.coverage.missing.length ? `<details><summary>Attempts not run</summary><ul>${summary.coverage.missing.map((id) => `<li>${escape(id)}</li>`).join('')}</ul></details>` : ''}
 <h2>${pct(combined.percent)} pass all required checks (${combined.passed}/${combined.total}) · pass@${manifest.k} ${pct(combined.passAtK)} · pass^${manifest.k} ${pct(combined.passPowK)}</h2><p>Task completion: ${pct(regression.percent)} (${regression.passed}/${regression.total})</p>${rows}`;
 }

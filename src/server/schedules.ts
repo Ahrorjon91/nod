@@ -108,10 +108,10 @@ export interface ScheduleDependencies {
   recentTurnCost?(turnId?: string): Promise<number | null>;
   validateModel?(choice: ModelSelection): ModelSelection;
   sessionUsage?(sessionIds: string[]): Promise<Record<string, WorkUsage>>;
-  workPricing?(
-    own: ModelSelection | null,
-  ): { modelId: string; pricing: ModelChoice['pricing'] } | undefined;
+  workPricing?(own: ModelSelection | null): WorkPrice | undefined;
 }
+
+type WorkPrice = { modelId: string; pricing: ModelChoice['pricing'] };
 
 interface ScheduleRow {
   id: string;
@@ -712,25 +712,29 @@ export function createSchedules(dependencies: ScheduleDependencies) {
     ).rows;
     const costs = await dependencies.sessionCosts(runs.map((run) => run.turn_id));
     const usage = (await dependencies.sessionUsage?.(runs.map((run) => run.turn_id))) ?? {};
-    const runCost = (run: (typeof runs)[number], row: ScheduleRow) => {
+    const runCost = (run: (typeof runs)[number], target: WorkPrice | undefined) => {
       const recorded = costs[run.turn_id];
       const spent = usage[run.turn_id];
-      const target = dependencies.workPricing?.(row.model);
       if (!spent || !target || (spent.models.length === 1 && spent.models[0] === target.modelId))
         return recorded;
-      return repriceUsd(spent, target.pricing) ?? recorded;
+      return repriceUsd(spent, target.pricing);
     };
-    const pricedRuns = (row: ScheduleRow, keep: (run: (typeof runs)[number]) => boolean) =>
+    const pricedRuns = (
+      target: WorkPrice | undefined,
+      keep: (run: (typeof runs)[number]) => boolean,
+    ) =>
       runs.flatMap((run) => {
-        const cost = keep(run) ? runCost(run, row) : undefined;
+        const cost = keep(run) ? runCost(run, target) : undefined;
         return typeof cost === 'number' && cost > 0 ? [cost] : [];
       });
     let fallback: Promise<number | null> | undefined;
     const from = now();
     const month = 30 * 86_400_000;
     for (const row of recurring) {
-      const own = pricedRuns(row, (run) => run.schedule_id === row.id);
-      const recent = pricedRuns(row, (run) => run.latest);
+      const target = dependencies.workPricing?.(row.model);
+      if (dependencies.workPricing && !target) continue;
+      const own = pricedRuns(target, (run) => run.schedule_id === row.id);
+      const recent = pricedRuns(target, (run) => run.latest);
       const priced = runs.some((run) => run.schedule_id === row.id)
         ? own
         : recent.length

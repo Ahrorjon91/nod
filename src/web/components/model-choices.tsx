@@ -30,6 +30,12 @@ function modelOf(data: ModelsResponse, choice: ModelSelection | null | undefined
     ?.models.find((item) => item.id === choice?.modelId);
 }
 
+const unavailableLabel = 'an unavailable model';
+
+function kept(data: ModelsResponse, choice: ModelSelection | null | undefined) {
+  return choice && data.connections.some((item) => item.id === choice.connectionId) ? choice : null;
+}
+
 function same(a: ModelSelection | null | undefined, b: ModelSelection | null | undefined) {
   return (
     a?.connectionId === b?.connectionId && a?.modelId === b?.modelId && a?.effort === b?.effort
@@ -54,7 +60,7 @@ function laneTarget(
   const value = data.routes?.[lane] ?? null;
   return {
     title: lane === 'schedule' ? 'Model for schedules' : 'Model for work Nod starts on its own',
-    value: value === 'light' || modelOf(data, value) ? value : null,
+    value: value === 'light' ? value : kept(data, value),
     defaults: [
       { value: null, label: 'The same model', model: data.selection },
       ...(data.light
@@ -76,7 +82,7 @@ function scheduleTarget(
 ): ModelTarget {
   return {
     title: `Model for ${schedule.title}`,
-    value: modelOf(data, schedule.model) ? schedule.model : null,
+    value: kept(data, schedule.model),
     defaults: [
       {
         value: null,
@@ -105,7 +111,7 @@ function taskTarget(
 ): ModelTarget {
   return {
     title: `Model for ${task.title}`,
-    value: modelOf(data, task.model) ? (task.model ?? null) : null,
+    value: kept(data, task.model),
     defaults: [
       {
         value: null,
@@ -141,7 +147,7 @@ function estimate(
       continue;
     }
     const value = choice && repriceUsd(usage, choice.pricing);
-    if (value === null || value === undefined) unpriced.add(choice?.name ?? 'a removed model');
+    if (value === null || value === undefined) unpriced.add(choice?.name ?? unavailableLabel);
     else projected += value;
   }
   return { recorded, projected, unpriced: [...unpriced] };
@@ -158,14 +164,20 @@ export function ModelSentences() {
   const lane = (kind: ModelLane) => {
     const value = data.routes?.[kind];
     const light = value === 'light' && data.light && modelOf(data, data.light);
-    const own = value && value !== 'light' ? modelOf(data, value) : undefined;
+    const own = value === 'light' ? null : kept(data, value);
     return (
       <>
         <ModelPicker
           appearance="statement"
           manageConnections={false}
           target={laneTarget(data, kind, usage.data?.lanes[kind])}
-          label={light ? 'the light model' : (own?.name ?? 'the same model')}
+          label={
+            light
+              ? 'the light model'
+              : own
+                ? (modelOf(data, own)?.name ?? unavailableLabel)
+                : 'the same model'
+          }
         />
         {light ? `, ${light.name}` : ''}
       </>
@@ -173,8 +185,7 @@ export function ModelSentences() {
   };
   const ownSchedules = (schedules.data ?? []).filter(
     (schedule) =>
-      schedule.model &&
-      modelOf(data, schedule.model) &&
+      kept(data, schedule.model) &&
       !same(
         routeModel(data, 'schedule', { schedule: schedule.model })?.selection,
         routeModel(data, 'schedule')?.selection,
@@ -182,7 +193,7 @@ export function ModelSentences() {
   );
   const ownTasks = (tasks.data ?? []).filter(
     (task): task is Task & { work: WorkKind } =>
-      Boolean(task.work && task.model && modelOf(data, task.model)) &&
+      Boolean(task.work && kept(data, task.model)) &&
       !task.closedAt &&
       !same(task.model, routeModel(data, task.work!)?.selection),
   );
@@ -228,7 +239,7 @@ export function ModelSentences() {
               appearance="statement"
               manageConnections={false}
               target={scheduleTarget(data, schedule, work?.schedules[schedule.id])}
-              label={modelOf(data, schedule.model)!.name}
+              label={modelOf(data, schedule.model)?.name ?? unavailableLabel}
             />
             .
           </p>
@@ -240,7 +251,7 @@ export function ModelSentences() {
               appearance="statement"
               manageConnections={false}
               target={taskTarget(data, task, work?.tasks[task.id])}
-              label={modelOf(data, task.model)!.name}
+              label={modelOf(data, task.model)?.name ?? unavailableLabel}
             />
             .
           </p>
@@ -276,22 +287,22 @@ export function WorkModel({
   if (!kind) return null;
   const own = schedule ? schedule.model : task.model;
   const current = routeModel(data, kind, schedule ? { schedule: own } : { task: own });
-  const chosen = modelOf(data, current?.selection);
-  if (!chosen) return null;
+  if (!current) return null;
+  const chosen = modelOf(data, current.selection);
   const target = schedule
     ? scheduleTarget(data, schedule, usage.data?.schedules[schedule.id])
     : taskTarget(data, task as Task & { work: WorkKind }, usage.data?.tasks[task.id]);
   const follows =
-    current?.follows === 'task' || (schedule && current?.follows === 'schedule')
+    current.follows === 'task' || (schedule && current.follows === 'schedule')
       ? 'its own choice'
-      : current?.follows === 'schedule'
+      : current.follows === 'schedule'
         ? 'same as its schedule'
         : `same as ${kindNames[kind]}`;
   return (
     <div className="work-model">
       <span className="work-model-label">Model</span>
       <span className="work-model-value">
-        <strong>{chosen.name}</strong> · {follows}
+        <strong>{chosen?.name ?? 'Model unavailable'}</strong> · {follows}
       </span>
       <ModelPicker manageConnections={false} target={target} label="Change" appearance="quiet" />
     </div>
@@ -302,6 +313,6 @@ export function useOwnModel(model: ModelSelection | null | undefined, kind: Work
   const models = useModels();
   const data = models.data;
   if (!data || !kind || !model) return undefined;
-  const own = modelOf(data, model);
-  return own && !same(model, routeModel(data, kind)?.selection) ? own.name : undefined;
+  if (!kept(data, model) || same(model, routeModel(data, kind)?.selection)) return undefined;
+  return modelOf(data, model)?.name ?? 'Model unavailable';
 }
