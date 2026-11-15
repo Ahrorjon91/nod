@@ -2881,6 +2881,28 @@ test(
             background: true,
           });
           await completed(ownerResume, 'scheduled', true, 'reply');
+          const signedIn = await thread.enqueueTurn('Synthetic analytics sign-in continuation', {
+            source: 'resume',
+            sourceId: `credentials:${schedule}`,
+            sessionId: schedule,
+            parentTurnId: schedule,
+            background: true,
+          });
+          await completed(signedIn, 'scheduled', false, 'reply');
+          const taskCheck = await thread.enqueueTurn('Synthetic analytics planned check', {
+            source: 'resume',
+            sourceId: `task-check:${randomUUID()}:1`,
+            sessionId: schedule,
+            parentTurnId: schedule,
+            background: true,
+          });
+          await completed(taskCheck, 'scheduled', false, 'reply');
+          assert.deepEqual(
+            [requested.turnId, schedule, task, answer.turnId, signedIn, taskCheck].map(
+              (id) => ran(id)?.automatic,
+            ),
+            [false, true, true, false, false, true],
+          );
           const inspect = inspectObserver;
           try {
             inspectObserver = async (context) => {
@@ -9982,10 +10004,9 @@ test(
           const presentedFailures: string[] = [];
           presentInterruption = async (_threadId, input) => {
             if (input.kind === 'failed') presentedFailures.push(input.error);
-            return input.kind === 'failed' && input.error.includes('503 Service Unavailable')
-              ? 'Synthetic provider failure.'
-              : '';
+            return 'Synthetic presenter text.';
           };
+          dependencies.modelAlternative = () => 'Synthetic alternative connection.';
           const prefix = 'The model request failed: openrouter / anthropic/fixture-model: ';
           const nestedQuota =
             prefix +
@@ -10268,7 +10289,7 @@ test(
                   (
                     await db.pool.query(
                       "SELECT 1 FROM messages WHERE turn_id=$1 AND role='assistant' AND stream_id=$2",
-                      [submitted.turnId, `failure:${submitted.turnId}`],
+                      [submitted.turnId, `model-failure:${submitted.turnId}`],
                     )
                   ).rowCount,
                 ),
@@ -10281,18 +10302,13 @@ test(
               const shown = (
                 await db.pool.query(
                   "SELECT text FROM messages WHERE turn_id=$1 AND role='assistant' AND stream_id=$2",
-                  [submitted.turnId, `failure:${submitted.turnId}`],
+                  [submitted.turnId, `model-failure:${submitted.turnId}`],
                 )
               ).rows[0].text as string;
               assert.equal(turn.status, 'failed');
-              assert.equal(presentedFailures.at(-1), turn.error);
-              assert.ok(
-                shown.includes(
-                  item.prompt === 'model-unavailable-fixture'
-                    ? 'Synthetic provider failure.'
-                    : turn.error,
-                ),
-              );
+              assert.equal(presentedFailures.length, 0);
+              assert.ok(shown.includes(turn.error));
+              assert.match(shown, /Synthetic alternative connection\./);
               assert.match(shown, /\]\(\/settings\/models\)/);
               assert.ok(turn.error.length <= 2000);
               assert.ok(turn.error.startsWith(prefix));
@@ -10311,6 +10327,7 @@ test(
           } finally {
             for (const item of cases) modelErrors.delete(item.prompt);
             presentInterruption = previousPresenter;
+            delete dependencies.modelAlternative;
           }
         },
       );

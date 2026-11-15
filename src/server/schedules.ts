@@ -105,6 +105,7 @@ export interface ScheduleDependencies {
   sessionCosts?(sessionIds: string[]): Promise<Record<string, number | null>>;
   watchable?(connectionIds: string[]): Promise<boolean>;
   watchState?(connectionIds: string[]): Promise<string | null>;
+  modelPaused?(model: ModelSelection | null): boolean;
   recentTurnCost?(turnId?: string): Promise<number | null>;
   validateModel?(choice: ModelSelection): ModelSelection;
   sessionUsage?(sessionIds: string[]): Promise<Record<string, WorkUsage>>;
@@ -472,7 +473,7 @@ export function createSchedules(dependencies: ScheduleDependencies) {
           nextOccurrence(row, new Date(Math.max(now().getTime(), row.nextRun!.getTime()))),
         );
       }
-      if (busy) return true;
+      if (busy || (row.kind === 'recurring' && dependencies.modelPaused?.(row.model))) return true;
       const unchanged = marker ? `${row.revision}:${marker}` : null;
       if (unchanged) {
         if (

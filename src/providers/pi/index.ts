@@ -417,7 +417,11 @@ export function createPiAgent(options: {
     async open(input) {
       if (disposed) throw new Error('The agent service has stopped.');
       const access = await options.resolve?.(input.model);
-      if (input.automatic) await access?.prepareRequest?.(access.definition.choice.id, true);
+      if (input.automatic)
+        await access?.prepareRequest?.(
+          access.textModel?.definition.choice.id ?? access.definition.choice.id,
+          true,
+        );
       if (!access && !options.apiKey)
         throw new Error('Configure the selected model provider to enable the assistant.');
       if (access?.method === 'subscription') {
@@ -725,6 +729,7 @@ export function createPiAgent(options: {
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
+        retry: { baseDelayMs: 4000 },
         ...(access?.provider === 'compatible' ? { httpIdleTimeoutMs: localModelSilenceMs } : {}),
       });
       const extensionLoader = new DefaultResourceLoader({

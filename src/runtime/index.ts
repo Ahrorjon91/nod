@@ -888,7 +888,7 @@ export function createAgentRuntime(dependencies: {
           child = await agent.open({
             ...source,
             ...(context.model ? { model: context.model } : {}),
-            automatic: !context.currentMessageId,
+            automatic: Boolean(context.automatic),
             ephemeral: true,
             systemPrompt: system,
             ownerContext: ownerContext(context),
@@ -1058,7 +1058,7 @@ export function createAgentRuntime(dependencies: {
       const opening = agent.open({
         ...execution,
         ...(context.model ? { model: context.model } : {}),
-        automatic: !context.currentMessageId,
+        automatic: Boolean(context.automatic),
         ...(context.proactivity ? { restricted: true, restartable: !context.resumed } : {}),
         ...(context.scheduleCache ? { scheduleCache: context.scheduleCache } : {}),
         ...(sessionId === threadId && !context.proactivity && dependencies.keepWarm

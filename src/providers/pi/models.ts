@@ -5,6 +5,8 @@ import {
   getSystemMessageText,
   hasApi,
   createAssistantMessageEventStream,
+  isContextOverflow,
+  isRetryableAssistantError,
   type Api,
   type AssistantMessage,
   type Context,
@@ -50,6 +52,7 @@ import {
 } from './model-catalog.ts';
 
 export const localModelSilenceMs = 30 * 60_000;
+export const modelFirstEventMs = 90_000;
 
 function supportedModel(model: Model<Api>): Model<Api> {
   if (model.provider === 'groq' && model.id.startsWith('qwen/'))
@@ -1151,6 +1154,9 @@ export async function createPiModelRuntime(
     let transportCause: string | undefined;
     let completeRequest: ((error?: string) => Promise<void>) | undefined;
     let settleBudget: ((spentUsd: number | null) => Promise<void>) | undefined;
+    const silence = new AbortController();
+    let silenceTimer: ReturnType<typeof setTimeout> | undefined;
+    const heard = () => clearTimeout(silenceTimer);
     const guardedFetch =
       access.provider === 'compatible' ||
       access.provider === 'radius' ||
@@ -1166,6 +1172,7 @@ export async function createPiModelRuntime(
     const output = Math.min(options?.maxTokens ?? target.maxTokens, target.maxTokens);
     const upstream = stream(target, replay, {
       ...options,
+      signal: options?.signal ? AbortSignal.any([options.signal, silence.signal]) : silence.signal,
       maxTokens: output,
       maxRetries: 0,
       onResponse: async (response, model) => {
@@ -1174,6 +1181,7 @@ export async function createPiModelRuntime(
         await options?.onResponse?.(response, model);
       },
       onProviderStreamEvent: async (event, model) => {
+        heard();
         phase = 'stream';
         await options?.onProviderStreamEvent?.(event, model);
       },
@@ -1327,6 +1335,11 @@ export async function createPiModelRuntime(
             : null;
         });
         phase = 'payload';
+        if (access.provider !== 'compatible') {
+          heard();
+          silenceTimer = setTimeout(() => silence.abort(), modelFirstEventMs);
+          silenceTimer.unref?.();
+        }
         return prepared;
       },
     });
@@ -1346,13 +1359,26 @@ export async function createPiModelRuntime(
               }),
             ),
           );
+        if (event.type === 'done' || event.type === 'error') heard();
+        if (event.type === 'error' && silence.signal.aborted && !options?.signal?.aborted) {
+          event.error.stopReason = 'error';
+          event.error.errorMessage = `${modelProviderNames[access.provider]} sent no response for ${modelFirstEventMs / 1000} seconds, so the request timed out.`;
+        }
         if (event.type === 'error') {
           const error = event.error;
           error.errorMessage = `${error.errorMessage || 'The provider gave no reason.'}${status ? ` (HTTP ${status})` : ''}${transportCause ? ` (transport cause: ${transportCause})` : ''} [request phase: ${phase}]`;
         }
         if ((event.type === 'done' || event.type === 'error') && phase !== 'prepare') {
           const message = event.type === 'done' ? event.message : event.error;
-          if (message.stopReason !== 'aborted' && !options?.signal?.aborted)
+          if (
+            message.stopReason !== 'aborted' &&
+            !options?.signal?.aborted &&
+            (message.stopReason !== 'error' ||
+              !(
+                isRetryableAssistantError(message) ||
+                isContextOverflow(message, target.contextWindow)
+              ))
+          )
             await completeRequest?.(
               message.stopReason === 'error' ? message.errorMessage : undefined,
             );

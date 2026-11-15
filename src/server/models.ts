@@ -18,6 +18,7 @@ import type {
   ModelProvider,
   ModelRoute,
   ModelRoutes,
+  ModelIssue,
   ModelSelection,
   ModelsResponse,
   WorkKind,
@@ -26,6 +27,7 @@ import type {
 import {
   apiKeyConnectionProviders,
   modelProviderInfo,
+  modelProviderNames,
   azureDeploymentPattern,
   bedrockRegionPattern,
   cloudflareAccountPattern,
@@ -47,8 +49,8 @@ import { createDatabaseModelStore, type ModelRecord, type ModelState } from './m
 import { analyticsModel, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import type { SettingActor } from './analytics-settings.ts';
 import { logFailure } from './failure-log.ts';
-import { modelQuotaFailure } from '../shared/model-quota.ts';
-import { createTextRedactor } from './redaction.ts';
+import { modelFailureReason } from '../shared/model-quota.ts';
+import { createTextRedactor, redactSecretText } from './redaction.ts';
 import { afterCommit } from './transaction.ts';
 
 const keySchema = z
@@ -286,6 +288,19 @@ function attention(row: Pick<ModelRecord, 'provider' | 'method' | 'managed' | 's
   );
 }
 
+const credentialTag = (value: ModelCredential | undefined) =>
+  value &&
+  createHash('sha256')
+    .update(JSON.stringify(value.type === 'oauth' ? [value.accountId, value.clientId] : value))
+    .digest('hex');
+const failureWindow = (failures: number) =>
+  Math.min(120_000 * 3 ** Math.max(0, failures - 1), 6 * 3_600_000);
+function failures(row: Pick<ModelRecord, 'requestFailures'> | undefined, tag: string | undefined) {
+  return Object.entries(row?.requestFailures ?? {}).filter(
+    ([, failure]) => tag && failure.credentialTag === tag,
+  );
+}
+
 export function createModelService(options: {
   database: Pool;
   ownerId: string;
@@ -333,7 +348,16 @@ export function createModelService(options: {
       throw error;
     }
   }
-  let rows: (ModelRecord & { keyEnding?: string })[] = [];
+  let rows: (ModelRecord & {
+    keyEnding?: string;
+    issue?: ModelIssue;
+    issues?: Record<string, ModelIssue>;
+    retry?: Record<string, number>;
+  })[] = [];
+  let selectionCheck: (() => Promise<unknown>) | undefined;
+  let checked: string | undefined;
+  let pendingCheck: Promise<unknown> | undefined;
+  let initialized = false;
   let selection: ModelSelection | null = null;
   let routes: ModelRoutes = {};
   let starting: Promise<unknown> = Promise.resolve();
@@ -390,17 +414,47 @@ export function createModelService(options: {
     const state = await store.read();
     rows = state.connections.map(({ credential: saved, ...row }) => {
       const value = row.managed ? options.bootstrap?.credentials[row.provider] : saved;
-      return value &&
+      const failed = failures(row, credentialTag(value)).sort(
+        ([, a], [, b]) => b.retryAt - a.retryAt,
+      );
+      return {
+        ...row,
+        ...(value &&
         typeof value === 'object' &&
         'key' in value &&
         typeof value.key === 'string' &&
         value.key.length > 4
-        ? { ...row, keyEnding: value.key.slice(-4) }
-        : row;
+          ? { keyEnding: value.key.slice(-4) }
+          : {}),
+        ...(failed.length
+          ? {
+              issue: { reason: failed[0]![1].reason },
+              issues: Object.fromEntries(failed.map(([id, item]) => [id, { reason: item.reason }])),
+              retry: Object.fromEntries(failed.map(([id, item]) => [id, item.retryAt])),
+            }
+          : {}),
+      };
     });
     selection = state.selection;
     routes = state.routes;
+    checkSelection(state);
     options.changed?.();
+  }
+  function checkSelection(state: ModelState) {
+    const row = state.connections.find((item) => item.id === state.selection?.connectionId);
+    if (!selectionCheck || !row || row.status !== 'connected' || closed) return;
+    const key = `${row.id}:${state.selection!.modelId}:${credentialTag(credential(row))}`;
+    if (key === checked) return;
+    checked = key;
+    pendingCheck = selectionCheck().catch((error: unknown) =>
+      logFailure('model_check_failed', error),
+    );
+  }
+  function requested(row: ModelRecord | undefined, modelId: string | undefined) {
+    const chosen = row?.models.find((model) => model.choice.id === modelId);
+    if (!row || !chosen) return [];
+    const companion = chosen.choice.audio ? textCompanion(row)?.choice.id : undefined;
+    return companion ? [chosen.choice.id, companion] : [chosen.choice.id];
   }
   function credential(row: ModelRecord | undefined) {
     if (!row) return undefined;
@@ -411,59 +465,60 @@ export function createModelService(options: {
   function requestAccess(
     row: ModelRecord,
   ): Pick<ModelAccess, 'read' | 'prepareRequest' | 'reserve'> {
-    const access = {
+    return {
       read: () => read(row.id),
       reserve,
-    };
-    if (row.provider !== 'google') return access;
-    const tag = (value: ModelCredential | undefined) =>
-      value && createHash('sha256').update(JSON.stringify(value)).digest('hex');
-    return {
-      ...access,
       async prepareRequest(modelId, automatic) {
-        const credentialTag = tag(await read(row.id));
-        const pauses = rows.find((item) => item.id === row.id)?.requestPauses;
-        const pause =
-          Object.values(pauses ?? {}).find(
-            (item) => item.kind === 'credits_depleted' && item.credentialTag === credentialTag,
-          ) ?? pauses?.[modelId];
-        if (
-          automatic &&
-          pause &&
-          pause.credentialTag === credentialTag &&
-          (pause.retryAt === null || pause.retryAt > Date.now())
-        )
+        const tag = credentialTag(await read(row.id));
+        const failure = new Map(
+          failures(
+            rows.find((item) => item.id === row.id),
+            tag,
+          ),
+        ).get(modelId);
+        if (automatic && failure && Date.now() < failure.retryAt)
           throw new ConnectionError(
-            `${row.provider} reported ${pause.kind === 'credits_depleted' ? 'depleted prepayment credits' : pause.kind === 'zero_quota' ? 'zero quota' : 'a daily quota limit'} for ${modelId}. Automatic requests are paused. Check this connection in Settings > Models or ask again to make a new request.`,
+            `${modelProviderNames[row.provider]} failed the last request to ${modelId} (${failure.reason}). Automatic requests to this model are paused until a request succeeds. Check this connection in Settings > Models or ask again to make a new request.`,
           );
         return async (error) => {
-          if (!credentialTag || closed || (!error && automatic)) return;
-          const failure = error ? modelQuotaFailure(error) : undefined;
-          if (error && !failure) return;
+          if (!tag || closed) return;
+          const recorded = failures(
+            rows.find((item) => item.id === row.id),
+            tag,
+          );
+          if (!error && !recorded.some(([id]) => id === modelId)) return;
           try {
             await store.change((state) => {
               const saved = state.connections.find((item) => item.id === row.id);
-              if (!saved || tag(credential(saved)) !== credentialTag) return;
-              saved.requestPauses ??= {};
-              if (failure)
-                saved.requestPauses[modelId] = {
-                  credentialTag,
-                  kind: failure.kind,
-                  retryAt:
-                    failure.kind === 'daily_quota' && failure.retryAfterMs
-                      ? Date.now() + failure.retryAfterMs
-                      : null,
-                };
-              else {
-                delete saved.requestPauses[modelId];
-                for (const [id, item] of Object.entries(saved.requestPauses))
-                  if (item.kind === 'credits_depleted' && item.credentialTag === credentialTag)
-                    delete saved.requestPauses[id];
+              if (!saved || credentialTag(credential(saved)) !== tag) return;
+              const current = new Map(failures(saved, tag));
+              if (!error) {
+                if (current.delete(modelId))
+                  for (const item of current.values())
+                    item.retryAt = Math.min(item.retryAt, Date.now());
+                saved.requestFailures = Object.fromEntries(current);
+                return;
               }
+              const previous = current.get(modelId);
+              const count =
+                previous && Date.now() < previous.retryAt
+                  ? previous.failures
+                  : (previous?.failures ?? 0) + 1;
+              saved.requestFailures = Object.fromEntries(current);
+              saved.requestFailures[modelId] = {
+                credentialTag: tag,
+                failures: count,
+                retryAt: Date.now() + failureWindow(count),
+                reason: redactSecretText(modelFailureReason(error))
+                  .replace(/\s*\[request phase: [^\]]*\]\s*$/, '')
+                  .replace(/\s+/g, ' ')
+                  .trim()
+                  .slice(0, 300),
+              };
             });
             await reload();
           } catch (error) {
-            logFailure('model_quota_save_failed', error);
+            logFailure('model_failure_save_failed', error);
           }
         };
       },
@@ -742,7 +797,7 @@ export function createModelService(options: {
         models: working ? previous.models : definitions,
         managed,
         status: working ? 'connected' : status,
-        requestPauses: previous?.requestPauses,
+        requestFailures: previous?.requestFailures,
         ...(!managed ? { credential: value } : {}),
       };
       state.connections = state.connections.flatMap((item) =>
@@ -992,25 +1047,38 @@ export function createModelService(options: {
       return usable(rows, selection);
     },
     get current() {
+      const row = rows.find((item) => item.id === selection?.connectionId);
+      const chosen = row?.models.find((model) => model.choice.id === selection?.modelId);
       return {
-        provider:
-          rows.find((row) => row.id === selection?.connectionId)?.provider ?? 'unconfigured',
+        provider: row?.provider ?? 'unconfigured',
         name: selection?.modelId ?? 'Unconfigured',
-        label:
-          rows
-            .find((row) => row.id === selection?.connectionId)
-            ?.models.find((model) => model.choice.id === selection?.modelId)?.choice.name ??
-          selection?.modelId,
+        label: chosen?.choice.name ?? selection?.modelId,
         configured: service.configured,
-        reconnect: rows.find((row) => row.id === selection?.connectionId)?.status === 'reconnect',
+        reconnect: row?.status === 'reconnect',
+        issue: selection ? service.issue(selection) : undefined,
       };
     },
-    async automaticRequestsAllowed(kind: WorkKind = 'chat') {
+    issue(choice: Pick<ModelSelection, 'connectionId' | 'modelId'>) {
+      const row = rows.find((item) => item.id === choice.connectionId);
+      return requested(row, choice.modelId)
+        .map((id) => row?.issues?.[id])
+        .find(Boolean);
+    },
+    paused(origin: WorkOrigin) {
       try {
-        const work = service.workModel({ kind });
+        const { selection: work } = service.workModel(origin);
+        const row = rows.find((item) => item.id === work.connectionId);
+        return requested(row, work.modelId).some((id) => (row?.retry?.[id] ?? 0) > Date.now());
+      } catch {
+        return false;
+      }
+    },
+    async automaticRequestsAllowed(origin: WorkOrigin, auxiliary = false) {
+      try {
+        const work = service.workModel(origin);
         for (const access of [
           await service.resolve(false, work.selection),
-          await service.resolve(true),
+          ...(auxiliary ? [await service.resolve(true)] : []),
         ]) {
           await access.prepareRequest?.(
             access.textModel?.definition.choice.id ?? access.definition.choice.id,
@@ -1110,13 +1178,14 @@ export function createModelService(options: {
     view(): ModelsResponse {
       return {
         connections: rows.map(
-          ({ id, provider, method, label, status, managed, models, keyEnding }) => ({
+          ({ id, provider, method, label, status, managed, models, keyEnding, issue }) => ({
             id,
             provider,
             method,
             label,
             status,
             managed,
+            ...(issue ? { issue } : {}),
             models: models.map((model) => ({
               ...model.choice,
               pricing: modelPricing(model),
@@ -1134,6 +1203,7 @@ export function createModelService(options: {
     },
     async initialize() {
       await store.initialize();
+      initialized = true;
       await store.change((state) => {
         state.connections = state.connections.filter(
           (row) => !row.managed || options.bootstrap?.credentials[row.provider],
@@ -1230,6 +1300,7 @@ export function createModelService(options: {
     },
     async select(input: ModelSelection, actor: SettingActor = 'owner', client?: PoolClient) {
       const value = modelSelectionInput.parse(input);
+      checked = undefined;
       const capture = snapshotAnalytics(analytics);
       const changed = await store.change(
         (state) => {
@@ -1364,6 +1435,19 @@ export function createModelService(options: {
     setRequestBudget(reserve: NonNullable<ModelAccess['reserve']>) {
       requestBudget = reserve;
     },
+    async setSelectionCheck(check: () => Promise<unknown>) {
+      selectionCheck = check;
+      if (initialized)
+        await store
+          .read()
+          .then(checkSelection, (error: unknown) => logFailure('model_check_failed', error));
+    },
+    async checkSettled() {
+      await Promise.race([
+        pendingCheck,
+        new Promise((resolve) => setTimeout(resolve, 15_000).unref()),
+      ]);
+    },
     async resolve(
       auxiliary = false,
       choice: ModelSelection | null = selection,
@@ -1427,6 +1511,7 @@ export function createModelService(options: {
         routes.post('/api/models/keys', async (request) => {
           const { provider, key, ...settings } = keySchema.parse(request.body);
           await service.addKey(provider, key, settings);
+          await service.checkSettled();
           return service.view();
         });
         routes.get('/api/models/azure', async () => ({
@@ -1444,10 +1529,12 @@ export function createModelService(options: {
             .strict()
             .parse(request.body);
           await service.addEndpoint(input.url, input.key || undefined);
+          await service.checkSettled();
           return service.view();
         });
         routes.put('/api/models/selection', async (request) => {
           await service.select(modelSelectionInput.parse(request.body));
+          await service.checkSettled();
           return service.view();
         });
         routes.put('/api/models/routes', async (request) => {
@@ -1512,6 +1599,7 @@ export function createModelService(options: {
             .strict()
             .parse(request.body);
           await complete(new URL(input.url));
+          await service.checkSettled();
           return service.view();
         });
         routes.get('/api/models/oauth/callback', async (request, reply) => {

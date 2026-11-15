@@ -15,9 +15,11 @@ import {
   apiKeyConnectionProviders,
   lightestEffort,
   modelProviderInfo,
+  modelProviderNames,
   modelProviders,
   modelSource,
   repriceUsd,
+  type ModelIssue,
   type ModelSelection,
 } from '../shared/models.ts';
 import type { ProductAnalytics } from '../ports/analytics.ts';
@@ -66,7 +68,7 @@ import { createN8nFeedback } from '../providers/n8n/feedback.ts';
 import { createN8nTraces } from '../providers/n8n/traces.ts';
 import { createOtlpTelemetry } from '../providers/otlp/telemetry.ts';
 import type { UsageTelemetry } from '../ports/provider-usage.ts';
-import { agentModels } from '../shared/model-defaults.ts';
+import { agentModels, defaultEffort, defaultModel } from '../shared/model-defaults.ts';
 import { createChatSdkTransport } from '../providers/chat-sdk/index.ts';
 import { createWhatsAppLinkedTransport } from '../providers/chat-sdk/whatsapp.ts';
 import { combineMessagingTransports } from '../providers/chat-sdk/combined.ts';
@@ -245,7 +247,13 @@ export interface ApplicationAdapters {
     managed?: ReturnType<typeof managedChannelEnvironment>;
     create(environment: Record<string, string>): MessagingTransport;
   };
-  model: { provider: string; name: string; configured: boolean; reconnect?: boolean };
+  model: {
+    provider: string;
+    name: string;
+    configured: boolean;
+    reconnect?: boolean;
+    issue?: ModelIssue;
+  };
 }
 
 export function modelEnvironment(
@@ -661,6 +669,26 @@ export function createDefaultAdapters(
   };
 }
 
+function alternativeModel(models: ApplicationAdapters['models']) {
+  const view = models?.view();
+  const other = view?.connections.find(
+    (item) =>
+      item.id !== view.selection?.connectionId &&
+      item.status === 'connected' &&
+      item.models.length > 0,
+  );
+  const choice =
+    other && (defaultModel(other.provider, other.models, other.method) ?? other.models[0]);
+  return other && choice && !models?.issue({ connectionId: other.id, modelId: choice.id })
+    ? {
+        connectionId: other.id,
+        modelId: choice.id,
+        effort: defaultEffort(other.provider, choice),
+        label: `${modelProviderNames[other.provider]} · ${choice.name}`,
+      }
+    : undefined;
+}
+
 export async function createApplication(
   adapters: ApplicationAdapters,
   options: {
@@ -836,6 +864,12 @@ async function initializeApplication(
   const onboardingCurator = adapters.onboardingCurator
     ? ledger.curator(adapters.onboardingCurator)
     : curator;
+  void adapters.models?.setSelectionCheck(() =>
+    onboardingCurator.curate(
+      { task: 'check', instructions: 'Return only {"ok":true}.', input: {}, automatic: false },
+      AbortSignal.timeout(30_000),
+    ),
+  );
   const decisions = adapters.decisions && ledger.decisions(adapters.decisions);
   const review: ModelReview = async (instructions, input, signal, question) => {
     if (question) {
@@ -1072,6 +1106,8 @@ async function initializeApplication(
       ? {
           validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice),
           workPricing: (own: ModelSelection | null) => adapters.models!.pricing('schedule', own),
+          modelPaused: (model: ModelSelection | null) =>
+            adapters.models!.paused({ kind: 'schedule', schedule: model }),
         }
       : {}),
     watchable: async (connectionIds) => integrations.watchable(connectionIds),
@@ -1643,7 +1679,7 @@ async function initializeApplication(
         await personal.validateReview(action.slice('NOD_'.length), args, expectedRevision, client);
       } else await integrations.prepare(ownerId, action, args, undefined, undefined, false, client);
     },
-    (reply) => trust.answer(reply),
+    (reply) => ledger.forOwner(() => trust.answer(reply)),
     communication.describe,
     captureAnalytics,
   );
@@ -1931,7 +1967,7 @@ async function initializeApplication(
     modelAvailable: async () =>
       !(await ledger.preparationLimit()).reached &&
       (adapters.models
-        ? await adapters.models.automaticRequestsAllowed('background')
+        ? await adapters.models.automaticRequestsAllowed({ kind: 'background' }, true)
         : adapters.model.configured),
     redact: createTextRedactor(secrets),
     sources: (client) => observations.sources(client),
@@ -2054,6 +2090,12 @@ async function initializeApplication(
             },
           }
         : {}),
+      modelAlternative: () => {
+        const other = alternativeModel(adapters.models);
+        return other
+          ? `Your ${other.label} connection is also set up: you can switch to it in Settings > Models.`
+          : undefined;
+      },
       taskClassification: true,
       observeTurn: (turnId, operation) =>
         analytics
@@ -2103,7 +2145,7 @@ async function initializeApplication(
                 .runTurn({ ...context, runtimeHost: desktopMode ? 'desktop' : 'server' })
                 .finally(() => proactivity.release(context.turnId)),
             Boolean(context.spendingLimitReached),
-            !context.currentMessageId,
+            Boolean(context.automatic),
           );
         return automaticWork ? ledger.withPreparation(context.turnId, run) : run();
       },
@@ -2715,14 +2757,18 @@ async function initializeApplication(
     activity: activity.current,
     planningTasks: onboardingSuggestions.planning,
     computer,
-    configuration: () =>
-      configuration({
+    configuration: () => {
+      const alternative = alternativeModel(adapters.models);
+      return configuration({
         provider: adapters.model.provider,
         model: adapters.model.name,
         llmReady: adapters.model.configured,
         modelReconnect: adapters.model.reconnect === true,
+        ...(adapters.model.issue ? { modelIssue: adapters.model.issue } : {}),
+        ...(alternative ? { modelAlternative: alternative } : {}),
         integrationsReady: adapters.integrations.configured,
-      }),
+      });
+    },
   });
   adapters.models?.register(app, captureAnalytics);
   proactivity.registerRoutes(app);
@@ -2867,7 +2913,8 @@ async function initializeApplication(
       ...(channelSettings ? { pair: channelSettings.pair } : {}),
       transport: messaging,
       isRetirableScheduleConfirmation: approvals.isRetirableScheduleConfirmation,
-      classifyRetiredReply: trust.classifyRetiredReply,
+      classifyRetiredReply: (reply, expired) =>
+        ledger.forOwner(() => trust.classifyRetiredReply(reply, expired)),
       acceptVerification: (text, input) => chatVerification.accept(text, input),
       reacted: (messageId, reaction) => reactToMessage(messageId, reaction),
       activeThread: (client) => lockThread(client),
