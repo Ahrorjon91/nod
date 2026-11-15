@@ -25,6 +25,7 @@ import remarkParse from 'remark-parse';
 import { unified } from 'unified';
 import type { ProductAnalytics } from '../src/ports/analytics.ts';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
+import { IntegrationConnectionError } from '../src/ports/integrations.ts';
 import { createAnalytics, snapshotAnalytics } from '../src/server/analytics.ts';
 import {
   accessCookie,
@@ -44,7 +45,9 @@ import {
 import { createCommunication } from '../src/server/communication.ts';
 import { ApprovalCard, ApprovalChoiceCard } from '../src/web/components/action-card.tsx';
 import { createE2eCurators } from '../scripts/e2e-curators.ts';
+import { createIntegrationFixture } from '../scripts/e2e-fixtures.ts';
 import { createPiMemoryCurator } from '../src/providers/pi/memory-curator.ts';
+import { createIntegrations } from '../src/server/integrations.ts';
 
 function markdownNodes(markdown: string) {
   const tree = unified().use(remarkParse).use(remarkGfm).parse(markdown);
@@ -1380,6 +1383,58 @@ test(
         });
         return { promise, resolve };
       };
+      for (const [status, code] of [
+        [429, 'installation_busy'],
+        [503, 'service_unavailable'],
+      ] as const) {
+        await t.test(
+          `a ${status} during session creation expires the approved app action`,
+          async (t) => {
+            const fixture = createIntegrationFixture(`http://localhost:${port}`);
+            let sessions = 0;
+            const integrations = await createIntegrations(db.pool, {
+              ownerId,
+              baseUrl: `http://localhost:${port}`,
+              wake: async () => {},
+              provider: {
+                ...fixture.provider,
+                createSession: async () => {
+                  sessions++;
+                  throw new IntegrationConnectionError(
+                    status === 429 ? 'rate_limit' : 'unavailable',
+                    'session',
+                    status,
+                    code,
+                  );
+                },
+              },
+            });
+            const connectionId = randomUUID();
+            await db.pool.query(
+              "INSERT INTO app_connections(id,owner_id,slug,provider_id,account_id) VALUES($1,$2,'gmail',$3,'synthetic-account')",
+              [connectionId, ownerId, fixture.provider.id],
+            );
+            t.after(async () => {
+              executionResult = undefined;
+              await db.pool.query('DELETE FROM app_connections WHERE id=$1', [connectionId]);
+            });
+            const turn = await begin('Synthetic session refusal');
+            const args = { ...email('session-refusal@example.test'), connectionId };
+            const approvalId = await propose(turn, 'GMAIL_SEND_EMAIL', args);
+            await finish(turn.turnId);
+            const confirmed = await confirm(approvalId, true);
+            assert.ok(confirmed && 'turnId' in confirmed);
+            assert.equal((await stored(approvalId)).status, 'confirmed');
+            executionResult = () => integrations.execute(ownerId, 'GMAIL_SEND_EMAIL', args);
+            const result = await execute(approvalId);
+            assert.equal((await stored(approvalId)).status, 'expired');
+            assert.match(result?.prompt ?? '', /did not run/);
+            assert.equal(sessions, 1);
+            assert.equal(fixture.writes.length, 0);
+            await finish(confirmed.turnId, 'succeeded');
+          },
+        );
+      }
       await t.test(
         'one authorization review preserves the original instructions and executed arguments',
         async () => {
