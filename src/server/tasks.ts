@@ -99,6 +99,7 @@ type Row = {
   handoff: boolean;
   model: ModelSelection | null;
   work: WorkKind | null;
+  schedule_model: ModelSelection | null;
 };
 
 function failure(message: string, statusCode = 400) {
@@ -174,7 +175,8 @@ export function createTasks(options: {
            COALESCE(${activeHandoffSql},false) AS handoff,
            COALESCE(q.text,CASE WHEN u.status='cancelled' THEN continuation.text END) AS question,
            COALESCE(q.id,CASE WHEN u.status='cancelled' THEN continuation.id END) AS question_message_id,
-           t.model,CASE WHEN t.session_id=t.id THEN ${workKindSql('t', 'NULL')} END AS work
+           t.model,CASE WHEN t.session_id=t.id THEN ${workKindSql('t', 'NULL')} END AS work,
+           work_schedule.model AS schedule_model
          FROM ranked t LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
          ${workOriginSql('t')}
          LEFT JOIN LATERAL (SELECT m.id,m.text FROM messages m
@@ -223,7 +225,15 @@ export function createTasks(options: {
         createdAt: row.created_at.toISOString(),
         updatedAt: row.updated_at.toISOString(),
         closedAt: row.closed_at?.toISOString() ?? null,
-        ...(row.work ? { model: row.model, work: row.work } : {}),
+        ...(row.work
+          ? {
+              model: row.model,
+              work: row.work,
+              ...(row.work === 'schedule' && row.schedule_model
+                ? { scheduleModel: row.schedule_model }
+                : {}),
+            }
+          : {}),
       };
     });
   }

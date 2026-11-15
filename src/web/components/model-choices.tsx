@@ -115,8 +115,8 @@ function taskTarget(
     defaults: [
       {
         value: null,
-        label: `Same as ${kindNames[task.work]}`,
-        model: routeModel(data, task.work)?.selection ?? null,
+        label: task.scheduleModel ? 'Same as its schedule' : `Same as ${kindNames[task.work]}`,
+        model: routeModel(data, task.work, { schedule: task.scheduleModel })?.selection ?? null,
       },
     ],
     usage,
@@ -195,7 +195,7 @@ export function ModelSentences() {
     (task): task is Task & { work: WorkKind } =>
       Boolean(task.work && kept(data, task.model)) &&
       !task.closedAt &&
-      !same(task.model, routeModel(data, task.work!)?.selection),
+      !same(task.model, routeModel(data, task.work!, { schedule: task.scheduleModel })?.selection),
   );
   const work = usage.data;
   const price =
@@ -278,7 +278,11 @@ export function WorkModel({
   const kind = schedule ? 'schedule' : task.work;
   if (!kind) return null;
   const own = schedule ? schedule.model : task.model;
-  const current = routeModel(data, kind, schedule ? { schedule: own } : { task: own });
+  const current = routeModel(
+    data,
+    kind,
+    schedule ? { schedule: own } : { task: own, schedule: task.scheduleModel },
+  );
   if (!current) return null;
   const chosen = modelOf(data, current.selection);
   const target = schedule

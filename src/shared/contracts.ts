@@ -311,6 +311,7 @@ export interface Task {
   appliedRevision?: number;
   model?: ModelSelection | null;
   work?: WorkKind;
+  scheduleModel?: ModelSelection;
 }
 export interface TaskDetail {
   task: Task;
