@@ -581,8 +581,6 @@ test('server configuration refuses remote exposure without a valid token and an 
     { NOD_AUTH_TOKEN: `${key}\n` },
     { NOD_HOST: 'attacker.example', NOD_AUTH_TOKEN: key },
     ...['0', '-1', '65536', '4310.5', 'not-a-port', ''].map((PORT) => ({ PORT })),
-    { PORT: '80' },
-    { PORT: '80', NOD_AUTH_TOKEN: key },
   ])
     assert.throws(() => serverNetwork(environment));
   for (const NOD_PUBLIC_URL of [
@@ -634,6 +632,11 @@ test('server configuration refuses remote exposure without a valid token and an 
     );
   assert.equal(serverNetwork({}).accessOrigin, undefined);
   assert.equal(serverNetwork({ NOD_AUTH_TOKEN: key }).accessOrigin, undefined);
+  for (const environment of [{ PORT: '80' }, { PORT: '80', NOD_AUTH_TOKEN: key }]) {
+    const defaultPort = serverNetwork(environment);
+    assert.equal(defaultPort.publicOrigin, 'http://localhost');
+    assert.equal(defaultPort.accessOrigin, undefined);
+  }
   assert.equal(serverNetwork({ NOD_DESKTOP: 'true', NOD_AUTH_TOKEN: '' }).authToken, undefined);
 });
 
@@ -757,6 +760,29 @@ test('a server token alone keeps every local address and still refuses a foreign
   assert.equal(
     (await app.inject({ url: '/api/privacy', headers: { host: 'nod.example' } })).statusCode,
     403,
+  );
+  const defaultPort = Fastify({ trustProxy: false });
+  t.after(() => defaultPort.close());
+  registerLocalAccess(defaultPort, 80, { key, bearer: true });
+  defaultPort.get('/api/privacy', async () => ({ content: null }));
+  for (const [host, status] of [
+    ['localhost', 200],
+    ['127.0.0.1', 200],
+    ['[::1]', 200],
+    ['localhost:4310', 403],
+  ] as const)
+    assert.equal(
+      (await defaultPort.inject({ url: '/api/privacy', headers: { host } })).statusCode,
+      status,
+    );
+  assert.equal(
+    (
+      await defaultPort.inject({
+        url: '/api/privacy',
+        headers: { host: 'localhost', origin: 'http://localhost' },
+      })
+    ).statusCode,
+    200,
   );
 });
 test('localhost access requires the owner key and rejects foreign Host, Origin and cross-site requests', async () => {
