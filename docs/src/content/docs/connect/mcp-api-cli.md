@@ -33,15 +33,17 @@ Nod loads n8n's tools only when a task needs them and follows n8n's own guide fo
 
 ## Connect another service
 
-To connect an MCP server yourself, open **Apps** and select **Connect MCP**. Enter a name and the public HTTPS server URL, then choose browser sign-in, an access token or an API key. Select **Continue** to finish authentication in the private setup dialog. **Connection details** shows any extra setup instructions. Tokens stay outside the chat.
+To connect an MCP server yourself, open **Apps** and select **Connect MCP**. Enter a name and the server URL, then choose browser sign-in, an access token or an API key. Select **Continue** to finish authentication in the private setup dialog. **Connection details** shows any extra setup instructions. Tokens stay outside the chat.
+
+The URL can be a public HTTPS address or, when you type it yourself, an address on your own computer or network, such as `http://127.0.0.1:8080/mcp`. A private address stays bound to the origin you entered. HTTP is allowed only for private addresses. Connections that Nod proposes in chat must use a public HTTPS address.
 
 Ask Nod to connect a service it can't find in the app catalog. Nod proposes a way in, called an access path, and sends you a link to a private setup page. There, you paste a token or sign in. The model never sees the token.
 
-| Access path | What Nod calls                     | How it signs in                       |
-| ----------- | ---------------------------------- | ------------------------------------- |
-| MCP server  | Tools on a public HTTPS MCP server | A token in a header, or OAuth sign-in |
-| HTTP API    | A method and path on the API       | A token in a header                   |
-| CLI         | A command with arguments           | Tokens in environment variables       |
+| Access path | What Nod calls                                                 | How it signs in                       |
+| ----------- | -------------------------------------------------------------- | ------------------------------------- |
+| MCP server  | Tools on a public HTTPS MCP server, or a private one you enter | A token in a header, or OAuth sign-in |
+| HTTP API    | A method and path on the API                                   | A token in a header                   |
+| CLI         | A command with arguments                                       | Tokens in environment variables       |
 
 Nod keeps the token encrypted in Vault, and the server adds it to each call. Results and errors remove plaintext, JSON-escaped and URL- or form-encoded representations of the token. A returned file containing any of those representations is withheld.
 
