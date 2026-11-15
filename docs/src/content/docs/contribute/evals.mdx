@@ -679,7 +679,7 @@ For real use, measure with owners over actual elapsed days. A complete-window so
 
 The `proactivity-stress-*` release cases test changed source state, noisy pages, source outages, repeated signals, owner controls, hostile source text, language and changed goals. Each attempt uses the real runtime and a synthetic source provider. The held-out variants change record format or source order; the memory variant adds 160 historical notes through the owner API.
 
-Run an engine and baseline case with the same selected model and judge. Keep all required checks and source data fixed before the run. Use a new run label and record the reason when a check changes.
+Run an engine and baseline case with the same selected model and judge. To check a lighter model for work Nod starts on its own, add `--background-model light`, or a model from the `--model` provider, and compare it with the same run without it. Keep all required checks and source data fixed before the run. Use a new run label and record the reason when a check changes.
 
 ```sh title="Terminal"
 pnpm run eval:capability run --scenario proactivity-stress-late-page-engine,proactivity-stress-late-page-baseline --repeat 3 --label proactive-stress

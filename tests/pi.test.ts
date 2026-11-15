@@ -1,3 +1,4 @@
+import type { ModelSelection } from '../src/shared/models.ts';
 import type { Context } from '@earendil-works/pi-ai';
 import type { ModelAccess } from '../src/ports/models.ts';
 import { createPiModelBackend, createPiModelRuntime } from '../src/providers/pi/models.ts';
@@ -7478,6 +7479,90 @@ test('the Pi transcript keeps model changes for the next turn and leaves backgro
     await agent.dispose();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('each session opens on its work model and the observer starts fresh after a switch', async (t) => {
+  const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
+  const backend = createPiModelBackend({
+    fetch: async () => {
+      throw new Error('Network access is disabled.');
+    },
+  });
+  const catalog = await backend.catalog('openai', 'api_key');
+  const directory = await mkdtemp(join(tmpdir(), 'nod-work-model-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const chosen: Array<string | undefined> = [];
+  const requests: Array<{ model: string; history: string }> = [];
+  const agent = createPiAgent({
+    provider: 'openai',
+    resolve: async (choice) => {
+      chosen.push(choice?.modelId);
+      return {
+        provider: 'openai',
+        method: 'api_key',
+        definition: catalog.find((item) => item.choice.id === (choice?.modelId ?? 'gpt-6.1-sol'))!,
+        effort: choice?.effort ?? 'high',
+        read: async () => ({ type: 'api_key', key: 'fixture-openai-key' }),
+      };
+    },
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.agent.streamFunction = (model, context) => {
+        requests.push({ model: model.id, history: JSON.stringify(context.messages) });
+        const stream = createAssistantMessageEventStream();
+        stream.push({
+          type: 'done',
+          reason: 'stop',
+          message: {
+            ...fauxAssistantMessage([{ type: 'text', text: 'Synthetic check' }]),
+            provider: model.provider,
+            model: model.id,
+            api: model.api,
+          },
+        });
+        return stream;
+      };
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const threadId = randomUUID();
+  const observer = randomUUID();
+  const light: ModelSelection = {
+    connectionId: randomUUID(),
+    modelId: 'gpt-6-luna',
+    effort: 'low',
+  };
+  const main: ModelSelection = { ...light, modelId: 'gpt-6.1-sol', effort: 'high' };
+  const check = async (prompt: string, model?: ModelSelection) => {
+    const session = await agent.open({
+      ...fakeExecution(threadId),
+      sessionId: observer,
+      ...(model ? { model } : {}),
+      restricted: true,
+      restartable: true,
+      systemPrompt: 'Fixture system',
+      ...sandbox,
+      tools: [],
+      shouldStop: () => false,
+      onEvent() {},
+    });
+    await session.prompt(prompt, []);
+    await session.dispose();
+  };
+  await check('Synthetic first batch', light);
+  await check('Synthetic second batch', light);
+  await check('Synthetic third batch', main);
+  await check('Synthetic fourth batch');
+  assert.deepEqual(chosen, ['gpt-6-luna', 'gpt-6-luna', 'gpt-6.1-sol', undefined]);
+  assert.deepEqual(
+    requests.map((request) => request.model),
+    ['gpt-6-luna', 'gpt-6-luna', 'gpt-6.1-sol', 'gpt-6.1-sol'],
+  );
+  assert.ok(requests[1]!.history.includes('Synthetic first batch'));
+  assert.ok(!requests[2]!.history.includes('Synthetic second batch'));
+  assert.ok(requests[3]!.history.includes('Synthetic third batch'));
 });
 
 test('a failed model request leaves none of its unanswered input for later turns', async (t) => {

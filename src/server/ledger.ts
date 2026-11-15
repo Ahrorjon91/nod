@@ -9,6 +9,7 @@ import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import type { Agent, AgentSessionOptions } from '../ports/agent.ts';
 import type { ExecutionScope } from '../shared/execution.ts';
+import type { WorkKind, WorkUsage } from '../shared/models.ts';
 import type { ProviderUsageEvent, UsageTelemetry } from '../ports/provider-usage.ts';
 import type { MemoryCurator } from '../ports/memory-curator.ts';
 import type { DecisionModel } from '../ports/decisions.ts';
@@ -22,6 +23,7 @@ import type {
 } from '../shared/trust.ts';
 import { trustStepPage as stepPage } from '../shared/trust.ts';
 import { becauseOf, type TrustBasis } from './trust-basis.ts';
+import { workKindSql, workOriginSql } from './turn-chain.ts';
 import { recordedAction, toolTitle } from './action-presentation.ts';
 import { workspaceCommandsSql, workspaceCommand } from './workspace-commands.ts';
 import { formattingLocale, localeRegion, timeZoneRegion } from '../shared/date-locale.ts';
@@ -790,6 +792,80 @@ export function createLedger({
     return Object.fromEntries(rows.map(({ sessionId, costUsd }) => [sessionId, costUsd]));
   }
 
+  const usageColumns = `
+    COALESCE(sum((m.details->>'inputTokens')::float8) FILTER (WHERE m.details->>'category'='agent'),0) AS input,
+    COALESCE(sum((m.details->>'outputTokens')::float8) FILTER (WHERE m.details->>'category'='agent'),0) AS output,
+    COALESCE(sum((m.details->>'cacheReadTokens')::float8) FILTER (WHERE m.details->>'category'='agent'),0) AS "cacheRead",
+    COALESCE(sum((m.details->>'cacheWriteTokens')::float8) FILTER (WHERE m.details->>'category'='agent'),0) AS "cacheWrite",
+    COALESCE(sum(COALESCE(m.cost_usd,(m.details->>'estimateUsd')::float8)) FILTER (WHERE m.details->>'category'='agent'),0)::float8 AS "agentUsd",
+    COALESCE(sum(COALESCE(m.cost_usd,(m.details->>'estimateUsd')::float8)) FILTER (WHERE m.details->>'category' IS DISTINCT FROM 'agent'),0)::float8 AS "otherUsd",
+    COALESCE(array_agg(DISTINCT m.details->>'model') FILTER (WHERE m.details->>'category'='agent' AND m.details->>'model' IS NOT NULL),'{}') AS models`;
+
+  async function sessionUsage(sessionIds: string[]): Promise<Record<string, WorkUsage>> {
+    if (!sessionIds.length) return {};
+    const { rows } = await pool.query<WorkUsage & { sessionId: string }>(
+      `SELECT u.session_id AS "sessionId",${usageColumns}
+       FROM model_usage m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+       WHERE m.owner_id=$1 AND u.session_id=ANY($2::uuid[]) GROUP BY u.session_id`,
+      [ownerId, [...new Set(sessionIds)]],
+    );
+    return Object.fromEntries(rows.map(({ sessionId, ...usage }) => [sessionId, usage]));
+  }
+
+  async function workUsage() {
+    const { rows } = await pool.query<
+      WorkUsage & { kind: WorkKind; scheduleId: string | null; taskId: string | null; own: boolean }
+    >(
+      `WITH recent AS (
+         SELECT m.owner_id,m.cost_usd,m.details,u.session_id,u.thread_id FROM model_usage m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+         WHERE m.owner_id=$1 AND m.created_at>=now()-interval '30 days'
+       ), sessions AS (
+         SELECT x.session_id,${workKindSql('x')} AS kind,work_schedule.id::text AS schedule_id,
+           work_task.id::text AS task_id,
+           (work_task.model IS NOT NULL OR work_schedule.model IS NOT NULL) AS own
+         FROM (SELECT DISTINCT owner_id,session_id,thread_id FROM recent) x ${workOriginSql('x')}
+       )
+       SELECT x.kind,x.schedule_id AS "scheduleId",x.task_id AS "taskId",x.own,${usageColumns}
+       FROM recent m JOIN sessions x ON x.session_id=m.session_id
+       GROUP BY x.kind,x.schedule_id,x.task_id,x.own`,
+      [ownerId],
+    );
+    const empty = (): WorkUsage => ({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      agentUsd: 0,
+      otherUsd: 0,
+      models: [],
+    });
+    const add = (target: WorkUsage, usage: WorkUsage) => {
+      for (const key of [
+        'input',
+        'output',
+        'cacheRead',
+        'cacheWrite',
+        'agentUsd',
+        'otherUsd',
+      ] as const)
+        target[key] += Number(usage[key]);
+      target.models = [...new Set([...target.models, ...usage.models])].sort();
+    };
+    const lanes: Record<WorkKind, WorkUsage> = {
+      chat: empty(),
+      schedule: empty(),
+      background: empty(),
+    };
+    const schedules: Record<string, WorkUsage> = {};
+    const tasks: Record<string, WorkUsage> = {};
+    for (const { kind, scheduleId, taskId, own, ...usage } of rows) {
+      if (!own) add(lanes[kind], usage);
+      if (scheduleId) add((schedules[scheduleId] ??= empty()), usage);
+      if (taskId) add((tasks[taskId] ??= empty()), usage);
+    }
+    return { lanes, schedules, tasks };
+  }
+
   async function recentTurnCost(turnId?: string) {
     const { rows } = await pool.query<{ cost: number | null }>(
       `SELECT COALESCE((SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY cost) FROM (
@@ -1171,6 +1247,7 @@ export function createLedger({
       return { command: workspaceCommand(rows[0]) };
     });
     app.put('/api/trust/limit', (request) => setLimits(request.body));
+    app.get('/api/usage/work', () => workUsage());
   }
 
   async function setLimits(input: unknown, actor: SettingActor = 'owner', shared?: PoolClient) {
@@ -1245,6 +1322,8 @@ export function createLedger({
     setLimits,
     onboard,
     sessionCosts,
+    sessionUsage,
+    workUsage,
     recentTurnCost,
     withTurn: <T>(turnId: string, run: () => T, overLimit = false, automatic = true) =>
       activeTurn.run({ id: turnId, automatic }, () =>

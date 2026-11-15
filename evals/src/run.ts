@@ -21,6 +21,7 @@ export const defaultJudge = 'anthropic/claude-sonnet-5-5';
 export interface RunOptions {
   root: string;
   model?: string;
+  backgroundModel?: string;
   effort?: ModelEffort;
   judge?: string;
   repeat: number;
@@ -119,11 +120,12 @@ export function select(
 async function attemptOnce(options: {
   directory: string;
   model: string;
+  backgroundModel?: string;
   effort?: ModelEffort;
   judge: string;
   task: { item: (typeof scenarios)[number]; attempt: number };
 }) {
-  const { directory, model, effort, judge, task } = options;
+  const { directory, model, backgroundModel, effort, judge, task } = options;
   const file = join(directory, 'attempts', `${task.item.id}.${task.attempt}.json`);
   const specPath = join(tmpdir(), `nod-eval-${randomUUID()}.json`);
   await writeFile(
@@ -133,6 +135,7 @@ async function attemptOnce(options: {
       attempt: task.attempt,
       outFile: file,
       model,
+      ...(backgroundModel ? { backgroundModel } : {}),
       effort,
       judge,
     }),
@@ -265,6 +268,7 @@ export async function runSuite(options: RunOptions) {
       dirty: options.ref ? false : git('status', '--porcelain', '--', 'src', 'evals').length > 0,
       ...(options.ref ? { ref: options.ref } : {}),
       model,
+      ...(options.backgroundModel ? { backgroundModel: options.backgroundModel } : {}),
       effort: options.effort ?? 'high',
       judge,
       repeat: options.repeat,
@@ -332,6 +336,7 @@ export async function runSuite(options: RunOptions) {
           result = await attemptOnce({
             directory,
             model,
+            ...(options.backgroundModel ? { backgroundModel: options.backgroundModel } : {}),
             effort: options.effort ?? 'high',
             judge,
             task,

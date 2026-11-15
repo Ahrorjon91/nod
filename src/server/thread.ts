@@ -24,7 +24,13 @@ import { PgBoss } from 'pg-boss';
 import type { Pool, PoolClient } from 'pg';
 import { cancellationTransaction, pool } from './db.ts';
 import { afterCommit, afterRollback, transaction } from './transaction.ts';
-import { laterSupersedingTurnSql, turnChainSql, withdrawnSql } from './turn-chain.ts';
+import {
+  laterSupersedingTurnSql,
+  turnChainSql,
+  withdrawnSql,
+  workKindSql,
+  workOriginSql,
+} from './turn-chain.ts';
 import { dataRoot, databaseUrl, ownerId } from './config.ts';
 import { delta, refresh, working } from './events.ts';
 import {
@@ -60,6 +66,7 @@ import { inlineAppResult, noMailCheck, type MailCheck } from './integration-resu
 import { saveIntegrationFiles } from './integration-files.ts';
 import { spendingLimitReached, spendingLimitText } from './ledger.ts';
 import type { ExecutionEvent } from '../shared/execution.ts';
+import type { ModelSelection, WorkKind } from '../shared/models.ts';
 import { lockKey } from './locks.ts';
 import { redactSecretText } from './redaction.ts';
 import { resemblesTaskAcknowledgement } from '../shared/task-ack.ts';
@@ -142,6 +149,9 @@ export interface ThreadDependencies {
   proactivity?: (turn: TurnRef, signal: AbortSignal) => Promise<RuntimeContext['proactivity']>;
   analytics?: CaptureAnalytics;
   currentModel?: () => { provider: string; name: string; configured: boolean };
+  workModel?: (
+    turnId: string,
+  ) => Promise<{ selection: ModelSelection; provider: string; name: string } | undefined>;
   present?: (
     threadId: string,
     input:
@@ -1009,6 +1019,21 @@ export async function reactToAssistantMessage(
   return result;
 }
 
+export async function workOrigin(turnId: string, client: Pool | PoolClient = pool) {
+  const row = (
+    await client.query<{
+      kind: WorkKind;
+      task: ModelSelection | null;
+      schedule: ModelSelection | null;
+    }>(
+      `SELECT ${workKindSql('cur')} AS kind,work_task.model AS task,work_schedule.model AS schedule
+       FROM turns cur ${workOriginSql('cur')} WHERE cur.id=$1 AND cur.owner_id=$2`,
+      [turnId, ownerId],
+    )
+  ).rows[0];
+  return row && { kind: row.kind, task: row.task, schedule: row.schedule };
+}
+
 export async function resumeTurn(
   turnId: string,
   sourceId: string,
@@ -1653,7 +1678,16 @@ async function analyticsWork(turn: any) {
 async function executeTurn(turn: any, dependencies: ThreadDependencies) {
   const startedAt = Date.now();
   const providerChannel = String(turn.channel).split(':')[0];
-  const selectedModel = dependencies.currentModel?.();
+  let routed: Awaited<ReturnType<NonNullable<ThreadDependencies['workModel']>>>;
+  let routeError: unknown;
+  try {
+    routed = await dependencies.workModel?.(turn.id);
+  } catch (error) {
+    routeError = error;
+  }
+  const selectedModel = routed
+    ? { provider: routed.provider, name: routed.name, configured: true }
+    : dependencies.currentModel?.();
   const model = selectedModel?.configured
     ? analyticsModel(selectedModel.provider, selectedModel.name)
     : undefined;
@@ -1977,6 +2011,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       } catch (error) {
         logFailure('schedule_cache_policy_failed', error, { threadId, turnId });
       }
+    if (routeError) throw routeError;
     const result = await dependencies.runTurn({
       threadId,
       turnId,
@@ -1985,6 +2020,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       prompt: turn.prompt,
       background: turn.background,
       ...(scheduleCache ? { scheduleCache } : {}),
+      ...(routed ? { model: routed.selection } : {}),
       channel: String(turn.channel).split(':')[0],
       ...loaded.context,
       speech,

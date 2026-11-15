@@ -126,6 +126,7 @@ test(
       {
         subagents: boolean;
         sequential?: boolean;
+        chatOnly?: boolean;
         calls: Array<{ tool?: string; action: string; args: Record<string, unknown> }>;
       }
     >();
@@ -172,6 +173,7 @@ test(
     let changedRulesDuringDraftRead = 0;
     let repeatAfterConfirm: { action: string; args: Record<string, unknown> } | undefined;
     const prompts = new Map<string, string>();
+    const opened: Array<{ turnId: string; model?: string; helper: boolean }> = [];
     const integrationFixture = createIntegrationFixture(`http://localhost:${port}`);
     const { createModelService } = await import('../src/server/models.ts');
     const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
@@ -276,6 +278,11 @@ test(
         models,
         agent: {
           async open(options) {
+            opened.push({
+              turnId: options.turnId,
+              model: options.model?.modelId,
+              helper: options.ephemeral === true,
+            });
             reportClosingUsage = () =>
               options.onEvent({
                 type: 'provider_usage',
@@ -319,16 +326,21 @@ test(
                     .catch(() => {});
                   return;
                 }
-                const batch =
+                const planned =
                   phase === 0
                     ? batches.get(
                         JSON.parse(text.split('Request data (JSON):\n')[1]!.split('\n')[0]!)
                           .currentInstruction,
                       )
                     : undefined;
+                const batch =
+                  planned?.chatOnly && options.sessionId !== options.threadId ? undefined : planned;
                 if (batch) {
                   if (batch.sequential) {
-                    for (const call of batch.calls) await tool('apps').execute(call);
+                    for (const call of batch.calls)
+                      await (call.tool
+                        ? tool(call.tool).execute({ action: call.action, ...call.args })
+                        : tool('apps').execute(call));
                     return;
                   }
                   await Promise.allSettled(
@@ -370,7 +382,8 @@ test(
                             ? { input: plan.args }
                             : plan.tool === 'browser' ||
                                 plan.tool === 'sign_in' ||
-                                plan.tool === 'files'
+                                plan.tool === 'files' ||
+                                plan.tool === 'task'
                               ? { action: plan.action, ...plan.args }
                               : { action: plan.action, args: plan.args },
                       ),
@@ -654,13 +667,170 @@ test(
           await waitFor(response.json().turnId, 'succeeded');
           assert.deepEqual(models.view().selection, input);
           assert.equal((await approvalsFor(turn))[0].status, 'completed');
-          const directText = 'Use the first connected model again.';
+          const light = { connectionId: connection.id, modelId: 'gpt-6-luna' };
+          const directText =
+            'Use the first connected model again, your light model for your own checks, and the light model for the routed research.';
           asked.add(directText);
-          plans.set(directText, { action: 'model_select', args: { ...before! } });
+          batches.set(directText, {
+            subagents: false,
+            sequential: true,
+            chatOnly: true,
+            calls: [
+              { tool: 'manage_personal_context', action: 'model_select', args: { args: before! } },
+              {
+                tool: 'manage_personal_context',
+                action: 'model_select',
+                args: { args: { scope: 'background', use: 'light' } },
+              },
+              {
+                tool: 'task',
+                action: 'start',
+                args: {
+                  title: 'Routed research',
+                  doneWhen: 'Synthetic research is done.',
+                  now: 'Starting synthetic research.',
+                  message: 'Starting the synthetic research.',
+                  model: light,
+                },
+              },
+            ],
+          });
+          const errors = batchErrors.length;
           const direct = await request('POST', '/api/messages', { text: directText });
           await waitFor(direct.json().turnId, 'succeeded');
+          assert.deepEqual(batchErrors.slice(errors), []);
           assert.deepEqual(models.view().selection, before);
           assert.equal((await approvalsFor(direct.json().turnId)).length, 0);
+          assert.deepEqual(models.view().routes, { background: 'light' });
+          assert.equal(models.view().light?.modelId, 'gpt-6-luna');
+          assert.ok(
+            fallbackChecks.some((input) =>
+              JSON.stringify(input).includes('work Nod starts on its own'),
+            ),
+          );
+          assert.equal((await models.resolve()).definition.choice.id, 'gpt-6.1-sol');
+
+          const modelsOf = (turnId: string) =>
+            opened.filter((entry) => entry.turnId === turnId).map((entry) => entry.model);
+          const put = (url: string, payload: object) =>
+            application.app.inject({ method: 'PUT', url, headers, payload });
+          const task = (
+            await pool.query<{ id: string; model: { modelId: string } }>(
+              "SELECT id,model FROM tasks WHERE title='Routed research'",
+            )
+          ).rows[0]!;
+          assert.equal(task.model.modelId, 'gpt-6-luna');
+          const taskTurn = (
+            await pool.query<{ id: string }>('SELECT id FROM turns WHERE session_id=$1', [task.id])
+          ).rows[0]!;
+          await waitFor(taskTurn.id, 'succeeded|waiting');
+          assert.deepEqual(modelsOf(taskTurn.id), ['gpt-6-luna']);
+          const listed = (await request('GET', '/api/tasks'))
+            .json<Task[]>()
+            .find((item) => item.id === task.id)!;
+          assert.equal(listed.work, 'chat');
+
+          const unasked = `Synthetic unasked task model ${randomUUID()}`;
+          plans.set(unasked, {
+            tool: 'task',
+            action: 'start',
+            args: {
+              title: 'Unasked routed research',
+              doneWhen: 'Synthetic research is done.',
+              now: 'Starting synthetic research.',
+              message: 'Starting the synthetic research.',
+              model: light,
+            },
+          });
+          const refused = await enqueueTurn(unasked, { source: 'task', background: false });
+          await waitFor(refused, 'succeeded|failed');
+          assert.match(
+            (await pool.query('SELECT error FROM turns WHERE id=$1', [refused])).rows[0].error ??
+              JSON.stringify(results.get(refused)),
+            /did not ask for a model/,
+          );
+          assert.equal(
+            (await pool.query("SELECT 1 FROM tasks WHERE title='Unasked routed research'"))
+              .rowCount,
+            0,
+          );
+
+          const eventPrompt = `Synthetic app event ${randomUUID()}`;
+          batches.set(eventPrompt, {
+            subagents: true,
+            calls: [{ action: 'GMAIL_FETCH_EMAILS', args: { max_results: 1 } }],
+          });
+          const event = await enqueueTurn(eventPrompt, { source: 'event', background: true });
+          await waitFor(event, 'succeeded');
+          const eventOpens = opened.filter((entry) => entry.turnId === event);
+          assert.ok(eventOpens.some((entry) => entry.helper));
+          assert.ok(eventOpens.every((entry) => entry.model === 'gpt-6-luna'));
+
+          const created = await request('POST', '/api/schedules', {
+            title: 'Synthetic routed schedule',
+            prompt: 'Return the synthetic routed summary.',
+            kind: 'once',
+            runAt: '2099-01-01T09:00:00Z',
+            timeZone: 'UTC',
+          });
+          assert.equal(created.statusCode, 200, created.body);
+          const schedule = created.json();
+          const run = async () => {
+            const revision = (await request('GET', '/api/schedules'))
+              .json()
+              .find((item: { id: string }) => item.id === schedule.id).revision;
+            const response = await request('POST', `/api/schedules/${schedule.id}/run`, {
+              requestId: randomUUID(),
+              expectedRevision: revision,
+            });
+            assert.equal(response.statusCode, 200, response.body);
+            await waitFor(response.json().turnId, 'succeeded');
+            return response.json().turnId as string;
+          };
+          assert.deepEqual(modelsOf(await run()), ['gpt-6.1-sol']);
+          const lightChoice = models.view().light!;
+          const pinned = await put(`/api/schedules/${schedule.id}/model`, { model: lightChoice });
+          assert.equal(pinned.statusCode, 200, pinned.body);
+          const second = await run();
+          assert.deepEqual(modelsOf(second), ['gpt-6-luna']);
+
+          const before30 = (await request('GET', '/api/usage/work')).json();
+          for (const [turnId, model, input] of [
+            [direct.json().turnId, 'gpt-6.1-sol', 1000],
+            [event, 'gpt-6-luna', 2000],
+            [second, 'gpt-6-luna', 4000],
+            [taskTurn.id, 'gpt-6-luna', 8000],
+          ] as const)
+            await pool.query(
+              'INSERT INTO model_usage(id,owner_id,turn_id,cost_usd,details) VALUES($1,$2,$3,$4,$5)',
+              [
+                randomUUID(),
+                ownerId,
+                turnId,
+                input / 1e6,
+                { category: 'agent', model, inputTokens: input, outputTokens: 0 },
+              ],
+            );
+          const after30 = (await request('GET', '/api/usage/work')).json();
+          const grew = (now?: { input: number }, then?: { input: number }) =>
+            (now?.input ?? 0) - (then?.input ?? 0);
+          assert.equal(grew(after30.lanes.chat, before30.lanes.chat), 1000);
+          assert.equal(grew(after30.lanes.background, before30.lanes.background), 2000);
+          assert.equal(grew(after30.lanes.schedule, before30.lanes.schedule), 0);
+          assert.equal(grew(after30.schedules[schedule.id], before30.schedules[schedule.id]), 4000);
+          assert.equal(grew(after30.tasks[task.id], before30.tasks[task.id]), 8000);
+
+          const back = await put(`/api/tasks/${task.id}/model`, { model: null });
+          assert.equal(back.statusCode, 200, back.body);
+          assert.equal(back.json<Task>().model, null);
+          assert.equal(
+            (await put(`/api/tasks/${randomUUID()}/model`, { model: null })).statusCode,
+            404,
+          );
+          await request('POST', `/api/tasks/${task.id}/stop`);
+          await request('DELETE', `/api/schedules/${schedule.id}`);
+          const reset = await put('/api/models/routes', { lane: 'background', route: null });
+          assert.equal(reset.statusCode, 200, reset.body);
           await assert.rejects(
             application.personal.manage('model_select', {
               ...input,

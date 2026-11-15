@@ -2890,7 +2890,12 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     const models = saved.view().connections[0].models;
     assert.deepEqual(
       models.filter((model) => model.id !== 'fixture/small').map((model) => model.pricing),
-      [{ input: 1.25, output: 5 }, { input: 0, output: 0 }, 'variable', 'variable'],
+      [
+        { input: 1.25, output: 5, cacheRead: 0, cacheWrite: 0 },
+        { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        'variable',
+        'variable',
+      ],
     );
     const small = models[1].pricing;
     assert.ok(small && small !== 'variable');
@@ -3050,7 +3055,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     );
     assert.equal((await f.database.query('SELECT * FROM vault_app_grants')).rowCount, 0);
     const removed = await f.create('fixture-environment-owner', backend, modelEnvironment({}));
-    assert.deepEqual(removed.view(), { connections: [], selection: null });
+    assert.deepEqual(removed.view(), { connections: [], selection: null, routes: {}, light: null });
     await assert.rejects(removed.resolve());
     for (const access of captured) assert.equal(await access.read(), undefined);
   });
@@ -3417,6 +3422,111 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     assert.equal(await access.read(), undefined);
     assert.equal(owner.hasImageModel(), false);
     assert.equal((await owner.resolve()).definition.choice.images, false);
+  });
+
+  test('work models follow own choices and lanes while checks keep the owner model', async (t) => {
+    const f = await fixture(t);
+    const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
+    let listed = ['gpt-6.1-sol', 'gpt-6-luna', 'gpt-audio-1.5'];
+    const backend = createPiModelBackend({
+      fetch: async () => Response.json({ data: listed.map((id) => ({ id })) }),
+    });
+    const owner = await f.create('fixture-work-model-owner', backend);
+    const events: Array<{ event: string; properties?: Record<string, unknown> }> = [];
+    const app = Fastify();
+    owner.register(app, (event) => void events.push(event));
+    t.after(() => app.close());
+    const route = (lane: string, value: unknown) =>
+      app.inject({ method: 'PUT', url: '/api/models/routes', payload: { lane, route: value } });
+    const connectionId = await owner.addKey('openai', 'fixture-work-model-key');
+    const main = { connectionId, modelId: 'gpt-6.1-sol', effort: 'high' as const };
+    await owner.select(main);
+    const light = owner.view().light!;
+    assert.equal(light.modelId, 'gpt-6-luna');
+    for (const kind of ['chat', 'schedule', 'background'] as const)
+      assert.deepEqual(owner.workModel({ kind }), { selection: main, follows: 'chat' });
+
+    assert.equal((await route('background', 'light')).statusCode, 200);
+    assert.deepEqual(owner.workModel({ kind: 'background' }), {
+      selection: light,
+      follows: 'light',
+    });
+    assert.deepEqual(owner.workModel({ kind: 'schedule' }).selection, main);
+    assert.equal((await owner.resolve()).definition.choice.id, 'gpt-6.1-sol');
+    assert.equal(
+      (await owner.resolve(false, owner.workModel({ kind: 'background' }).selection)).definition
+        .choice.id,
+      'gpt-6-luna',
+    );
+    assert.equal(await owner.automaticRequestsAllowed('background'), true);
+
+    const pinned = { ...main, effort: 'low' as const };
+    assert.deepEqual(owner.workModel({ kind: 'background', task: pinned }), {
+      selection: pinned,
+      follows: 'task',
+    });
+    assert.deepEqual(owner.workModel({ kind: 'schedule', schedule: light }), {
+      selection: light,
+      follows: 'schedule',
+    });
+    assert.deepEqual(owner.workModel({ kind: 'chat', schedule: light }).selection, main);
+
+    const audio = owner
+      .view()
+      .connections[0]!.models.find((model) => model.id === 'gpt-audio-1.5')!;
+    for (const invalid of [
+      { ...main, modelId: audio.id, effort: audio.efforts[0] ?? 'high' },
+      { ...main, modelId: 'fixture-missing-model' },
+      { ...main, effort: 'off' },
+      { ...main, connectionId: randomUUID() },
+      'heavy',
+    ])
+      assert.equal((await route('schedule', invalid)).statusCode, 400, JSON.stringify(invalid));
+    assert.deepEqual(owner.view().routes, { background: 'light' });
+
+    assert.equal((await route('schedule', light)).statusCode, 200);
+    assert.deepEqual(owner.workModel({ kind: 'schedule' }), { selection: light, follows: 'lane' });
+
+    listed = ['gpt-6.1-sol'];
+    await owner.refreshCatalog(connectionId);
+    assert.equal(owner.view().light, null);
+    assert.deepEqual(owner.workModel({ kind: 'background' }), { selection: main, follows: 'chat' });
+    assert.throws(() => owner.workModel({ kind: 'schedule' }), /gpt-6-luna/);
+    assert.throws(() => owner.workModel({ kind: 'chat', task: light }), /gpt-6-luna/);
+    assert.equal(await owner.automaticRequestsAllowed('background'), true);
+    listed = ['gpt-6.1-sol', 'gpt-6-luna'];
+    await owner.refreshCatalog(connectionId);
+
+    await f.database.query('UPDATE model_settings SET routes=$2 WHERE owner_id=$1', [
+      'fixture-work-model-owner',
+      JSON.stringify({ background: 'light', schedule: { ...main, effort: 'off' } }),
+    ]);
+    const restarted = await f.create('fixture-work-model-owner', backend);
+    assert.deepEqual(restarted.workModel({ kind: 'schedule' }).selection, main);
+
+    const second = await owner.addKey('openai', 'fixture-work-model-second');
+    assert.equal((await route('schedule', { ...main, connectionId: second })).statusCode, 200);
+    await owner.remove(second);
+    assert.deepEqual(owner.view().routes, { background: 'light' });
+    assert.deepEqual(
+      owner.workModel({ kind: 'schedule', schedule: { ...main, connectionId: second } }),
+      { selection: main, follows: 'chat' },
+    );
+
+    assert.equal((await route('background', null)).statusCode, 200);
+    assert.deepEqual(owner.view().routes, { background: null });
+    assert.deepEqual(owner.workModel({ kind: 'background' }).selection, main);
+    const routeEvents = events
+      .filter(({ event }) => event === 'setting_changed')
+      .map(({ properties }) => properties)
+      .filter((properties) => String(properties?.setting).startsWith('model_route'));
+    assert.deepEqual(routeEvents, [
+      { setting: 'model_route_background', actor: 'owner', state: 'light' },
+      { setting: 'model_route_schedule', actor: 'owner', state: 'configured' },
+      { setting: 'model_route_schedule', actor: 'owner', state: 'configured' },
+      { setting: 'model_route_background', actor: 'owner', state: 'default' },
+    ]);
+    assert.doesNotMatch(JSON.stringify(routeEvents), /gpt-|[0-9a-f]{8}-/);
   });
 
   test('classification resolves an approved small model only on the selected owned connection', async (t) => {

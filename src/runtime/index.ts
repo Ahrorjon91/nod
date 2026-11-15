@@ -887,6 +887,7 @@ export function createAgentRuntime(dependencies: {
         try {
           child = await agent.open({
             ...source,
+            ...(context.model ? { model: context.model } : {}),
             automatic: !context.currentMessageId,
             ephemeral: true,
             systemPrompt: system,
@@ -1056,6 +1057,7 @@ export function createAgentRuntime(dependencies: {
       await context.emit('agent_start', 'Main agent', { execution });
       const opening = agent.open({
         ...execution,
+        ...(context.model ? { model: context.model } : {}),
         automatic: !context.currentMessageId,
         ...(context.proactivity ? { restricted: true, restartable: !context.resumed } : {}),
         ...(context.scheduleCache ? { scheduleCache: context.scheduleCache } : {}),

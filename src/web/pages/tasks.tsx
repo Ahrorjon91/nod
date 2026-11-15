@@ -37,6 +37,7 @@ import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { post, errorMessage } from '../lib/api';
 import { ScheduleRow } from './schedule';
 import { LiveLine } from '../components/live-line';
+import { WorkModel } from '../components/model-choices';
 
 const icons = {
   queued: Clock,
@@ -334,6 +335,7 @@ export function TaskCard({
                 )}
               </ul>
             )}
+            {!closed(task) && task.work && <WorkModel task={task} />}
             {(task.revision ?? 0) > (task.appliedRevision ?? 0) && !closed(task) && (
               <p className="task-preview-meta">Owner update queued</p>
             )}

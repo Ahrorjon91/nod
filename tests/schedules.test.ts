@@ -877,6 +877,136 @@ test(
         },
       );
       await t.test(
+        'a schedule model changes only the model of its next runs and reprices its month',
+        async (t) => {
+          const { createLedger } = await import('../src/server/ledger.ts');
+          const ledger = createLedger({ pool: db.pool, ownerId });
+          await ledger.initialize();
+          const connectionId = randomUUID();
+          const main = { connectionId, modelId: 'gpt-6.1-sol', effort: 'high' };
+          const light = { connectionId, modelId: 'gpt-6-luna', effort: 'low' };
+          const prices: Record<string, { input: number; output: number }> = {
+            'gpt-6.1-sol': { input: 2, output: 10 },
+            'gpt-6-luna': { input: 0.1, output: 0.5 },
+          };
+          const modelled = createPersonalService({
+            pool: db.pool,
+            ownerId,
+            scheduler: thread.boss,
+            now: () => clock,
+            enqueueTurn: thread.enqueueTurn,
+            refresh() {},
+            sessionCosts: ledger.sessionCosts,
+            sessionUsage: ledger.sessionUsage,
+            validateModel: (choice) => {
+              if (!prices[choice.modelId])
+                throw Object.assign(new Error('Choose an available text model and effort.'), {
+                  statusCode: 400,
+                });
+              return choice;
+            },
+            workPricing: (own) => {
+              const modelId = own?.modelId ?? main.modelId;
+              return { modelId, pricing: prices[modelId] };
+            },
+          });
+          const modelledApp = Fastify();
+          modelledApp.setErrorHandler((error, _request, reply) => {
+            const value = error as Error & { statusCode?: number };
+            reply
+              .code(error instanceof z.ZodError ? 400 : (value.statusCode ?? 500))
+              .send({ error: value.message });
+          });
+          modelled.registerRoutes(modelledApp);
+          t.after(() => modelledApp.close());
+          const send = (method: 'POST' | 'PUT', url: string, payload: unknown) =>
+            modelledApp.inject({ method, url, payload: payload as object });
+          const setModel = (id: string, model: unknown) =>
+            send('PUT', `/api/schedules/${id}/model`, { model });
+          clock = new Date('2035-10-26T12:00:00.000Z');
+          const fixture = {
+            title: 'Fixture modelled schedule',
+            prompt: 'Return a synthetic modelled result only.',
+            timeZone: 'Europe/Lisbon',
+            kind: 'recurring',
+            cron: '15 8 * * *',
+          };
+          assert.equal(
+            (
+              await send('POST', '/api/schedules', {
+                ...fixture,
+                model: { ...light, modelId: 'fixture-unavailable' },
+              })
+            ).statusCode,
+            400,
+          );
+          const created = await send('POST', '/api/schedules', { ...fixture, model: light });
+          assert.equal(created.statusCode, 200, created.body);
+          const schedule = created.json<Schedule>();
+          assert.deepEqual(schedule.model, light);
+          const before = (
+            await db.pool.query('SELECT revision,job_id,next_run_at FROM schedules WHERE id=$1', [
+              schedule.id,
+            ])
+          ).rows[0];
+          const changed = await setModel(schedule.id, main);
+          assert.equal(changed.statusCode, 200, changed.body);
+          assert.deepEqual(changed.json<Schedule>().model, main);
+          assert.deepEqual(
+            (
+              await db.pool.query('SELECT revision,job_id,next_run_at FROM schedules WHERE id=$1', [
+                schedule.id,
+              ])
+            ).rows[0],
+            before,
+          );
+          assert.equal(
+            (await setModel(schedule.id, { ...main, modelId: 'gpt-x' })).statusCode,
+            400,
+          );
+          assert.equal((await setModel(randomUUID(), main)).statusCode, 404);
+          assert.deepEqual((await modelled.getSchedule(schedule.id)).model, main);
+
+          clock = new Date(schedule.nextRun!);
+          await deliver([await jobFor(schedule.id)]);
+          const [run] = await runs(schedule.id);
+          assert.ok(run);
+          assert.deepEqual(await thread.workOrigin(run.turnId), {
+            kind: 'schedule',
+            task: null,
+            schedule: main,
+          });
+          await thread.resumeTurn(run.turnId, `fixture-resume:${run.turnId}`, 'Continue.');
+          const resumed = (
+            await db.pool.query<{ id: string }>(
+              'SELECT id FROM turns WHERE parent_turn_id=$1 AND owner_id=$2',
+              [run.turnId, ownerId],
+            )
+          ).rows[0]!;
+          assert.equal((await thread.workOrigin(resumed.id))?.kind, 'schedule');
+
+          await db.pool.query(
+            `INSERT INTO model_usage(id,owner_id,turn_id,cost_usd,details) VALUES
+               ($1,$3,$4,3,'{"category":"agent","model":"gpt-6.1-sol","inputTokens":1000000,"outputTokens":100000}'),
+               ($2,$3,$4,0.01,'{"category":"review","model":"gpt-6.1-sol","inputTokens":5000}')`,
+            [randomUUID(), randomUUID(), ownerId, run.turnId],
+          );
+          await db.pool.query(
+            "UPDATE turns SET status='succeeded' WHERE id=$1 OR parent_turn_id=$1",
+            [run.turnId],
+          );
+          const monthly = async () => (await modelled.getSchedule(schedule.id)).monthlyUsd!;
+          const onMain = await monthly();
+          assert.ok(onMain > 0);
+          await setModel(schedule.id, light);
+          const onLight = await monthly();
+          assert.ok(Math.abs(onLight / onMain - (0.1 + 0.05 + 0.01) / 3.01) < 1e-9);
+          await setModel(schedule.id, null);
+          assert.equal((await modelled.getSchedule(schedule.id)).model, null);
+          assert.equal(await monthly(), onMain);
+        },
+      );
+      await t.test(
         'a recurring schedule starts no run while its last run is busy or waiting on the owner',
         async () => {
           const before = clock;
@@ -1548,6 +1678,7 @@ test('scheduled controls reconcile pause and delete after a client timeout', asy
     activeRun: null,
     baselineObservation: null,
     watch: null,
+    model: null,
     monthlyUsd: null,
   };
   let current: Schedule | null = schedule;

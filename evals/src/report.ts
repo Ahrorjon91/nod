@@ -33,7 +33,7 @@ export function terminal(summary: RunSummary, attempts: AttemptResult[], reviews
   const lines: string[] = [];
   lines.push(
     '',
-    `Run ${manifest.label}  ·  agent ${manifest.model}  ·  judge ${manifest.judge}  ·  ${manifest.ref ?? manifest.commit.slice(0, 7)}${manifest.dirty ? '+local changes' : ''}`,
+    `Run ${manifest.label}  ·  agent ${manifest.model}${manifest.backgroundModel ? `  ·  own work ${manifest.backgroundModel}` : ''}  ·  judge ${manifest.judge}  ·  ${manifest.ref ?? manifest.commit.slice(0, 7)}${manifest.dirty ? '+local changes' : ''}`,
     coverage(summary),
     '',
     combined.total

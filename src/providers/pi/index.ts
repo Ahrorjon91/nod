@@ -49,7 +49,7 @@ import {
 import { threadIdentity } from '../../ports/thread-identity.ts';
 import { createPiUsageTracker, piUsageMetrics, usageId } from './usage.ts';
 import { agentModels } from '../../shared/model-defaults.ts';
-import { lightestEffort } from '../../shared/models.ts';
+import { lightestEffort, type ModelSelection } from '../../shared/models.ts';
 import { createSandbox, workspaceOutputs, writeWorkspaceFile } from './sandbox.ts';
 import { untrustedBlock } from '../../shared/untrusted.ts';
 import { isPublicAddress, publicLookup } from '../agent-browser/network.ts';
@@ -437,7 +437,7 @@ function checkpointOversizedHistory(
 
 export function createPiAgent(options: {
   provider: string;
-  resolve?: () => Promise<ModelAccess>;
+  resolve?: (choice?: ModelSelection) => Promise<ModelAccess>;
   model?: string;
   apiKey?: string;
   sessionRoot: string;
@@ -455,7 +455,7 @@ export function createPiAgent(options: {
   return {
     async open(input) {
       if (disposed) throw new Error('The agent service has stopped.');
-      const access = await options.resolve?.();
+      const access = await options.resolve?.(input.model);
       if (input.automatic) await access?.prepareRequest?.(access.definition.choice.id, true);
       if (!access && !options.apiKey)
         throw new Error('Configure the selected model provider to enable the assistant.');
@@ -688,7 +688,10 @@ export function createPiAgent(options: {
       const restart =
         input.restartable === true &&
         prior.length > 0 &&
-        (!last || Date.now() - last.timestamp >= warmCache || priorTokens > budget.recent);
+        (!last ||
+          Date.now() - last.timestamp >= warmCache ||
+          priorTokens > budget.recent ||
+          ![model.id, connection?.textModel?.id].includes((last as { model?: string }).model));
       const cached: { owner?: string; stable?: string[] } = { owner: input.ownerContext };
       const keepCache =
         restart &&
