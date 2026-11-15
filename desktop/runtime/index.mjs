@@ -359,7 +359,13 @@ async function prepare(options, onComputerStart) {
   }
   status('starting', 'Starting your private computer…');
   onComputerStart();
-  await runLima(['start', '--tty=false', vm], { timeout: 600_000 });
+  try {
+    await runLima(['start', '--tty=false', vm], { timeout: 600_000 });
+  } catch (error) {
+    if (!exists && !signal?.aborted)
+      await runLima(['delete', '--force', vm], { timeout: 120_000 }).catch(() => {});
+    throw error;
+  }
   try {
     await runLima(['shell', vm, 'sudo', 'bash', '-s'], { input: protectGuest });
   } catch (error) {
