@@ -31,7 +31,7 @@ export async function prepare(stack: Stack, world: World, timeZone: string) {
     ...(world.rules ? { rules: world.rules } : {}),
   });
   if (stack.home)
-    await stack.pool.query('UPDATE preferences SET local_keep_out=$1', [
+    await stack.pool.query('UPDATE preferences SET local_files_enabled=true, local_keep_out=$1', [
       ['/Volumes', '/media', '/run/media'],
     ]);
   const slugs = world.apps?.services ?? [];
