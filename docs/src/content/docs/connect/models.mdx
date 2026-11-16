@@ -150,7 +150,13 @@ Nod loads tool-capable text models from your account's [model catalog](https://d
 
 For reasoning models, Nod offers effort levels from minimal to max. [Cortecs maps the requested effort](https://docs.cortecs.ai/routing/reasoning) to the levels the routed model supports. Nod doesn't offer an off setting because some models always reason.
 
-Each response is limited to 32,768 tokens, or the model's advertised output limit when smaller. Nod's history compaction still applies, even with a larger context window. Different Cortecs hosting providers can have different limits.
+Each response uses the smallest of these output limits:
+
+- 32,768 tokens.
+- The model's advertised output limit.
+- Half the model's context window, rounded down. For windows below 65,536 tokens, Nod uses one quarter instead.
+
+Nod's history compaction still applies, even with a larger context window. Different Cortecs hosting providers can have different limits.
 
 Usage estimates use catalog prices requested in USD, not Cortecs's default EUR prices. These are the cheapest available provider rates, not a billing guarantee. Routing, exchange rates, caching, and fees can change actual charges. Use Cortecs's own budget controls for a billing limit.
 
