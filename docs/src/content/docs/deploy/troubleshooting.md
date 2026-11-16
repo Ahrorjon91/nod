@@ -137,7 +137,7 @@ If the connection service refuses the request, the sign-in page names its reason
 
 ### An app tool fails with HTTP 403
 
-For an HTML `HTTP 403` from an app tool, Nod shows the UTC time and available Cloudflare Ray ID for support. Remove the displayed `0x` prefix before looking up the Ray ID in Cloudflare.
+If an app tool error shows `HTTP 403` and a UTC time, [send feedback with a diagnostic report](/deploy/troubleshooting/#send-feedback-with-a-diagnostic-report). Include that time and any Cloudflare Ray ID in your feedback text. The displayed `0x` is a formatting prefix; support removes it before searching Cloudflare.
 
 ### App sign-in opens an unreachable address on a remote server
 

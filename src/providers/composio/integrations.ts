@@ -629,7 +629,8 @@ export function createComposioProvider(options: {
             if (
               error instanceof APIError &&
               error.status === 403 &&
-              error.headers?.get('content-type')?.toLowerCase().startsWith('text/html')
+              error.headers?.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() ===
+                'text/html'
             ) {
               const ray = error.headers?.get('cf-ray');
               const rayId = ray && /^[0-9a-f]{16}-[A-Z]{3}$/i.test(ray) ? ray : undefined;

@@ -9390,14 +9390,14 @@ test('Composio failure envelopes reject with the provider error', async (t) => {
   };
   await session.execute('GMAIL_SEND_EMAIL', {}, 'fixture-account');
   const diagnosticRedactor = createFeedbackRedactor({ secrets: [], profile: { names: [] } });
-  for (const ray of [
-    '230b030023ae2822-SJC',
-    '1234567890123456-SJC',
-    'private-fixture-ray',
-    undefined,
-  ]) {
+  for (const [ray, contentType] of [
+    ['230b030023ae2822-SJC', ' TEXT/HTML ; charset=UTF-8 '],
+    ['1234567890123456-SJC', 'text/html;charset=utf-8'],
+    ['private-fixture-ray', 'text/html'],
+    [undefined, 'text/html'],
+  ] as const) {
     const headers = new Headers({
-      'content-type': 'text/html',
+      'content-type': contentType,
       'x-private': 'private-fixture-header',
     });
     if (ray) headers.set('cf-ray', ray);
@@ -9443,16 +9443,18 @@ test('Composio failure envelopes reject with the provider error', async (t) => {
     session.execute('GMAIL_FETCH_EMAILS', {}, 'fixture-account'),
     (error: unknown) => error === requestError,
   );
-  requestError = APIError.generate(
-    403,
-    undefined,
-    'synthetic-specific-provider-reason',
-    new Headers({ 'content-type': 'text/plain', 'cf-ray': '230b030023ae2822-SJC' }),
-  );
-  await assert.rejects(
-    session.execute('GMAIL_FETCH_EMAILS', {}, 'fixture-account'),
-    (error: unknown) => error === requestError,
-  );
+  for (const contentType of ['text/plain', 'text/htmlish; charset=utf-8']) {
+    requestError = APIError.generate(
+      403,
+      undefined,
+      'synthetic-specific-provider-reason',
+      new Headers({ 'content-type': contentType, 'cf-ray': '230b030023ae2822-SJC' }),
+    );
+    await assert.rejects(
+      session.execute('GMAIL_FETCH_EMAILS', {}, 'fixture-account'),
+      (error: unknown) => error === requestError,
+    );
+  }
 });
 
 test('Composio catalog and connection requests classify HTTP failures without exposing provider details', async (t) => {
