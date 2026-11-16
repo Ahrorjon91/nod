@@ -55,6 +55,7 @@ import { registerLocalAccess } from '../src/server/access.ts';
 import { createIntegrations, initializeIntegrationSchema } from '../src/server/integrations.ts';
 import { cachedIcons } from '../src/server/link-previews.ts';
 import { createErrorRedactor } from '../src/server/redaction.ts';
+import { createFeedbackRedactor } from '../src/server/feedback-redaction.ts';
 import { createLedger } from '../src/server/ledger.ts';
 import { createActivityLog } from '../src/server/activity-log.ts';
 import { createVaultAccess } from '../src/server/vault-access.ts';
@@ -9278,9 +9279,13 @@ test('Composio failure envelopes reject with the provider error', async (t) => {
     next_cursor: null,
   }));
   let result: Record<string, unknown> = {};
+  let requestError: APIError | undefined;
   t.mock.method(client.sessions, 'create', async () => ({
     sessionId: 'fixture-session',
-    execute: async () => result,
+    execute: async () => {
+      if (requestError) throw requestError;
+      return result;
+    },
   }));
   const session = await createComposioProvider({
     proxy: composioProxyFixture(client, 'local-development'),
@@ -9384,6 +9389,70 @@ test('Composio failure envelopes reject with the provider error', async (t) => {
     resultType: 'completed',
   };
   await session.execute('GMAIL_SEND_EMAIL', {}, 'fixture-account');
+  const diagnosticRedactor = createFeedbackRedactor({ secrets: [], profile: { names: [] } });
+  for (const ray of [
+    '230b030023ae2822-SJC',
+    '1234567890123456-SJC',
+    'private-fixture-ray',
+    undefined,
+  ]) {
+    const headers = new Headers({
+      'content-type': 'text/html',
+      'x-private': 'private-fixture-header',
+    });
+    if (ray) headers.set('cf-ray', ray);
+    requestError = APIError.generate(
+      403,
+      undefined,
+      '<html>private-fixture-response-body</html>',
+      headers,
+    );
+    const started = Date.now();
+    await assert.rejects(
+      session.execute('GMAIL_FETCH_EMAILS', {}, 'fixture-account'),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal((error as Error & { status?: number }).status, 403);
+        assert.match(error.message, /HTTP 403/);
+        const timestamp = error.message.match(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z/);
+        assert.ok(timestamp);
+        assert.ok(Date.parse(timestamp[0]) >= started - 1000);
+        assert.ok(Date.parse(timestamp[0]) <= Date.now() + 1000);
+        assert.doesNotMatch(error.message, /private-fixture/);
+        assert.equal(diagnosticRedactor.text(error.message), error.message);
+        assert.equal(
+          error.message.includes('0x230b030023ae2822-SJC'),
+          ray === '230b030023ae2822-SJC',
+        );
+        assert.equal(
+          error.message.includes('0x1234567890123456-SJC'),
+          ray === '1234567890123456-SJC',
+        );
+        assert.equal(error.cause, undefined);
+        return true;
+      },
+    );
+  }
+  requestError = APIError.generate(
+    403,
+    { error: 'installation_revoked' },
+    undefined,
+    new Headers({ 'content-type': 'application/json', 'cf-ray': '230b030023ae2822-SJC' }),
+  );
+  await assert.rejects(
+    session.execute('GMAIL_FETCH_EMAILS', {}, 'fixture-account'),
+    (error: unknown) => error === requestError,
+  );
+  requestError = APIError.generate(
+    403,
+    undefined,
+    'synthetic-specific-provider-reason',
+    new Headers({ 'content-type': 'text/plain', 'cf-ray': '230b030023ae2822-SJC' }),
+  );
+  await assert.rejects(
+    session.execute('GMAIL_FETCH_EMAILS', {}, 'fixture-account'),
+    (error: unknown) => error === requestError,
+  );
 });
 
 test('Composio catalog and connection requests classify HTTP failures without exposing provider details', async (t) => {

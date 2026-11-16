@@ -1,4 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import { APIError } from '@composio/client';
 import type { Composio, ToolRouterSession } from '@composio/core';
 import { z } from 'zod';
 import { composioActivity } from './activity.ts';
@@ -625,6 +626,20 @@ export function createComposioProvider(options: {
             maxRetries: 0,
           } as Parameters<typeof value.execute>[3])
           .catch((error: unknown) => {
+            if (
+              error instanceof APIError &&
+              error.status === 403 &&
+              error.headers?.get('content-type')?.toLowerCase().startsWith('text/html')
+            ) {
+              const ray = error.headers?.get('cf-ray');
+              const rayId = ray && /^[0-9a-f]{16}-[A-Z]{3}$/i.test(ray) ? ray : undefined;
+              throw Object.assign(
+                new Error(
+                  `The app request received HTTP 403 at ${new Date().toISOString()}${rayId ? ` (Cloudflare Ray ID 0x${rayId})` : ''}.`,
+                ),
+                { status: 403 },
+              );
+            }
             const kind = error instanceof Error ? error.constructor.name : '';
             const reason =
               kind === 'APIConnectionTimeoutError'
