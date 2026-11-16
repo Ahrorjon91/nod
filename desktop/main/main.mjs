@@ -167,6 +167,7 @@ let updateSource;
 let updates;
 let checkingUpdates;
 let updateRequestedManually = false;
+let updateRestartConfirmed = false;
 let updatePhase = 'idle';
 let updateProgress;
 let updateFailed = false;
@@ -1884,9 +1885,11 @@ async function checkForUpdates(manual = true, restartReady = false, confirmed = 
   if (!updates || quitting) return;
   if (checkingUpdates) {
     if (manual) updateRequestedManually = true;
+    if (confirmed) updateRestartConfirmed = true;
     return checkingUpdates;
   }
   updateRequestedManually = manual;
+  updateRestartConfirmed = confirmed;
   const release = () => {
     if (checkingUpdates === checking) checkingUpdates = undefined;
     refreshUpdateMenu();
@@ -1912,7 +1915,7 @@ async function checkForUpdates(manual = true, restartReady = false, confirmed = 
           if (candidate.version !== previousVersion) await notifyUpdate(candidate);
           if (!updateRequestedManually || quitting) return;
         }
-        if (!confirmed) {
+        if (!updateRestartConfirmed) {
           const { response } = await dialog.showMessageBox({
             message: `Nod ${candidate.version} is ready.`,
             buttons: ['Restart', 'Later'],

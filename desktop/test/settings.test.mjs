@@ -8113,6 +8113,33 @@ test('in-app update restart restarts once without asking again', async (t) => {
   assert.equal(status(event).checking, false);
 });
 
+test('in-app update restart during a background check restarts without asking again', async (t) => {
+  const checked = deferred();
+  const restarts = [];
+  const updater = {
+    ready: undefined,
+    async check() {
+      await checked.promise;
+      this.ready = { version: '0.5.2' };
+      return this.ready;
+    },
+    async restart() {
+      restarts.push(this.ready.version);
+    },
+  };
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'));
+  f.showEngine();
+  await new Promise(setImmediate);
+  const window = f.windows.at(-1);
+  const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+  const restart = f.handlers.get('nod:updates:restart');
+  const background = f.checkUpdates(updater, false);
+  const clicked = restart(event);
+  checked.resolve();
+  await Promise.all([background, clicked]);
+  assert.deepEqual(restarts, ['0.5.2']);
+});
+
 let onboardingClientBuild;
 async function onboardingClient(bridge) {
   onboardingClientBuild ??= build({
