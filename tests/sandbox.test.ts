@@ -635,64 +635,65 @@ test('the workspace stays fenced when a live process cannot be read', async () =
   }
 });
 
-test(
-  'recovery ends a fully detached process even after the command removed its folder',
-  { skip: !process.env.NOD_TEST_WORKSPACE_IMAGE, timeout: 120_000 },
-  async (t) => {
-    const container = `nod-workspace-recovery-${randomUUID().slice(0, 8)}`;
-    const docker = async (...args: string[]) =>
-      (await promisify(execFile)('docker', args, { timeout: 30_000 })).stdout.trim();
-    t.after(() => docker('rm', '-f', container).catch(() => {}));
-    await docker(
-      'run',
-      '-d',
-      '--init',
-      '--network',
-      'none',
-      '--name',
-      container,
-      '--entrypoint',
-      '/usr/bin/sleep',
-      process.env.NOD_TEST_WORKSPACE_IMAGE!,
-      'infinity',
-    );
-    const threadId = randomUUID();
-    await docker('exec', '--user', 'node', container, 'mkdir', `/workspace/${threadId}`);
-    const daemons = async () =>
-      Number(
-        await docker(
-          'exec',
-          '--user',
-          'node',
-          container,
-          'python3',
-          '-c',
-          [
-            'import os',
-            'def match(pid):',
-            ' try: return open(f"/proc/{pid}/cmdline","rb").read()==b"/usr/bin/sleep\\x00301\\x00"',
-            ' except OSError: return False',
-            'print(sum(match(pid) for pid in os.listdir("/proc") if pid.isdigit()))',
-          ].join('\n'),
-        ),
+if (process.env.NOD_TEST_WORKSPACE_IMAGE)
+  test(
+    'recovery ends a fully detached process even after the command removed its folder',
+    { timeout: 120_000 },
+    async (t) => {
+      const container = `nod-workspace-recovery-${randomUUID().slice(0, 8)}`;
+      const docker = async (...args: string[]) =>
+        (await promisify(execFile)('docker', args, { timeout: 30_000 })).stdout.trim();
+      t.after(() => docker('rm', '-f', container).catch(() => {}));
+      await docker(
+        'run',
+        '-d',
+        '--init',
+        '--network',
+        'none',
+        '--name',
+        container,
+        '--entrypoint',
+        '/usr/bin/sleep',
+        process.env.NOD_TEST_WORKSPACE_IMAGE!,
+        'infinity',
       );
-    const run = (script: string) =>
-      runWorkspaceCommand({ container, threadId, args: ['bash', '-c', script] });
-    const error = await run(
-      'python3 -c \'import os,sys\nif os.fork(): sys.exit()\nos.setsid()\nif os.fork(): sys.exit()\nos.execve("/usr/bin/sleep",["/usr/bin/sleep","301"],{})\'; cd /; rm -r "/workspace/${threadId}"; sleep 1; kill -9 $PPID',
-    ).then(
-      () => assert.fail('The command should not finish.'),
-      (error: unknown) => error,
-    );
-    assert.ok(error instanceof WorkspaceCommandError && error.uncertain && error.stop);
-    assert.equal(await daemons(), 1);
-    await error.stop();
-    assert.equal(await daemons(), 0);
-    assert.equal(await docker('inspect', '-f', '{{.State.Running}}', container), 'true');
-    await docker('exec', '--user', 'node', container, 'mkdir', `/workspace/${threadId}`);
-    assert.equal((await run('echo available')).stdout.toString(), 'available\n');
-  },
-);
+      const threadId = randomUUID();
+      await docker('exec', '--user', 'node', container, 'mkdir', `/workspace/${threadId}`);
+      const daemons = async () =>
+        Number(
+          await docker(
+            'exec',
+            '--user',
+            'node',
+            container,
+            'python3',
+            '-c',
+            [
+              'import os',
+              'def match(pid):',
+              ' try: return open(f"/proc/{pid}/cmdline","rb").read()==b"/usr/bin/sleep\\x00301\\x00"',
+              ' except OSError: return False',
+              'print(sum(match(pid) for pid in os.listdir("/proc") if pid.isdigit()))',
+            ].join('\n'),
+          ),
+        );
+      const run = (script: string) =>
+        runWorkspaceCommand({ container, threadId, args: ['bash', '-c', script] });
+      const error = await run(
+        'python3 -c \'import os,sys\nif os.fork(): sys.exit()\nos.setsid()\nif os.fork(): sys.exit()\nos.execve("/usr/bin/sleep",["/usr/bin/sleep","301"],{})\'; cd /; rm -r "/workspace/${threadId}"; sleep 1; kill -9 $PPID',
+      ).then(
+        () => assert.fail('The command should not finish.'),
+        (error: unknown) => error,
+      );
+      assert.ok(error instanceof WorkspaceCommandError && error.uncertain && error.stop);
+      assert.equal(await daemons(), 1);
+      await error.stop();
+      assert.equal(await daemons(), 0);
+      assert.equal(await docker('inspect', '-f', '{{.State.Running}}', container), 'true');
+      await docker('exec', '--user', 'node', container, 'mkdir', `/workspace/${threadId}`);
+      assert.equal((await run('echo available')).stdout.toString(), 'available\n');
+    },
+  );
 
 test('workspace uploads transfer binary chunks atomically and reject symlink directories', async () => {
   const f = await local();
