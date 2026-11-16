@@ -33,6 +33,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { JSDOM } from 'jsdom';
+import { build } from 'esbuild';
 import {
   createSettingsStore,
   desktopContentPolicy,
@@ -516,7 +517,7 @@ async function runningDesktop(
     await storage.store.save({
       notifications: true,
       launchAtLogin: true,
-      onboardingCompleted: true,
+      onboardingPreferenceStep: 'complete',
     });
     await storage.store.save({ notifications: false, launchAtLogin: false });
   }
@@ -681,12 +682,21 @@ async function runningDesktop(
     Date: Object.assign(class extends Date {}, { now }),
     setTimeout,
     clearTimeout,
-    fetch: (resource, options) => {
+    fetch: async (resource, options) => {
       if (String(resource) === `${posthogHost.host}/i/v0/e/`) {
         nativeAnalytics.push(JSON.parse(options.body));
         return nativeAnalyticsResponse(resource, options);
       }
-      return request(resource, options);
+      const response = await request(resource, options);
+      if (new URL(resource).pathname === '/api/session' && response.ok) {
+        const body = await response.clone().json();
+        if (body.settings?.onboardingCompleted === undefined)
+          return Response.json({
+            ...body,
+            settings: { ...body.settings, onboardingCompleted: initialState !== 'fresh' },
+          });
+      }
+      return response;
     },
     createSettingsStore: () => storage.store,
     createMacEncryption,
@@ -1922,7 +1932,7 @@ test('quitting while macOS keychain access is pending never forks a late setup p
     unlocked.resolve(true);
     await Promise.all([preparing, closing]);
     assert.equal(f.children.length, 0);
-    assert.equal((await f.storage.store.get()).onboardingCompleted, false);
+    assert.equal((await f.storage.store.get()).onboardingPreferenceStep, 'launchAtLogin');
   } finally {
     unlocked.resolve(true);
     await f.close();
@@ -1943,7 +1953,7 @@ test('native key-store failure needs an explicit retry and never completes onboa
     await f.prepare();
     assert.equal(f.status().phase, 'error');
     assert.equal(f.children.length, 0);
-    assert.equal((await f.storage.store.get()).onboardingCompleted, false);
+    assert.equal((await f.storage.store.get()).onboardingPreferenceStep, 'launchAtLogin');
     const window = f.windows[0];
     const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
     failing = false;
@@ -1952,7 +1962,7 @@ test('native key-store failure needs an explicit retry and never completes onboa
       f.handlers.get('nod:prepare')(event, { retry: true }),
     ]);
     assert.equal(f.children.length, 1);
-    assert.equal((await f.storage.store.get()).onboardingCompleted, false);
+    assert.equal((await f.storage.store.get()).onboardingPreferenceStep, 'launchAtLogin');
   } finally {
     await f.close();
   }
@@ -2059,7 +2069,7 @@ test('native onboarding starts one normal backend at storage readiness and keeps
     assert.equal(f.children.length, 1);
     assert.equal(new URL(window.url).origin, origin);
     assert.equal(engine.sent.filter((message) => message.type === 'nod-runtime-ready').length, 1);
-    assert.equal((await f.storage.store.get()).onboardingCompleted, false);
+    assert.equal((await f.storage.store.get()).onboardingPreferenceStep, 'launchAtLogin');
     assert.equal(f.status().phase, 'ready');
   } finally {
     storage.resolve();
@@ -2743,7 +2753,7 @@ test('session reconciliation retries after runtime startup without rebuilding th
       await f.storage.store.save({ notifications: false, launchAtLogin: true });
       const save = f.storage.store.save;
       f.storage.store.save = async (value) => {
-        if (value.onboardingCompleted && failing && failure === 'settings')
+        if (value.onboardingPreferenceStep === 'complete' && failing && failure === 'settings')
           throw new Error('Synthetic settings unavailable');
         return save(value);
       };
@@ -2766,7 +2776,7 @@ test('session reconciliation retries after runtime startup without rebuilding th
         assert.equal(attempts, 1);
         assert.equal(stopped, 0);
         assert.equal(f.children.length, 1);
-        assert.equal((await f.storage.store.get()).onboardingCompleted, true);
+        assert.equal((await f.storage.store.get()).onboardingPreferenceStep, 'complete');
         assert.equal((await f.storage.store.get()).notifications, false);
         assert.equal(
           f.children[0].sent.filter((message) => message.type === 'nod-runtime-ready').length,
@@ -2863,7 +2873,7 @@ test('completed backend onboarding resumes required native preferences without c
   try {
     await f.launch();
     await f.settle();
-    assert.equal((await f.storage.store.get()).onboardingCompleted, false);
+    assert.equal((await f.storage.store.get()).onboardingPreferenceStep, 'launchAtLogin');
     assert.equal((await f.storage.store.get()).notifications, false);
     const recovery = f.windows.find(
       (window) => window.url && new URL(window.url).pathname === '/onboarding',
@@ -3080,7 +3090,7 @@ test('native upgrades preserve the existing settings and vault through successfu
     await t.test(failed ? 'failed runtime' : 'ready runtime', async (t) => {
       const storage = await fixture(t);
       await storage.store.save({
-        onboardingCompleted: true,
+        onboardingPreferenceStep: 'complete',
         notifications: true,
         launchAtLogin: true,
         theme: 'dark',
@@ -3107,7 +3117,7 @@ test('native upgrades preserve the existing settings and vault through successfu
           JSON.parse(JSON.stringify(f.children[0].sent)),
           failed ? [] : [{ type: 'nod-runtime-ready' }],
         );
-        assert.equal((await f.storage.store.get()).onboardingCompleted, true);
+        assert.equal((await f.storage.store.get()).onboardingPreferenceStep, 'complete');
         assert.equal((await f.storage.store.get()).theme, 'dark');
         assert.equal(await readFile(storage.path, 'utf8'), previous);
       } finally {
@@ -3342,7 +3352,7 @@ test('desktop proxy overrides reach only isolated source engines and retain orig
       const f = await runningDesktop(
         t,
         async (url) => {
-          assert.equal(new URL(url).pathname, '/api/health');
+          assert.ok(['/api/health', '/api/session'].includes(new URL(url).pathname));
           return Response.json({ ok: true });
         },
         {
@@ -3897,7 +3907,7 @@ test('engine exit saves focused native zoom before destroying the window and res
   const f = await runningDesktop(
     t,
     async (url) => {
-      assert.equal(new URL(url).pathname, '/api/health');
+      assert.ok(['/api/health', '/api/session'].includes(new URL(url).pathname));
       return Response.json({ ok: true });
     },
     { allowStart: true },
@@ -3946,7 +3956,7 @@ test('native notification confirmation follows only successful owned enable tran
     await f.storage.store.save({
       notifications: true,
       launchAtLogin: true,
-      onboardingCompleted: true,
+      onboardingPreferenceStep: 'complete',
     });
     await f.launch();
     await f.settle();
@@ -4015,7 +4025,7 @@ test('an engine crash retires every stale chat window before recovery opens the 
     t,
     async (url) => {
       requests.push(url);
-      assert.equal(new URL(url).pathname, '/api/health');
+      assert.ok(['/api/health', '/api/session'].includes(new URL(url).pathname));
       return Response.json({ ok: true });
     },
     { allowStart: true },
@@ -4192,7 +4202,7 @@ test('a failed backend launch preserves saved setup and one retry starts one rep
 });
 
 test('late startup responses cannot make an exited engine ready or block its explicit retry', async (t) => {
-  for (const endpoint of ['/api/health', '/api/session']) {
+  for (const endpoint of ['/api/health', '/api/session', 'device preferences']) {
     await t.test(endpoint, async (t) => {
       const requested = deferred();
       const response = deferred();
@@ -4206,12 +4216,26 @@ test('late startup responses cannot make an exited engine ready or block its exp
             await response.promise;
           }
           return Response.json(
-            url.endsWith('/api/account') ? { settings: { usageData: false } } : { ok: true },
+            url.endsWith('/api/account')
+              ? { settings: { usageData: false } }
+              : { ok: true, settings: { onboardingCompleted: endpoint === 'device preferences' } },
           );
         },
         { initialState: 'fresh', allowStart: true },
       );
       try {
+        if (endpoint === 'device preferences') {
+          await f.storage.store.save({ launchAtLogin: true });
+          const save = f.storage.store.save.bind(f.storage.store);
+          f.storage.store.save = async (value) => {
+            if (!held && value.onboardingPreferenceStep === 'complete') {
+              held = true;
+              requested.resolve();
+              await response.promise;
+            }
+            return save(value);
+          };
+        }
         await f.storage.store.save({ welcome: { usageData: false, continued: true } });
         await f.launch();
         await requested.promise;
@@ -4819,7 +4843,7 @@ test('the remote desktop starts without a local runtime and fences tokens to its
     assert.throws(() => f.handlers.get('nod:connection:get')(event));
     assert.throws(() => f.handlers.get('nod:connection:save')(event, null));
     assert.ok(!JSON.stringify(await f.handlers.get('nod:settings:get')(event)).includes(token));
-    assert.equal((await storedProfile.reopen().get()).onboardingCompleted, false);
+    assert.equal((await storedProfile.reopen().get()).onboardingPreferenceStep, 'launchAtLogin');
     const threadId = randomUUID();
     const cursor = { createdAt: new Date().toISOString(), messageIds: [randomUUID()] };
     await f.handlers.get('nod:chat-read:set')(event, 'local-development', threadId, cursor);
@@ -5251,7 +5275,7 @@ app.whenReady().then(async () => {
   const settingsPath = join(profile, 'settings.json');
   const store = createSettingsStore(settingsPath, safeStorage);
   if (process.argv.at(-1) === 'write') {
-    await store.save({ notifications: true, launchAtLogin: true, onboardingCompleted: true });
+    await store.save({ notifications: true, launchAtLogin: true, onboardingPreferenceStep: 'complete' });
     await store.save({notifications:false});
   }
   const { NOD_VAULT_KEY } = await store.environment();
@@ -5326,7 +5350,6 @@ app.whenReady().then(async () => {
       notifications: false,
       theme: 'system',
       zoomFactor: 1,
-      onboardingCompleted: true,
       onboardingPreferenceStep: 'complete',
     });
     const acl = JSON.parse(
@@ -5370,7 +5393,7 @@ test('startup reads preserve older settings for rollback until an owner preferen
     theme: 'dark',
     notifications: true,
     launchAtLogin: true,
-    onboardingCompleted: true,
+    onboardingPreferenceStep: 'complete',
   });
   const expected = await f.store.environment();
   const saved = JSON.parse(await readFile(f.path, 'utf8'));
@@ -5379,7 +5402,7 @@ test('startup reads preserve older settings for rollback until an owner preferen
   const settings = await store.get();
   assert.equal(settings.theme, 'dark');
   assert.equal(settings.notifications, true);
-  assert.equal(settings.onboardingCompleted, true);
+  assert.equal(settings.onboardingPreferenceStep, 'complete');
   assert.equal(await readFile(f.path, 'utf8'), previous);
   const blocked = createSettingsStore(f.path, {
     ...f.encryption,
@@ -5794,7 +5817,7 @@ test('unsupported saved schemas fail closed without rewriting or unlocking their
   await f.store.environment();
   const saved = JSON.parse(await readFile(f.path, 'utf8'));
   const variants = [
-    { ...saved, version: 2 },
+    { ...saved, version: 3 },
     { ...saved, notifications: undefined },
     { ...saved, secrets: null },
     { ...saved, secrets: { vaultKey: 123 } },
@@ -5829,7 +5852,11 @@ test('a keyless installation creates one persistent encrypted vault across concu
   for (const environment of environments) assert.deepEqual(environment, { NOD_VAULT_KEY: vault });
   assert.equal((await f.reopen().environment()).NOD_VAULT_KEY, vault);
   assert.ok(!(await readFile(f.path, 'utf8')).includes(vault));
-  await f.store.save({ notifications: true, launchAtLogin: true, onboardingCompleted: true });
+  await f.store.save({
+    notifications: true,
+    launchAtLogin: true,
+    onboardingPreferenceStep: 'complete',
+  });
   assert.equal((await f.store.environment()).NOD_VAULT_KEY, vault);
 });
 
@@ -5848,13 +5875,13 @@ test('settings withhold completion when temporary bytes fail to persist', async 
       throw Object.assign(new Error('Synthetic file persistence failure'), { code: 'EIO' });
     return sync.call(this);
   });
-  await assert.rejects(f.store.save({ onboardingCompleted: true }), { code: 'EIO' });
+  await assert.rejects(f.store.save({ onboardingPreferenceStep: 'complete' }), { code: 'EIO' });
   assert.equal(await readFile(f.path, 'utf8'), saved);
-  assert.equal((await f.store.get()).onboardingCompleted, false);
+  assert.equal((await f.store.get()).onboardingPreferenceStep, 'launchAtLogin');
   assert.deepEqual(await readdir(dirname(f.path)), ['settings.json']);
   fail = false;
-  await f.store.save({ onboardingCompleted: true });
-  assert.equal((await f.reopen().get()).onboardingCompleted, true);
+  await f.store.save({ onboardingPreferenceStep: 'complete' });
+  assert.equal((await f.reopen().get()).onboardingPreferenceStep, 'complete');
   assert.deepEqual(await f.reopen().environment(), environment);
 });
 
@@ -5893,15 +5920,15 @@ test(
     assert.deepEqual(await reopened.environment(), environment);
     await f.store.save({ notifications: true, launchAtLogin: true });
     fail = true;
-    await assert.rejects(f.store.save({ onboardingCompleted: true }), { code: 'EIO' });
-    assert.equal(JSON.parse(await readFile(f.path, 'utf8')).onboardingCompleted, true);
+    await assert.rejects(f.store.save({ onboardingPreferenceStep: 'complete' }), { code: 'EIO' });
+    assert.equal(JSON.parse(await readFile(f.path, 'utf8')).onboardingPreferenceStep, 'complete');
     await assert.rejects(f.store.get(), { code: 'EIO' });
     await assert.rejects(f.store.environment(), { code: 'EIO' });
     await assert.rejects(f.reopen().get(), { code: 'EIO' });
     fail = false;
     await f.store.save({ theme: 'dark' });
     const restored = f.reopen();
-    assert.equal((await restored.get()).onboardingCompleted, true);
+    assert.equal((await restored.get()).onboardingPreferenceStep, 'complete');
     assert.equal((await restored.get()).theme, 'dark');
     assert.deepEqual(await restored.environment(), environment);
     assert.equal(encrypted, 1);
@@ -7402,7 +7429,7 @@ test('Mac app updates prepare local runtime assets only after choosing this comp
       await storage.store.save({
         notifications: true,
         launchAtLogin: true,
-        onboardingCompleted: true,
+        onboardingPreferenceStep: 'complete',
       });
     storage.encryption.isEncryptionAvailable = () =>
       assert.fail('Update checks need no saved keys.');
@@ -7567,7 +7594,7 @@ test('Windows downloads stage the verified installer and fetch the runtime pack 
       await storage.store.save({
         notifications: true,
         launchAtLogin: true,
-        onboardingCompleted: true,
+        onboardingPreferenceStep: 'complete',
       });
     storage.encryption.isEncryptionAvailable = () =>
       assert.fail('Update checks need no saved keys.');
@@ -7660,7 +7687,7 @@ test('desktop preference choices resume durably without requiring notifications 
   assert.equal((await f.store.get()).onboardingPreferenceStep, 'launchAtLogin');
   await assert.rejects(f.store.save({ onboardingCompleted: true }));
   await assert.rejects(f.store.save({ notifications: true, onboardingCompleted: true }));
-  assert.equal((await f.store.get()).onboardingCompleted, false);
+  assert.equal((await f.store.get()).onboardingPreferenceStep, 'launchAtLogin');
   await f.store.save({ onboardingPreferenceStep: 'complete' });
   assert.equal((await f.reopen().get()).onboardingPreferenceStep, 'complete');
   assert.equal((await f.reopen().get()).launchAtLogin, false);
@@ -7681,12 +7708,14 @@ test('desktop preference choices resume durably without requiring notifications 
   assert.equal((await f.reopen().get()).notifications, false);
   assert.equal((await f.reopen().get()).launchAtLogin, false);
   await assert.rejects(reopened.save({ onboardingPreferenceStep: 'notifications' }));
-  await reopened.save({ onboardingCompleted: true });
-  assert.equal((await f.reopen().get()).onboardingCompleted, true);
+  await assert.rejects(reopened.save({ onboardingCompleted: true }));
+  assert.equal((await f.reopen().get()).onboardingPreferenceStep, 'complete');
   assert.equal((await f.reopen().get()).notifications, false);
-  await assert.rejects(reopened.save({ onboardingPreferenceStep: 'complete' }));
+  await reopened.save({ onboardingPreferenceStep: 'complete' });
   const saved = JSON.parse(await readFile(f.path, 'utf8'));
   delete saved.onboardingPreferenceStep;
+  saved.onboardingCompleted = true;
+  saved.version = 1;
   saved.launchAtLogin = false;
   await writeFile(f.path, JSON.stringify(saved));
   assert.equal((await f.reopen().get()).onboardingPreferenceStep, 'complete');
@@ -7778,13 +7807,13 @@ test('desktop preference steps and completion require the owned normal app and d
         assert.equal((await f.storage.reopen().get()).onboardingPreferenceStep, 'complete');
         assert.equal((await f.storage.reopen().get()).notifications, false);
         await assert.rejects(save(event, { onboardingCompleted: true }));
-        assert.equal((await f.storage.reopen().get()).onboardingCompleted, false);
+        assert.equal(Object.hasOwn(await f.storage.reopen().get(), 'onboardingCompleted'), false);
         await save(event, { launchAtLogin: false });
         assert.equal((await f.storage.reopen().get()).onboardingPreferenceStep, 'complete');
         completed = true;
         await save(event, { onboardingCompleted: true });
         assert.equal((await f.storage.reopen().get()).launchAtLogin, false);
-        assert.equal((await f.storage.reopen().get()).onboardingCompleted, true);
+        assert.equal((await f.storage.reopen().get()).onboardingPreferenceStep, 'complete');
         assert.equal((await f.storage.reopen().get()).notifications, false);
         await assert.rejects(save(event, { onboardingCompleted: false }));
       } finally {
@@ -8100,4 +8129,227 @@ test('in-app update restart keeps Later safe and shares one confirmation', async
   await restart(event);
   assert.equal(prompts.length, 2);
   assert.deepEqual(restarts, ['0.5.2']);
+});
+
+let onboardingClientBuild;
+async function onboardingClient(bridge) {
+  onboardingClientBuild ??= build({
+    stdin: {
+      contents: "export * from './src/web/lib/desktop'; export * from './src/web/lib/onboarding';",
+      resolveDir: fileURLToPath(new URL('../..', import.meta.url)),
+    },
+    bundle: true,
+    format: 'iife',
+    globalName: 'onboardingClient',
+    write: false,
+  });
+  const context = { window: { nodDesktop: bridge } };
+  runInNewContext((await onboardingClientBuild).outputFiles[0].text, context);
+  return context.onboardingClient;
+}
+
+async function engineBridge(window, handlers) {
+  let bridge;
+  const calls = [];
+  runInNewContext(await readFile(new URL('../preload/engine.cjs', import.meta.url), 'utf8'), {
+    process: { argv: window.options.webPreferences.additionalArguments },
+    require: () => ({
+      contextBridge: {
+        exposeInMainWorld: (_name, value) => {
+          bridge = value;
+        },
+      },
+      ipcRenderer: {
+        on() {},
+        removeListener() {},
+        invoke: async (name, ...args) => {
+          calls.push(name);
+          return handlers.get(name)(
+            { sender: window.webContents, senderFrame: window.webContents.mainFrame },
+            ...args,
+          );
+        },
+      },
+    }),
+  });
+  return { bridge, calls };
+}
+
+test('onboarding completion crosses the client and native boundary in each supported mode', async (t) => {
+  for (const mode of ['browser', 'local', 'remote', 'legacy-local', 'legacy-remote']) {
+    await t.test(mode, async (t) => {
+      const remote = mode.endsWith('remote');
+      const local = mode.endsWith('local');
+      let completed = false;
+      let saveFailed = false;
+      let readFailed = false;
+      let readUnavailable = false;
+      let saves = 0;
+      const request = async (url) => {
+        if (new URL(url).pathname === '/api/session' && readFailed)
+          throw new Error('Synthetic setup read failure.');
+        if (new URL(url).pathname === '/api/session' && readUnavailable)
+          return Response.json({ error: 'Synthetic setup service unavailable.' }, { status: 503 });
+        return Response.json({
+          ok: true,
+          user: { id: 'synthetic-owner' },
+          settings: { onboardingCompleted: completed, usageData: false },
+        });
+      };
+      const profile = await fixture(t);
+      if (remote)
+        await profile.store.saveConnection({
+          url: 'https://server.example.test',
+          token: randomBytes(32).toString('base64url'),
+        });
+      else await profile.store.save({ welcome: { usageData: false, continued: true } });
+      const f =
+        mode === 'browser'
+          ? null
+          : await runningDesktop(t, request, {
+              storedProfile: profile,
+              initialState: 'fresh',
+              allowStart: local,
+            });
+      try {
+        if (f) {
+          await f.launch();
+          await f.settle();
+        }
+        const window = f?.windows.find((window) => window.url);
+        const native = f
+          ? await engineBridge(window, f.handlers)
+          : { bridge: undefined, calls: [] };
+        if (mode.startsWith('legacy')) {
+          for (const field of ['protocolVersion', 'mode', 'localRuntime', 'savePreferences'])
+            delete native.bridge[field];
+        }
+        const client = await onboardingClient(native.bridge);
+        assert.equal(client.desktopRuntimeAvailable(), local);
+        if (local) await client.completeDesktopPreferences();
+        if (remote) {
+          assert.equal(native.bridge.localRuntime, undefined);
+          assert.equal(native.bridge.prepare, undefined);
+          const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+          for (const name of [
+            'nod:setup:get',
+            'nod:setup:preferences',
+            'nod:setup:reconcile',
+            'nod:prepare',
+          ])
+            await assert.rejects(
+              async () => f.handlers.get(name)(event),
+              /Local setup is unavailable/,
+            );
+        }
+        const save = async () => {
+          if (saveFailed) throw new Error('Synthetic server save failure.');
+          completed = true;
+          saves++;
+        };
+        saveFailed = true;
+        native.calls.length = 0;
+        await assert.rejects(client.finishOnboarding(false, save), /Synthetic server save failure/);
+        assert.deepEqual(native.calls, []);
+        saveFailed = false;
+        if (local) {
+          readFailed = true;
+          await assert.rejects(
+            client.finishOnboarding(false, save),
+            /Synthetic setup read failure/,
+          );
+          assert.equal(completed, true);
+          assert.equal(saves, 1);
+          readFailed = false;
+          readUnavailable = true;
+          await assert.rejects(
+            client.finishOnboarding(true, save),
+            /503.*Synthetic setup service unavailable/,
+          );
+          readUnavailable = false;
+        }
+        const saved = await readFile(profile.path, 'utf8');
+        await client.finishOnboarding(completed, save);
+        assert.equal(completed, true);
+        assert.equal(saves, 1);
+        assert.equal(await readFile(profile.path, 'utf8'), saved);
+        if (!local) {
+          assert.deepEqual(native.calls, []);
+          if (remote) {
+            await native.bridge.saveSettings({ onboardingCompleted: true });
+            assert.equal(await readFile(profile.path, 'utf8'), saved);
+          }
+        } else {
+          const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+          for (const sender of [
+            { ...event, sender: {} },
+            { ...event, senderFrame: { ...event.senderFrame } },
+          ])
+            for (const name of ['nod:setup:get', 'nod:setup:preferences', 'nod:setup:reconcile'])
+              await assert.rejects(
+                async () => f.handlers.get(name)(sender),
+                /Local setup is unavailable/,
+              );
+          await assert.rejects(
+            async () =>
+              f.handlers.get('nod:preferences:save')(event, { onboardingCompleted: true }),
+            /preferences are not supported/,
+          );
+          await f.close();
+          const restarted = await runningDesktop(t, request, {
+            storedProfile: profile,
+            initialState: 'fresh',
+            allowStart: true,
+          });
+          try {
+            await restarted.launch();
+            await restarted.settle();
+            assert.equal(restarted.status().phase, 'ready');
+            assert.ok(
+              restarted.windows.some(
+                (window) => window.url && new URL(window.url).pathname === '/',
+              ),
+            );
+            assert.equal(
+              restarted.windows.some((window) => window.url?.includes('/onboarding')),
+              false,
+            );
+          } finally {
+            await restarted.close();
+          }
+        }
+      } finally {
+        await f?.close();
+      }
+    });
+  }
+});
+
+test('onboarding rejects an unsupported desktop contract before it saves server state', async () => {
+  const client = await onboardingClient({ protocolVersion: 2, mode: 'local' });
+  await assert.rejects(
+    client.finishOnboarding(false, () => assert.fail('Server state must stay unchanged.')),
+    /desktop connection is not supported/,
+  );
+});
+
+test('legacy account completion migrates to device progress without changing keys or server state', async (t) => {
+  const f = await fixture(t);
+  const environment = await f.store.environment();
+  const value = JSON.parse(await readFile(f.path, 'utf8'));
+  value.version = 1;
+  value.onboardingCompleted = true;
+  delete value.onboardingPreferenceStep;
+  await writeFile(f.path, JSON.stringify(value));
+  const saved = await readFile(f.path, 'utf8');
+  const store = f.reopen();
+  assert.equal((await store.get()).onboardingPreferenceStep, 'complete');
+  assert.equal(Object.hasOwn(await store.get(), 'onboardingCompleted'), false);
+  assert.equal(await readFile(f.path, 'utf8'), saved);
+  await store.save({ theme: 'dark' });
+  const migrated = JSON.parse(await readFile(f.path, 'utf8'));
+  assert.equal(migrated.version, 2);
+  assert.equal(Object.hasOwn(migrated, 'onboardingCompleted'), false);
+  assert.deepEqual(migrated.secrets, value.secrets);
+  assert.deepEqual(await f.reopen().environment(), environment);
 });
