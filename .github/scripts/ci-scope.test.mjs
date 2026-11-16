@@ -68,6 +68,18 @@ test('application changes do not select desktop release and runtime fixtures', (
     selectDesktopTests(['src/shared/model.ts', 'tests/pi.test.ts'], files),
     files.slice(0, 2),
   );
+  assert.deepEqual(
+    selectDesktopTests(['src/web/app.tsx', 'src/shared/model.ts'], files),
+    files.slice(0, 2),
+  );
+  for (const path of [
+    'desktop/main/app.mjs',
+    'desktop/preload/index.mjs',
+    'deployment/self-host/docker-proxy.mjs',
+  ]) {
+    assert.equal(selectChecks([path]).integration, true);
+    assert.equal(selectChecks([path]).testMode, 'all');
+  }
   for (const paths of [
     null,
     ['desktop/runtime/index.mjs'],
@@ -387,4 +399,18 @@ test('Vitest follows imports without running test files and reruns non-imported 
   assert.deepEqual(select(), ['tests/route.test.ts']);
   await writeFile(join(root, 'pnpm-lock.yaml'), 'synthetic: true\n');
   assert.deepEqual(select().sort(), files);
+  await rm(join(root, 'pnpm-lock.yaml'));
+  for (const path of [
+    'desktop/main/engine.mjs',
+    'deployment/self-host/docker-proxy.mjs',
+    'src/providers/synthetic/worker.ts',
+  ]) {
+    await mkdir(join(root, path, '..'), { recursive: true });
+    await writeFile(
+      join(root, path),
+      'throw new Error("This input must not execute during selection.");\n',
+    );
+    assert.deepEqual(select().sort(), files, path);
+    await rm(join(root, path));
+  }
 });

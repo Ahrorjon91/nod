@@ -75,7 +75,8 @@ export function selectChecks(paths) {
     }
     if (path.startsWith('src/')) {
       integration();
-      if (!/\.[cm]?[jt]sx?$/.test(path)) testMode = 'all';
+      if (!/\.[cm]?[jt]sx?$/.test(path) || /worker[^/]*\.[cm]?[jt]sx?$/i.test(path))
+        testMode = 'all';
       if (/^src\/(shared|ports)\//.test(path)) enable('build', 'desktop');
       if (/^src\/providers\/(docker|container-browser|agent-browser)\//.test(path))
         enable('images', 'desktop');
@@ -105,6 +106,10 @@ export function selectChecks(paths) {
     }
     if (path.startsWith('desktop/')) {
       enable('desktop');
+      if (/^desktop\/(main|preload|runtime)\//.test(path)) {
+        enable('integration');
+        testMode = 'all';
+      }
       if (path.startsWith('desktop/ui/') || path === 'desktop/scripts/build-ui.mjs') {
         enable('types', 'build', 'integration');
         testMode = 'all';
@@ -143,6 +148,10 @@ export function selectChecks(paths) {
     }
     if (path.startsWith('deployment/self-host/') || /^(\.dockerignore|Dockerfile\.)/.test(path)) {
       enable('images', 'desktop');
+      if (path.startsWith('deployment/self-host/')) {
+        enable('integration');
+        testMode = 'all';
+      }
       continue;
     }
     if (path === 'scripts/Dockerfile.integration' || path === 'scripts/test-integration.mjs') {
@@ -198,7 +207,7 @@ export function selectDesktopTests(paths, available) {
     paths !== null &&
     paths.every(
       (path) =>
-        /^(src\/(shared|ports|server|runtime)\/|tests\/|docs\/|public\/|evals\/|desktop\/ui\/)/.test(
+        /^(src\/(web|shared|ports|server|runtime)\/|tests\/|docs\/|public\/|evals\/|desktop\/ui\/)/.test(
           path,
         ) || /\.md$/.test(path),
     );
