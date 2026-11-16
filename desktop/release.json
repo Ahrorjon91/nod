@@ -2,9 +2,9 @@
   "version": "0.8.1",
   "previousTag": "nod-v0.8.0",
   "source": "b40b6329e34a78f4f1628a741efb776950683fb1",
-  "highlights": "## Clearer app connection errors\n\nIf an app connection cannot start, Nod now shows the connection service's status and a recognized reason. That makes a rate limit or temporary service error easier to distinguish from a sign-in problem when you send feedback.\n\nIf an Attio request receives a Cloudflare HTML 403 response, the error includes the UTC time and a validated Ray ID when one is available. Send those details with your feedback so we can trace the request. This adds a diagnostic; it does not change the access rule.\n\n## Quieter background checks\n\nNod skips connection watch checks for disabled or replaced scheduled jobs. Gmail inbox checks wait until their next scheduled poll after a known connection-service 429 or 503 refusal, instead of retrying immediately. The inbox cursor and completed messages are preserved for the next poll.",
+  "highlights": "## A clearer clue when an app says no\n\nOpen **Apps** and try starting the connection again. If it stops before sign-in, Nod now shows the connection service's HTTP status and a recognized reason instead of a generic failure. Share what you see in feedback, and we can tell a rate limit from a temporary service problem without guessing.\n\nIf an Attio request gets a Cloudflare HTML 403, Nod adds the UTC time and a validated Ray ID when one is available. Send those details in feedback too. They help trace the request; they do not change the access rule.\n\n## Background checks take a breath\n\nAfter a known connection-service 429 or 503, Gmail waits for its next scheduled inbox check instead of retrying immediately. Your inbox cursor and completed messages stay in place for that later check. Disabled or replaced scheduled jobs also stop asking for connection watch status, so stale work makes fewer background calls.",
   "video": {
-    "url": "https://github.com/user-attachments/assets/06ed7c58-ccb9-4973-b831-5194056c145f",
-    "releaseSha256": "5ae8498f5492f3df90604cc0e5e66a6b78084d96066a3106d06f19a442059bc4"
+    "url": "https://github.com/user-attachments/assets/c8bfb032-83be-4879-a5db-71ff30ff4dac",
+    "releaseSha256": "2cb826ee23b5dc70f4ba5174cd99dfeb06abbfc5c8eba39c0fdc07a9f1a73db9"
   }
 }
