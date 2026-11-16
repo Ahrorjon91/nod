@@ -44,6 +44,7 @@ import {
 } from '../src/ports/integrations.ts';
 import { createComposioProvider } from '../src/providers/composio/integrations.ts';
 import { createComposioProxy } from '../src/providers/composio/proxy.ts';
+import { logFailure } from '../src/server/failure-log.ts';
 import { serviceEnvironment } from '../src/providers/process.ts';
 import { createIntegrationIdentityCheckpoint } from '../src/server/integration-identity.ts';
 import { createIntegrationBrowser } from '../src/server/integration-browser.ts';
@@ -1215,7 +1216,7 @@ test('managed integration requests bind SDK calls to a private persisted install
 test('a refused broker request keeps the broker status and only known codes', async (t) => {
   const refusingProxy = async (
     t: TestContext,
-    respond: (path: string, body: Record<string, unknown>) => Response,
+    respond: (path: string, body: Record<string, unknown>, signal: AbortSignal) => Response,
   ) => {
     const root = await mkdtemp(join(tmpdir(), 'nod-connect-refusal-'));
     t.after(() => rm(root, { recursive: true, force: true }));
@@ -1231,7 +1232,7 @@ test('a refused broker request keeps the broker status and only known codes', as
         const path = new URL(request.url).pathname;
         if (path === '/v2/access/enroll')
           return Response.json({ state: 'enabled', userId: proxy.userId });
-        return respond(path, JSON.parse(await request.text()));
+        return respond(path, JSON.parse(await request.text()), request.signal);
       },
     });
     await proxy.initialize();
@@ -1248,8 +1249,20 @@ test('a refused broker request keeps the broker status and only known codes', as
       (error: unknown) => error,
     );
   for (const [status, body, reason, code] of [
+    [429, '{"error":"rate_limited"}', 'rate_limit', 'rate_limited'],
     [429, '{"error":"public_budget_exceeded"}', 'rate_limit', 'public_budget_exceeded'],
+    [429, '{"error":"provider_rate_limited"}', 'rate_limit', 'provider_rate_limited'],
     [503, '{"error":"service_unavailable"}', 'unavailable', 'service_unavailable'],
+    [503, '{"error":"provider_unavailable"}', 'unavailable', 'provider_unavailable'],
+    [502, '{"error":"provider_request_failed"}', 'unavailable', 'provider_request_failed'],
+    [503, '{"error":"connections_unavailable"}', 'unavailable', 'connections_unavailable'],
+    [403, '{"error":"installation_revoked"}', 'permission', 'installation_revoked'],
+    [409, '{"error":"account_revoking"}', 'invalid_request', 'account_revoking'],
+    [400, '{"error":"invalid_callback"}', 'invalid_request', 'invalid_callback'],
+    [401, '{"error":"expired_authentication"}', 'authorization', 'expired_authentication'],
+    [415, '{"error":"json_required"}', 'invalid_request', 'json_required'],
+    [413, '{"error":"request_too_large"}', 'invalid_request', 'request_too_large'],
+    [408, '{"error":"request_timeout"}', 'timeout', 'request_timeout'],
     [403, '{"error":"synthetic-private-detail"}', 'permission', undefined],
     [500, 'synthetic upstream page', 'unavailable', undefined],
   ] as const) {
@@ -1329,6 +1342,51 @@ test('a refused broker request keeps the broker status and only known codes', as
       assert.equal(error, cancellation);
       return true;
     });
+  });
+  await t.test('an internal timeout while the refusal is read', async (t) => {
+    const timeout = new AbortController();
+    const expired = new DOMException('Synthetic deadline.', 'TimeoutError');
+    let pulls = 0;
+    const proxy = await refusingProxy(t, (path, body) => {
+      if (path === '/v2/connect/start')
+        return Response.json({
+          redirectUrl: 'https://proxy.example.test/v2/connect/pair?ticket=synthetic',
+          transactionId: body.transactionId,
+        });
+      assert.equal(path, '/v2/connect/status');
+      return new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              pulls++;
+              timeout.abort(expired);
+              controller.error(expired);
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { status: 503 },
+      );
+    });
+    const attempt = await start(proxy);
+    t.mock.method(AbortSignal, 'timeout', () => timeout.signal);
+    await assert.rejects(proxy.connectionStatus(attempt.url), (error) => {
+      assert.equal(error, expired);
+      return true;
+    });
+    assert.equal(pulls, 1);
+  });
+  await t.test('failure logging keeps only numeric HTTP status', (t) => {
+    const entries: Array<{ status?: number }> = [];
+    t.mock.method(console, 'error', (line: string) => {
+      entries.push(JSON.parse(line));
+    });
+    for (const status of [429, 'synthetic-private-status', 0, 600, 429.5])
+      logFailure('app_connection_start', { status });
+    assert.deepEqual(
+      entries.map((entry) => entry.status),
+      [429, undefined, undefined, undefined, undefined],
+    );
   });
   await t.test('enrollment during an app catalog request', async (t) => {
     const root = await mkdtemp(join(tmpdir(), 'nod-enroll-refusal-'));

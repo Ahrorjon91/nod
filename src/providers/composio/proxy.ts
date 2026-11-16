@@ -274,8 +274,8 @@ export function createComposioProxy(options: {
       }
       const refusal = await read(response, signal)
         .then((text) => JSON.parse(text) as unknown)
-        .catch((error: unknown) => {
-          if (options.signal?.aborted) throw error;
+        .catch(() => {
+          signal.throwIfAborted();
           return undefined;
         });
       throw new IntegrationConnectionError(

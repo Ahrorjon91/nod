@@ -121,21 +121,23 @@ export class IntegrationCatalogAccessDenied extends Error {
     if (code) this.message += ` Proxy code: ${code}. HTTP 403.`;
   }
 }
-export type IntegrationCatalogProxyErrorCode =
-  | 'rate_limited'
-  | 'installation_busy'
-  | 'public_budget_exceeded'
-  | 'provider_rate_limited'
-  | 'service_unavailable'
-  | 'security_service_unavailable'
-  | 'public_access_unavailable'
-  | 'provider_unavailable'
-  | 'provider_request_failed'
-  | 'catalog_unavailable'
-  | 'operation_timeout'
-  | 'invalid_limit_configuration'
-  | 'invalid_provider_response'
-  | 'unsafe_provider_response';
+export const integrationCatalogProxyErrorCodes = [
+  'rate_limited',
+  'installation_busy',
+  'public_budget_exceeded',
+  'provider_rate_limited',
+  'service_unavailable',
+  'security_service_unavailable',
+  'public_access_unavailable',
+  'provider_unavailable',
+  'provider_request_failed',
+  'catalog_unavailable',
+  'operation_timeout',
+  'invalid_limit_configuration',
+  'invalid_provider_response',
+  'unsafe_provider_response',
+] as const;
+export type IntegrationCatalogProxyErrorCode = (typeof integrationCatalogProxyErrorCodes)[number];
 export class IntegrationCatalogFailure extends Error {
   readonly statusCode: number;
   constructor(
@@ -173,10 +175,25 @@ export class IntegrationCatalogFailure extends Error {
   }
 }
 const integrationConnectionCodes = [
-  'installation_busy',
-  'public_budget_exceeded',
-  'service_unavailable',
-  'security_service_unavailable',
+  ...integrationCatalogProxyErrorCodes,
+  'connections_unavailable',
+  'not_found',
+  'installation_enrollment_required',
+  'installation_revoked',
+  'browser_pairing_required',
+  'account_unavailable',
+  'account_revoking',
+  'toolkit_unavailable',
+  'invalid_callback',
+  'invalid_ui_origin',
+  'invalid_authentication',
+  'expired_authentication',
+  'request_already_used',
+  'json_required',
+  'invalid_json',
+  'invalid_request',
+  'request_too_large',
+  'request_timeout',
 ] as const;
 export type IntegrationConnectionCode = (typeof integrationConnectionCodes)[number];
 export type IntegrationConnectionReason =

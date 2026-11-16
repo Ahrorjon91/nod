@@ -16,6 +16,7 @@ import {
   IntegrationInboxCursorExpired,
   IntegrationInboxTransientError,
   IntegrationPermissionError,
+  integrationCatalogProxyErrorCodes,
   type IntegrationProvider,
   type IntegrationSession,
 } from '../../ports/integrations.ts';
@@ -363,24 +364,7 @@ export function createComposioProvider(options: {
         throw new IntegrationCatalogAccessDenied(code.success ? code.data : undefined);
       }
       if (failure) {
-        const code = z
-          .enum([
-            'rate_limited',
-            'installation_busy',
-            'public_budget_exceeded',
-            'provider_rate_limited',
-            'service_unavailable',
-            'security_service_unavailable',
-            'public_access_unavailable',
-            'provider_unavailable',
-            'provider_request_failed',
-            'catalog_unavailable',
-            'operation_timeout',
-            'invalid_limit_configuration',
-            'invalid_provider_response',
-            'unsafe_provider_response',
-          ])
-          .safeParse(failure.code);
+        const code = z.enum(integrationCatalogProxyErrorCodes).safeParse(failure.code);
         throw new IntegrationCatalogFailure(
           failure.reason,
           failure.status,
