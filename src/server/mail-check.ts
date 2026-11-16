@@ -1,6 +1,7 @@
 import type { DecisionModel, DecisionQuestion } from '../ports/decisions.ts';
 import type { MemoryCurator } from '../ports/memory-curator.ts';
 import type { MailCheck } from './integration-result.ts';
+import { spendingLimitReached } from './ledger.ts';
 
 export function createMailCheck({
   curator,
@@ -27,6 +28,7 @@ export function createMailCheck({
     ],
   };
   let checking = 0;
+  const expired = Symbol('mail check limit');
   const waiting: Array<() => void> = [];
   async function request<T>(
     work: (stop: AbortSignal) => Promise<T>,
@@ -60,7 +62,7 @@ export function createMailCheck({
     const expire = () => setImmediate(release);
     limit.addEventListener('abort', expire, { once: true });
     return new Promise<T>((resolve, reject) => {
-      const cancel = () => reject(stop.reason);
+      const cancel = () => reject(limit.aborted ? expired : stop.reason);
       stop.addEventListener('abort', cancel, { once: true });
       void (async () => {
         try {
@@ -115,13 +117,16 @@ export function createMailCheck({
           return 'the check model gave no valid answer';
         } catch (error) {
           if (signal?.aborted) return stopped;
-          const timeout = error instanceof Error && error.name === 'TimeoutError';
-          if (timeout) read.abort(error);
-          return timeout
-            ? 'the check model did not answer within 15 seconds'
-            : typeof (error as { status?: unknown })?.status === 'number'
-              ? `the check model request failed (HTTP ${(error as { status: number }).status})`
-              : 'the check model request failed';
+          if (error === expired) {
+            read.abort();
+            return 'the check model did not answer within 15 seconds';
+          }
+          if (read.signal.aborted) return stopped;
+          if (error instanceof Error && error.message === spendingLimitReached)
+            return spendingLimitReached;
+          return typeof (error as { status?: unknown })?.status === 'number'
+            ? `the check model request failed (HTTP ${(error as { status: number }).status})`
+            : 'the check model request failed';
         }
       }),
     );

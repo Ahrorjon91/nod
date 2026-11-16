@@ -1223,6 +1223,20 @@ test('single mail checks keep their provider contract and fail closed without a 
     await leaky(Object.assign(new Error('Synthetic secret 482913'), { status: 429 })),
     ['the check model request failed (HTTP 429)'],
   );
+  let calls = 0;
+  assert.deepEqual(
+    await createMailCheck({
+      curator: {
+        ...curator,
+        async curate() {
+          calls += 1;
+          if (calls === 1) throw new DOMException('Synthetic provider timeout', 'TimeoutError');
+          return { access: false };
+        },
+      },
+    })([email, email]),
+    ['the check model request failed', false],
+  );
 });
 
 test('queued mail checks preserve caller attribution, cancel without invoking providers and bound concurrency', async () => {
@@ -1316,10 +1330,10 @@ test('a mail check timeout stops the rest of its read and does not wait for an u
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(called, 6);
   timeout.abort(new DOMException('Synthetic timeout', 'TimeoutError'));
-  assert.deepEqual(
-    await result,
-    Array<string>(100).fill('the check model did not answer within 15 seconds'),
-  );
+  assert.deepEqual(await result, [
+    ...Array<string>(6).fill('the check model did not answer within 15 seconds'),
+    ...Array<string>(94).fill('the read was stopped before its check finished'),
+  ]);
   const later = check([
     { from: 'later@example.test', subject: 'Receipt', text: 'Synthetic receipt' },
   ]);
