@@ -4384,6 +4384,7 @@ async function contextRecoveryServer(
   callsPerStep = 1,
   overflowStep = 0,
   summaryOverflow = false,
+  maximumContext?: number,
 ) {
   const { createServer } = await import('node:http');
   const chunk = (value: object) => `data: ${JSON.stringify(value)}\n\n`;
@@ -4401,7 +4402,12 @@ async function contextRecoveryServer(
       bodies.push(body);
       const summarizing = summary(body);
       const step = summarizing ? 0 : ++agentRequests;
-      if (step === overflowStep || (summarizing && summaryOverflow)) {
+      if (
+        step === overflowStep ||
+        (summarizing && summaryOverflow) ||
+        (maximumContext !== undefined &&
+          Buffer.byteLength(JSON.stringify(body.messages)) / 4 > maximumContext)
+      ) {
         response.writeHead(400, { 'content-type': 'application/json' });
         response.end(
           JSON.stringify({
@@ -4778,6 +4784,76 @@ test('parallel tool results share the remaining model context', async (t) => {
   const answer = bodies.findLast((body) => !summary(body));
   assert.ok(answer);
   assert.equal(JSON.stringify(answer.messages).match(/workspaceFile/g)?.length, 2);
+});
+
+test('a parallel batch of individually bounded tool results fits the next model request', async (t) => {
+  const window = 131_072;
+  const count = 16;
+  const { bodies, summary, url, close } = await contextRecoveryServer(1, count, -1, false, window);
+  t.after(close);
+  const access = smallContextAccess('compatible', 'fixture-context', window);
+  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+  access.definition.spec = { ...access.definition.spec, baseUrl: url };
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-parallel-batch-context-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const events: AgentEvent[] = [];
+  const executions = new Map<string, number>();
+  const workspace = await hostSandbox(t);
+  const agent = createPiAgent({
+    provider: 'compatible',
+    sessionRoot: directory,
+    resolve: async () => access,
+  });
+  t.after(() => agent.dispose());
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    restricted: true,
+    systemPrompt: 'Inspect each synthetic record once and report the result.',
+    workspace: workspace.workspace,
+    runTool: async (_name, _params, run) => run(),
+    tools: Array.from({ length: count }, (_, index) => {
+      const name = index ? `inspect_fixture_${index}` : 'inspect_fixture';
+      return {
+        name,
+        description: 'Inspect one synthetic record.',
+        parameters: Type.Object({}),
+        parallel: true,
+        execute: async () => {
+          executions.set(name, (executions.get(name) ?? 0) + 1);
+          return {
+            content: [
+              { type: 'text' as const, text: `Synthetic record ${index}: ` + 'x'.repeat(56_000) },
+            ],
+          };
+        },
+      };
+    }),
+    shouldStop: () => false,
+    onEvent: (event) => events.push(event),
+  });
+  await session.prompt('Inspect all sixteen synthetic records.', []);
+  await session.dispose();
+  assert.equal(executions.size, count);
+  assert.ok([...executions.values()].every((calls) => calls === 1));
+  assert.deepEqual(
+    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
+    ['Synthetic answer'],
+    JSON.stringify(events.flatMap((event) => (event.type === 'error' ? [event.message] : []))),
+  );
+  const answer = bodies.findLast((body) => !summary(body));
+  assert.ok(answer);
+  assert.ok(bodies.every((body) => Buffer.byteLength(JSON.stringify(body.messages)) / 4 <= window));
+  assert.ok(JSON.stringify(answer.messages).includes('workspaceFile'));
+  const outputs = join(workspace.root, 'workspace', '.nod', 'outputs');
+  const files = await readdir(outputs);
+  assert.equal(files.length, count);
+  assert.deepEqual(
+    (await Promise.all(files.map((file) => readFile(join(outputs, file), 'utf8')))).sort(),
+    Array.from(
+      { length: count },
+      (_, index) => `Synthetic record ${index}: ` + 'x'.repeat(56_000),
+    ).sort(),
+  );
 });
 
 test('Pi recovers saved tool history across final deliveries, waits and model changes', async (t) => {

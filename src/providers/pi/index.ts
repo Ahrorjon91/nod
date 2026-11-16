@@ -522,6 +522,7 @@ export function createPiAgent(options: {
       );
       if (budget.compact && input.compactInstructions)
         input = { ...input, ...input.compactInstructions };
+      let toolCallCount = 1;
       const boundedOutput = async (
         name: string,
         run: () => ReturnType<ToolDefinition['execute']>,
@@ -537,7 +538,7 @@ export function createPiAgent(options: {
         const images = result.content.filter((part) => part.type === 'image');
         if (!text && !images.length) return result;
         if (
-          Buffer.byteLength(text) <= budget.toolOutput.maxBytes &&
+          Buffer.byteLength(text) <= budget.toolOutput.maxBytes / toolCallCount &&
           estimateTokens({
             role: 'toolResult',
             toolCallId: '',
@@ -545,7 +546,8 @@ export function createPiAgent(options: {
             content: result.content,
             isError: result.isError ?? false,
             timestamp: 0,
-          }) <= budget.toolOutput.maxTokens
+          }) <=
+            budget.toolOutput.maxTokens / toolCallCount
         )
           return result;
         signal?.throwIfAborted();
@@ -600,7 +602,7 @@ export function createPiAgent(options: {
         const saved = JSON.stringify({
           workspaceFile: file,
           characters: text.length,
-          preview: text.slice(0, budget.toolOutput.previewCharacters),
+          preview: text.slice(0, Math.floor(budget.toolOutput.previewCharacters / toolCallCount)),
         });
         const pointer = result.isError ? saved : untrustedBlock(name, saved);
         return {
@@ -1176,6 +1178,10 @@ export function createPiAgent(options: {
           }
         }
         if (event.type === 'message_end' && event.message.role === 'assistant') {
+          toolCallCount = Math.max(
+            1,
+            event.message.content.filter((part) => part.type === 'toolCall').length,
+          );
           if (
             event.message.stopReason === 'error' &&
             tokenRateLimit.test(event.message.errorMessage ?? '')
