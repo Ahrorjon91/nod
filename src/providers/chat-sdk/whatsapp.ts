@@ -53,7 +53,9 @@ export type WhatsAppDrop = {
     | 'from_me'
     | 'before_link'
     | 'invalid_time'
-    | 'duplicate'
+    | 'own_echo'
+    | 'missing_id'
+    | 'lid_lookup_failed'
     | 'decrypt_failed'
     | 'unsupported_type'
     | 'resend_ignored'
@@ -205,9 +207,10 @@ export function createWhatsAppLinkedTransport(options: {
       if (!phone && options.mode !== 'self-chat')
         phone = numberOf(await current.signalRepository.lidMapping.getPNForLID(jid));
       if (!phone && options.mode === 'bot' && options.allowedNumber) {
-        const lid = await current.signalRepository.lidMapping.getLIDForPN(
-          `${options.allowedNumber}@s.whatsapp.net`,
-        );
+        const lid = await current.signalRepository.lidMapping
+          .getLIDForPN(`${options.allowedNumber}@s.whatsapp.net`)
+          .catch(() => false as const);
+        if (lid === false) return 'lid_lookup_failed';
         if (lid && jidNormalizedUser(lid) === jidNormalizedUser(jid)) phone = options.allowedNumber;
       }
     }
@@ -329,8 +332,8 @@ export function createWhatsAppLinkedTransport(options: {
     if (closed || halted || socket !== current || !identity()) return;
     const id = message.key.id;
     const at = Number(message.messageTimestamp) * 1000;
-    if (!id) return drop('unsupported_type', message);
-    if (sentIds.has(id)) return drop('duplicate', message);
+    if (!id) return drop('missing_id', message);
+    if (sentIds.has(id)) return drop('own_echo', message);
     if (!Number.isFinite(at) || at > Date.now() + 300_000) return drop('invalid_time', message);
     if (at < linkedAt) return drop('before_link', message);
     const source = await sender(message, current);

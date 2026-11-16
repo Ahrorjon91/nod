@@ -688,6 +688,7 @@ test(
           const accountId = `linked:${own}`;
           const jid = `${owner}@s.whatsapp.net`;
           const store = createChannelSessionStore({ pool, ownerId: `fixture-${mode}`, keyStore });
+          let lidLookups = 0;
           const createSocket: Factory = (config) => {
             if (failConnect)
               throw Object.assign(new Error('synthetic-private-connect-error'), {
@@ -702,7 +703,10 @@ test(
                 lidMapping: {
                   getPNForLID: async (lid: string) =>
                     ['55555555@lid', '66666666@lid'].includes(lid) ? jid : null,
-                  getLIDForPN: async (pn: string) => (pn === jid ? '77777777@lid' : null),
+                  getLIDForPN: async (pn: string) => {
+                    if (++lidLookups === 2) throw new Error('Synthetic lookup failure.');
+                    return pn === jid ? '77777777@lid' : null;
+                  },
                 },
               },
               end: () => {},
@@ -826,6 +830,7 @@ test(
                 envelope('lid', '55555555@lid'),
                 envelope('unmapped-lid', '77777777@lid'),
                 envelope('unmapped-intruder', '88888888@lid', false),
+                envelope('unmapped-stranger', '99999999@lid', false),
                 ...(mode === 'self-chat'
                   ? [
                       {
@@ -863,10 +868,13 @@ test(
             );
             if (mode === 'bot') assert.equal(collected[4].threadId, '77777777@lid');
             assert.deepEqual(
-              dropped.find((drop) => drop.addressing === 'lid'),
+              dropped.filter((drop) => drop.addressing === 'lid'),
               mode === 'bot'
-                ? { reason: 'sender_unmatched', mode: 'bot', addressing: 'lid', suppressed: 0 }
-                : { reason: 'self_chat_mismatch', mode: 'own', addressing: 'lid', suppressed: 0 },
+                ? [
+                    { reason: 'lid_lookup_failed', mode: 'bot', addressing: 'lid', suppressed: 0 },
+                    { reason: 'sender_unmatched', mode: 'bot', addressing: 'lid', suppressed: 0 },
+                  ]
+                : [{ reason: 'self_chat_mismatch', mode: 'own', addressing: 'lid', suppressed: 0 }],
             );
             assert.ok(dropped.some((drop) => drop.reason === 'resend_ignored'));
             assert.doesNotMatch(JSON.stringify(dropped), /\d{5,}|@/);
