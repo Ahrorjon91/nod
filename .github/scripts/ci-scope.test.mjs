@@ -19,7 +19,7 @@ test('text and media changes do not select application tests or native checks', 
   assert.deepEqual(enabled(['README.md', 'AGENTS.md', 'docs/src/content/docs/use/chat.md']), []);
   assert.deepEqual(enabled(['public/logos/nod.svg', 'src/web/styles.css']), ['build', 'types']);
   assert.deepEqual(enabled(['src/web/components/message.tsx']), ['build', 'integration', 'types']);
-  assert.equal(selectChecks(['src/web/components/message.tsx']).testMode, 'web');
+  assert.equal(selectChecks(['src/web/components/message.tsx']).testMode, 'all');
 });
 
 test('test-only changes select those files without image or platform checks', () => {
@@ -33,8 +33,8 @@ test('test-only changes select those files without image or platform checks', ()
 test('server changes select affected Linux tests without native checks', () => {
   assert.deepEqual(enabled(['src/server/thread.ts']), ['evals', 'integration', 'types']);
   assert.equal(selectChecks(['src/server/thread.ts', 'tests/pi.test.ts']).testMode, 'affected');
-  assert.equal(selectChecks(['src/web/app.tsx', 'src/server/thread.ts']).testMode, 'affected');
-  assert.equal(selectChecks(['src/server/thread.ts', 'src/web/app.tsx']).testMode, 'web');
+  assert.equal(selectChecks(['src/web/app.tsx', 'src/server/thread.ts']).testMode, 'all');
+  assert.equal(selectChecks(['src/server/thread.ts', 'src/web/app.tsx']).testMode, 'all');
 });
 
 test('container and native checks follow their inputs', () => {

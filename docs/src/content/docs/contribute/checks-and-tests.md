@@ -175,7 +175,7 @@ CI reads the changed files on pull requests, merge queue checks and pushes to `m
 
 The required **Checks, tests and build** result keeps its existing name. It waits for each selected job. A failed scope check, missing scope output, failed job or selected job that was skipped makes this result fail. The native Windows result is included. No branch protection change is needed.
 
-Formatting, Oxlint, type checks, client builds and tests run in parallel. Desktop, native, eval and container jobs also start after file selection. Each integration runner builds its web fixture inside the cached test image. It uses that image’s dependencies without an install on the runner.
+Formatting, Oxlint, type checks, client builds and tests run in parallel. File selection installs dependencies only when it needs the import graph. Desktop, native, eval and container jobs also start after file selection. Each integration runner builds its web fixture inside the cached test image. It uses that image’s dependencies without an install on the runner.
 
 CI splits the selected test files across up to four runners. It assigns the slowest files first, using recorded file times to balance the work. Each runner starts up to four test files at once. Successful test runs cache file paths and times for later runs. This cache update does not hold the required result. Without recorded times, file size sets the initial weight. Test results and private content do not enter this cache.
 

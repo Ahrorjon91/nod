@@ -56,7 +56,7 @@ export function selectChecks(paths) {
       enable('types', 'build');
       if (!/\.(css|svg|png|jpe?g|webp|gif|woff2?|ico)$/.test(path)) {
         enable('integration');
-        if (testMode !== 'all') testMode = 'web';
+        testMode = 'all';
       }
       continue;
     }
@@ -68,12 +68,13 @@ export function selectChecks(paths) {
       }
       if (/\.(html|js)$/.test(path)) {
         enable('integration');
-        if (testMode !== 'all') testMode = 'web';
+        testMode = 'all';
       }
       continue;
     }
     if (path.startsWith('src/')) {
       integration();
+      if (!/\.[cm]?[jt]sx?$/.test(path)) testMode = 'all';
       if (/^src\/(shared|ports)\//.test(path)) enable('build', 'desktop');
       if (/^src\/providers\/(docker|container-browser|agent-browser)\//.test(path))
         enable('images', 'desktop');
@@ -279,11 +280,18 @@ if (import.meta.main) {
       scope.integration = true;
       testMode = 'all';
     }
+    if (process.argv.includes('--plan')) {
+      const graph = testMode === 'affected';
+      if (process.env.GITHUB_OUTPUT)
+        await appendFile(process.env.GITHUB_OUTPUT, `graph=${graph}\n`);
+      console.log(JSON.stringify({ graph, ...scope }));
+      process.exit(0);
+    }
     const tracked = git('ls-files', '-z').split('\0').filter(Boolean);
     const available = tracked.filter((path) => /^tests\/[^/]+\.test\.ts$/.test(path));
     const selected = new Set(testFiles.filter((path) => available.includes(path)));
     if (testMode === 'all') available.forEach((path) => selected.add(path));
-    if (['web', 'affected'].includes(testMode)) {
+    if (testMode === 'affected') {
       const incremental =
         !process.env.GITHUB_EVENT_NAME || process.env.GITHUB_EVENT_NAME === 'pull_request';
       let affected = available;
