@@ -7096,6 +7096,10 @@ test('native provider discovery uses owned keys, bounded Google pagination and t
             capabilities: { completion_chat: true, function_calling: true },
           },
           {
+            id: 'deepseek-v4-1-flash-1017',
+            capabilities: { completion_chat: true, function_calling: true, vision: true },
+          },
+          {
             id: 'codestral-latest',
             capabilities: { completion_chat: true, function_calling: false },
           },
@@ -7125,11 +7129,14 @@ test('native provider discovery uses owned keys, bounded Google pagination and t
     type: 'api_key',
     key: 'fixture-mistral-key',
   });
-  assert.deepEqual(
-    mistral.map(({ choice }) => choice.id),
-    ['mistral-large-latest'],
-  );
+  assert.deepEqual(mistral.map(({ choice }) => choice.id).sort(), [
+    'deepseek-v4-1-flash-1017',
+    'mistral-large-latest',
+  ]);
   assert.equal(mistral[0].spec.api, 'mistral-conversations');
+  const deepseek = mistral.find(({ choice }) => choice.id === 'deepseek-v4-1-flash-1017')!;
+  assert.equal(deepseek.choice.images, true);
+  assert.ok((deepseek.spec as { input: string[] }).input.includes('image'));
   await assert.rejects(
     backend.catalog('google', 'api_key', { type: 'api_key', key: 'fixture-rejected-key' }),
     (error: Error) =>
