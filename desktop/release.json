@@ -1,10 +1,7 @@
 {
-  "version": "0.8.0",
-  "previousTag": "nod-v0.7.6",
-  "source": "e1cf299e14a83973ec665ead9404b99bf4ab969b",
-  "highlights": "## 🧠 A model for each job\n\nChoose separate models for schedules and work Nod starts on its own in **Settings → Models**. Keep your main model for chat, use **The light model** for routine checks, or select another connected text model. Individual tasks and schedules can have their own model too.\n\nTry telling Nod: “Run my schedules on the light model.” Model choices show estimated costs when pricing is available. Changes apply from the next turn. [Choose your models](https://nod.n8n.io/docs/connect/models/#models-for-each-kind-of-work).\n\n## 🧵 Know which task is asking\n\nQuestions from tasks and schedules now show the name of the work above them. A pink dot marks a question that needs you. After you answer, the line shows progress as the work continues. Select a task’s line to open its card.\n\n## Also in this release\n\n- **Stay awake:** The desktop app prevents idle sleep while local work runs. Closing the lid or choosing Sleep still puts your computer to sleep.\n- **Local files:** Paths starting with `~` work. Ask to see a file and Nod attaches it in chat.\n- **Model connections:** Better handling of OpenAI-compatible servers, incomplete model details, and failed connections. Errors keep the service’s reason.\n- **Schedules:** Updates keep the instructions you gave when you created the schedule.\n- **First steps:** Say hello or ask for ideas. Nod offers a small task and a clear result to get you started.",
-  "video": {
-    "url": "https://github.com/user-attachments/assets/69d916af-db97-4b12-b770-0ddb800cd416",
-    "releaseSha256": "7edb46087464ac3fa16eec1f6bb3f031422f607a8f37745d80db1688a20806f2"
-  }
+  "version": "0.8.1",
+  "previousTag": "nod-v0.8.0",
+  "source": "b40b6329e34a78f4f1628a741efb776950683fb1",
+  "highlights": "## Clearer app connection errors\n\nIf an app connection cannot start, Nod now shows the connection service's status and a recognized reason. That makes a rate limit or temporary service error easier to distinguish from a sign-in problem when you send feedback.\n\nIf an Attio request receives a Cloudflare HTML 403 response, the error includes the UTC time and a validated Ray ID when one is available. Send those details with your feedback so we can trace the request. This adds a diagnostic; it does not change the access rule.\n\n## Quieter background checks\n\nNod skips connection watch checks for disabled or replaced scheduled jobs. Gmail inbox checks wait until their next scheduled poll after a known connection-service 429 or 503 refusal, instead of retrying immediately. The inbox cursor and completed messages are preserved for the next poll.",
+  "video": null
 }
