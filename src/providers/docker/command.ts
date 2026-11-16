@@ -3,7 +3,7 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { serviceEnvironment } from '../process.ts';
 import type { ConnectedCli } from '../../ports/computer.ts';
 import { threadIdentity } from '../../ports/thread-identity.ts';
@@ -108,8 +108,6 @@ except Exception:
  if home: shutil.rmtree(home,ignore_errors=True)
  print(json.dumps({'type':'error'}),flush=True)
  sys.exit(1)
-for step in steps:
- if len(sys.argv)>1: step[1]['NOD_COMMAND']=sys.argv[1]
 sel=selectors.DefaultSelector()
 sel.register(sys.stdin.buffer.raw,selectors.EVENT_READ,'control')
 reason=None
@@ -243,36 +241,39 @@ finish({'type':'exit','code':code,'reason':reason})
 `;
 
 const commandStopProgram = `import os,sys,signal,time
-mark=sys.argv[1]
-if not os.path.isdir('/proc'): sys.exit('The workspace has no /proc to check its processes.')
+proc=sys.argv[1]
+user=os.getuid()
+if not os.path.isdir(proc): sys.exit('The workspace has no %s to check its processes.'%proc)
 def scan():
  table={}
- for name in os.listdir('/proc'):
-  if not name.isdigit() or int(name)==os.getpid(): continue
+ for name in os.listdir(proc):
+  if not name.isdigit(): continue
   try:
-   with open('/proc/'+name+'/stat') as f: values=f.read().rsplit(')',1)[1].split()
-   if values[0] in ['Z','X']: continue
-   with open('/proc/'+name+'/cmdline','rb') as f: marked=mark.encode() in f.read().split(b'\\0')
-   try:
-    with open('/proc/'+name+'/environ','rb') as f: marked=marked or ('NOD_COMMAND='+mark).encode() in f.read().split(b'\\0')
-   except OSError: pass
-   table[int(name)]=(marked,[int(value) for value in values[1:4]])
-  except (OSError,ValueError,IndexError): pass
- found={pid for pid,(marked,_) in table.items() if marked}
- grow=True
- while grow:
-  grow=False
-  for pid,(_,parents) in table.items():
-   if pid not in found and found.intersection(parents): found.add(pid);grow=True
- return found
+   owner=os.stat(proc+'/'+name).st_uid
+   with open(proc+'/'+name+'/stat') as f: values=f.read().rsplit(')',1)[1].split()
+   table[int(name)]=(owner,values[0],int(values[1]),int(values[19]))
+  except (FileNotFoundError,ProcessLookupError): pass
+  except Exception as error: sys.exit('Nod could not read process %s: %s.'%(name,error))
+ ancestors=set()
+ pid=os.getpid()
+ while pid in table and pid not in ancestors:
+  ancestors.add(pid)
+  pid=table[pid][2]
+ try:
+  with open(proc+'/1/cmdline','rb') as f: init=os.path.basename(f.read().split(b'\\0')[0]) in [b'docker-init',b'tini']
+ except Exception as error: sys.exit('Nod could not read the workspace init process: %s.'%error)
+ children=sorted((started,pid) for pid,(_,_,parent,started) in table.items() if parent==1)
+ main=children[0][1] if init and children else None
+ return {pid for pid,(owner,state,_,_) in table.items() if owner==user and state not in ['Z','X'] and pid not in ancestors and pid not in [1,main]}
 deadline=time.monotonic()+10
 while True:
  found=scan()
  if not found: sys.exit(0)
- if time.monotonic()>deadline: sys.exit('%d of its processes are still running after SIGKILL.'%len(found))
+ if time.monotonic()>deadline: sys.exit('%d workspace processes are still running after SIGKILL.'%len(found))
  for pid in found:
   try: os.kill(pid,signal.SIGKILL)
-  except OSError: pass
+  except ProcessLookupError: pass
+  except OSError as error: sys.exit('Nod could not stop process %d: %s.'%(pid,error))
  time.sleep(0.1)
 `;
 
@@ -309,7 +310,7 @@ export async function runWorkspaceCommand(options: {
   if (!/^nod-workspace(?:-[a-zA-Z0-9_-]+)?$/.test(options.container))
     throw new Error('WORKSPACE_CONTAINER must identify a Nod workspace.');
   const id = threadIdentity(options.threadId);
-  const launch = (marker: string) => () =>
+  const launch = (workdir: string) => () =>
     (options.spawn ?? spawn)(
       'docker',
       [
@@ -318,28 +319,29 @@ export async function runWorkspaceCommand(options: {
         '--user',
         options.cli ? `${connectedUser(options.cli)}:1002` : 'node',
         '--workdir',
-        options.cli ? '/var/tmp' : `/workspace/${id}`,
+        workdir,
         options.container,
         '/usr/bin/python3',
         '-I',
         '-u',
         '-c',
         workspaceCommandProgram,
-        marker,
       ],
       { env: serviceEnvironment(), shell: false },
     );
-  const marker = randomUUID();
   try {
-    return await runSupervisedCommand({ ...options, launch: launch(marker) });
+    return await runSupervisedCommand({
+      ...options,
+      launch: launch(options.cli ? '/var/tmp' : `/workspace/${id}`),
+    });
   } catch (error) {
     if (error instanceof WorkspaceCommandError && error.uncertain)
       error.stop = async () => {
         const result = await runSupervisedCommand({
-          args: ['/usr/bin/python3', '-I', '-c', commandStopProgram, marker],
+          args: ['/usr/bin/python3', '-I', '-c', commandStopProgram, '/proc'],
           timeoutMs: 30_000,
           maxBytes: 4096,
-          launch: launch(randomUUID()),
+          launch: launch('/var/tmp'),
         });
         if (result.exitCode)
           throw new Error(

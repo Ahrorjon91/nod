@@ -368,7 +368,7 @@ async function execute(session: WorkspaceSession, command: string) {
 async function local(programPrefix = '') {
   const directory = await mkdtemp('/tmp/nod-command-');
   const launch: WorkspaceCommandLauncher = (_command, args, options) =>
-    spawn('python3', ['-u', '-c', programPrefix + args.at(-2)!, args.at(-1)!], {
+    spawn('python3', ['-u', '-c', programPrefix + args.at(-1)!], {
       ...options,
       cwd: directory,
       stdio: 'pipe',
@@ -462,11 +462,9 @@ test('connected CLIs run only their sealed install with a clean environment', as
       'FIXTURE_TOKEN',
       'HOME',
       'LANG',
-      'NOD_COMMAND',
       'PATH',
       'XDG_CONFIG_HOME',
     ]);
-    assert.equal(environment.NOD_COMMAND, launches.at(-1)!.at(-1));
     assert.equal(
       environment.PATH,
       `${await realpath(prefix)}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
@@ -506,9 +504,9 @@ test('connected CLIs run only their sealed install with a clean environment', as
   }
 });
 
-function fakeDocker(check: { code: number; stderr?: string }) {
+function fakeDocker(check: (args: string[]) => Promise<{ code: number; stderr?: string }>) {
   const launches: Array<{
-    marker: string;
+    workdir: string;
     request: Promise<{ args: string[] }>;
     cancelled: Promise<void>;
     child: ReturnType<WorkspaceCommandLauncher> & EventEmitter;
@@ -538,7 +536,7 @@ function fakeDocker(check: { code: number; stderr?: string }) {
     });
     const index = launches.length;
     launches.push({
-      marker: args.at(-1)!,
+      workdir: args[args.indexOf('--workdir') + 1]!,
       request,
       cancelled,
       child: child as unknown as ReturnType<WorkspaceCommandLauncher> & EventEmitter,
@@ -546,7 +544,7 @@ function fakeDocker(check: { code: number; stderr?: string }) {
     void request.then(({ args }) => {
       if (args.at(-1) === 'ok') setImmediate(() => exit(index, 0));
       else if (args[0] === '/usr/bin/python3')
-        setImmediate(() => exit(index, check.code, null, check.stderr));
+        void check(args).then(({ code, stderr }) => exit(index, code, null, stderr));
     });
     return child as unknown as ReturnType<WorkspaceCommandLauncher>;
   };
@@ -574,7 +572,7 @@ function fakeDocker(check: { code: number; stderr?: string }) {
 }
 
 test('an uncertain command is stopped once and the workspace keeps working', async () => {
-  const docker = fakeDocker({ code: 0 });
+  const docker = fakeDocker(async () => ({ code: 0 }));
   const first = execute(docker.session, 'first');
   const second = execute(docker.session, 'second');
   try {
@@ -595,24 +593,36 @@ test('an uncertain command is stopped once and the workspace keeps working', asy
     const requests = await Promise.all(docker.launches.map(({ request }) => request));
     assert.deepEqual(
       requests.map(({ args }) => args.at(-1)),
-      ['first', 'second', docker.launches[0]!.marker, 'ok'],
+      ['first', 'second', '/proc', 'ok'],
+    );
+    assert.deepEqual(
+      docker.launches.map(({ workdir }) => workdir),
+      ['/workspace/fixture', '/workspace/fixture', '/var/tmp', '/workspace/fixture'],
     );
     assert.deepEqual(requests[2]!.args.slice(0, 3), ['/usr/bin/python3', '-I', '-c']);
-    assert.notEqual(docker.launches[2]!.marker, docker.launches[0]!.marker);
   } finally {
     await docker.workspace.dispose();
     await Promise.allSettled([first, second]);
   }
 });
 
-test('the workspace stays unavailable when an uncertain command cannot be confirmed stopped', async () => {
-  const docker = fakeDocker({
-    code: 1,
-    stderr: '2 of its processes are still running after SIGKILL.\n',
+test('the workspace stays fenced when a live process cannot be read', async () => {
+  const proc = await mkdtemp(join(tmpdir(), 'nod-proc-'));
+  await mkdir(join(proc, '1'));
+  await writeFile(join(proc, '1', 'stat'), `1 (docker-init) S 0 1 1${' 0'.repeat(16)} 5`);
+  await writeFile(join(proc, '1', 'cmdline'), '/sbin/docker-init\0--\0/usr/bin/sleep\0');
+  await mkdir(join(proc, '4242', 'stat'), { recursive: true });
+  const docker = fakeDocker(async (args) => {
+    try {
+      await promisify(execFile)('python3', ['-I', '-c', args[3]!, proc]);
+      return { code: 0 };
+    } catch (error) {
+      return { code: 1, stderr: (error as { stderr: string }).stderr };
+    }
   });
   const first = execute(docker.session, 'first');
   const reason =
-    /did not stop safely: .*Nod could not confirm that its processes stopped: 2 of its processes are still running after SIGKILL\. Restart Nod before continuing\./;
+    /did not stop safely: .*Nod could not confirm that its processes stopped: Nod could not read process 4242: \[Errno 21\] Is a directory: .*\. Restart Nod before continuing\./;
   try {
     docker.launches[0]!.child.emit('close', 137);
     await assert.rejects(first, reason);
@@ -621,44 +631,68 @@ test('the workspace stays unavailable when an uncertain command cannot be confir
   } finally {
     await docker.workspace.dispose();
     await Promise.allSettled([first]);
+    await rm(proc, { recursive: true, force: true });
   }
 });
 
-test('stopping an uncertain command ends the processes it detached', async () => {
-  const f = await local();
-  let pid = 0;
-  const running = async () => {
-    try {
-      return !/^\d+ \(.*\) [ZX] /.test(await readFile(`/proc/${pid}/stat`, 'utf8'));
-    } catch {
-      return false;
-    }
-  };
-  try {
-    const error = await f
-      .run(['bash', '-c', 'setsid sleep 60 & echo $!; sleep 0.5; kill -9 $PPID'], {
-        onData: (chunk) => {
-          pid ||= Number(chunk.toString().trim());
-        },
-      })
-      .then(
-        () => assert.fail('The command should not finish.'),
-        (error: unknown) => error,
+test(
+  'recovery ends a fully detached process even after the command removed its folder',
+  { skip: !process.env.NOD_TEST_WORKSPACE_IMAGE, timeout: 120_000 },
+  async (t) => {
+    const container = `nod-workspace-recovery-${randomUUID().slice(0, 8)}`;
+    const docker = async (...args: string[]) =>
+      (await promisify(execFile)('docker', args, { timeout: 30_000 })).stdout.trim();
+    t.after(() => docker('rm', '-f', container).catch(() => {}));
+    await docker(
+      'run',
+      '-d',
+      '--init',
+      '--network',
+      'none',
+      '--name',
+      container,
+      '--entrypoint',
+      '/usr/bin/sleep',
+      process.env.NOD_TEST_WORKSPACE_IMAGE!,
+      'infinity',
+    );
+    const threadId = randomUUID();
+    await docker('exec', '--user', 'node', container, 'mkdir', `/workspace/${threadId}`);
+    const daemons = async () =>
+      Number(
+        await docker(
+          'exec',
+          '--user',
+          'node',
+          container,
+          'python3',
+          '-c',
+          [
+            'import os',
+            'def match(pid):',
+            ' try: return open(f"/proc/{pid}/cmdline","rb").read()==b"/usr/bin/sleep\\x00301\\x00"',
+            ' except OSError: return False',
+            'print(sum(match(pid) for pid in os.listdir("/proc") if pid.isdigit()))',
+          ].join('\n'),
+        ),
       );
+    const run = (script: string) =>
+      runWorkspaceCommand({ container, threadId, args: ['bash', '-c', script] });
+    const error = await run(
+      'python3 -c \'import os,sys\nif os.fork(): sys.exit()\nos.setsid()\nif os.fork(): sys.exit()\nos.execve("/usr/bin/sleep",["/usr/bin/sleep","301"],{})\'; cd /; rm -r "/workspace/${threadId}"; sleep 1; kill -9 $PPID',
+    ).then(
+      () => assert.fail('The command should not finish.'),
+      (error: unknown) => error,
+    );
     assert.ok(error instanceof WorkspaceCommandError && error.uncertain && error.stop);
-    assert.match(error.message, /closed before the command confirmed it finished/);
-    if (process.platform !== 'linux') {
-      await assert.rejects(error.stop(), /no \/proc/);
-      return;
-    }
-    assert.equal(await running(), true);
+    assert.equal(await daemons(), 1);
     await error.stop();
-    assert.equal(await running(), false);
-  } finally {
-    if (process.platform === 'linux' && (await running())) process.kill(pid, 'SIGKILL');
-    await f.close();
-  }
-});
+    assert.equal(await daemons(), 0);
+    assert.equal(await docker('inspect', '-f', '{{.State.Running}}', container), 'true');
+    await docker('exec', '--user', 'node', container, 'mkdir', `/workspace/${threadId}`);
+    assert.equal((await run('echo available')).stdout.toString(), 'available\n');
+  },
+);
 
 test('workspace uploads transfer binary chunks atomically and reject symlink directories', async () => {
   const f = await local();
@@ -779,6 +813,7 @@ test('self-hosted runtime limits Docker access to unprivileged execution in its 
       { Env: ['SECRET=synthetic'] },
       { WorkingDir: '/' },
       { WorkingDir: '/workspace/../var/tmp' },
+      { WorkingDir: '/var/tmp/other' },
       { Tty: true },
       { HostConfig: { Binds: ['/host:/host'] } },
     ])
@@ -810,6 +845,15 @@ test('self-hosted runtime limits Docker access to unprivileged execution in its 
         await call('/containers/nod-workspace-fixture/exec', {
           ...command,
           User: '24000:1002',
+          WorkingDir: '/var/tmp',
+        })
+      ).status,
+      201,
+    );
+    assert.equal(
+      (
+        await call('/containers/nod-workspace-fixture/exec', {
+          ...command,
           WorkingDir: '/var/tmp',
         })
       ).status,

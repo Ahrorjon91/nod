@@ -69,7 +69,7 @@ Every command goes through a small supervisor inside the container, in [`src/pro
 - It owns the command's session and signals every process in it, even ones that left the process group.
 - A command also ends the processes it detached, when the command itself ends, so work it left behind never outlives it. Stop ends the whole tree the same way, and escalates to `SIGKILL` for a process that ignores the first signal.
 - It enforces the timeout: 59 minutes for `bash` by default. The model can ask for longer.
-- It acknowledges when the command ends. If that acknowledgement is lost, the command fails as uncertain with the specific reason, such as the command stream closing early, and never runs again. The server cancels the other running commands, then checks the workspace for processes the command left behind, by its supervisor and the `NOD_COMMAND` ID each of its processes inherits, and ends them. New commands wait for that check. When it confirms nothing is left, the workspace stays available. When it can't, the server fences the workspace with the reason: no more commands run until Nod restarts.
+- It acknowledges when the command ends. If that acknowledgement is lost, the command fails as uncertain with the specific reason, such as the command stream closing early, and never runs again. The server cancels the other running commands, and new commands wait. From `/var/tmp`, a folder the command can't remove, a check then stops every process owned by the command's Linux user, `node` or the connected CLI's own user, including background processes earlier commands started. It spares only the container's init process and its main process, the earliest child of init. When the check confirms none remain, the workspace reopens. When it can't prove that, for example because it can't read a running process's owner or parent, the server fences the workspace with the reason: no more commands run until Nod restarts.
 
 ## Command output
 
@@ -83,7 +83,7 @@ Pi writes truncated output, codemode files and images, and extracted web PDFs to
 
 Each connected CLI runs as its own Linux user, derived from its path ID, in group `nod-connected`. Before each run, the supervisor installs the CLI's declared source into `/var/tmp/nod-cli-<path id>`, a folder only that user can open, if it's missing. It refuses an install folder or executable that another user can write, and refuses to run if another CLI's install belongs to the same user. So one CLI can't change another's install or read its token.
 
-The CLI then runs with an environment built from scratch: a fixed `PATH`, a private temporary `HOME` and `XDG_CONFIG_HOME`, `LANG`, the run's `NOD_COMMAND` ID and the connection's credential variables. Nothing comes from the sandbox user's files or environment, so a program the model plants never receives the token. See [MCP, APIs and CLIs](/connect/mcp-api-cli/).
+The CLI then runs with an environment built from scratch: a fixed `PATH`, a private temporary `HOME` and `XDG_CONFIG_HOME`, `LANG` and the connection's credential variables. Nothing comes from the sandbox user's files or environment, so a program the model plants never receives the token. See [MCP, APIs and CLIs](/connect/mcp-api-cli/).
 
 ## The browser container
 

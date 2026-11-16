@@ -75,7 +75,11 @@ export function createRuntimeProxy({
           )
             return denied(response);
         } else if (body.User === 'node') {
-          if (!/^\/workspace\/[0-9a-f-]{36}$/.test(body.WorkingDir || '')) return denied(response);
+          if (
+            body.WorkingDir !== '/var/tmp' &&
+            !/^\/workspace\/[0-9a-f-]{36}$/.test(body.WorkingDir || '')
+          )
+            return denied(response);
         } else if (!/^[2-5]\d{4}:1002$/.test(body.User || '') || body.WorkingDir !== '/var/tmp')
           return denied(response);
         creating = true;
