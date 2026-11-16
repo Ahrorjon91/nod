@@ -36,6 +36,7 @@ jobs:
       ci: ${{ steps.scope.outputs.ci }}
       test_files: ${{ steps.scope.outputs.test_files }}
       test_matrix: ${{ steps.scope.outputs.test_matrix }}
+      desktop_test_files: ${{ steps.scope.outputs.desktop_test_files }}
       quality_checks: ${{ steps.scope.outputs.quality_checks }}
       format_files: ${{ steps.scope.outputs.format_files }}
     steps:
@@ -139,7 +140,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.scope.outputs.test_matrix) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 20
     services:
       postgres:
@@ -226,7 +227,9 @@ jobs:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
         run: pnpm --dir desktop install --frozen-lockfile
       - name: Check desktop lifecycle, storage and release contracts
-        run: pnpm run desktop:test
+        env:
+          NOD_DESKTOP_TEST_FILES: ${{ needs.scope.outputs.desktop_test_files }}
+        run: node .github/scripts/ci-scope.mjs --desktop-tests
       - name: Check desktop network isolation during restart
         if: needs.scope.outputs.network == 'true'
         run: >-

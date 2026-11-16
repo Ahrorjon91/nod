@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { requireChecks, selectChecks } from './ci-scope.mjs';
+import { requireChecks, selectChecks, selectDesktopTests } from './ci-scope.mjs';
 import { readTimings, shardTests } from './ci-tests.mjs';
 
 const enabled = (paths) =>
@@ -49,6 +49,27 @@ test('container and native checks follow their inputs', () => {
   assert.equal(selectChecks(['desktop/runtime/index.mjs']).desktop, true);
   assert.equal(selectChecks(['deployment/n8n/install.ps1']).windows, true);
   assert.deepEqual(enabled(['evals/src/cli.ts']), ['evals']);
+});
+
+test('application changes do not select desktop release and runtime fixtures', () => {
+  const files = [
+    'desktop/test/settings.test.mjs',
+    'desktop/test/notifications.test.mjs',
+    'desktop/test/runtime-assets.test.mjs',
+    'desktop/test/linux-release.test.mjs',
+  ];
+  assert.deepEqual(
+    selectDesktopTests(['src/shared/model.ts', 'tests/pi.test.ts'], files),
+    files.slice(0, 2),
+  );
+  for (const paths of [
+    null,
+    ['desktop/runtime/index.mjs'],
+    ['src/providers/docker/index.ts'],
+    ['.github/workflows/ci.yml'],
+    ['package.json'],
+  ])
+    assert.deepEqual(selectDesktopTests(paths, files), files);
 });
 
 test('unknown inputs, dependency changes and CI selection changes run all checks', () => {

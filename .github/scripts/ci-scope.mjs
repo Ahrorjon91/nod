@@ -213,6 +213,20 @@ export function requireChecks(needs) {
   }
 }
 
+export function selectDesktopTests(paths, available) {
+  const applicationOnly =
+    paths !== null &&
+    paths.every(
+      (path) =>
+        /^(src\/(shared|ports|server|runtime)\/|tests\/|docs\/|public\/|evals\/|desktop\/ui\/)/.test(
+          path,
+        ) || /\.md$/.test(path),
+    );
+  return applicationOnly
+    ? available.filter((path) => !/\/(runtime-assets|linux-release)\.test\.mjs$/.test(path))
+    : available;
+}
+
 if (import.meta.main) {
   if (process.argv.includes('--format')) {
     const files = JSON.parse(process.env.NOD_FORMAT_FILES);
@@ -222,6 +236,10 @@ if (import.meta.main) {
         ['exec', 'prettier', '--check', '--ignore-unknown', '--', ...(files ?? ['.'])],
         { stdio: 'inherit' },
       );
+  } else if (process.argv.includes('--desktop-tests')) {
+    execFileSync(process.execPath, ['--test', ...JSON.parse(process.env.NOD_DESKTOP_TEST_FILES)], {
+      stdio: 'inherit',
+    });
   } else if (process.argv.includes('--require-checks')) {
     requireChecks(JSON.parse(process.env.CI_NEEDS));
   } else {
@@ -299,6 +317,12 @@ if (import.meta.main) {
       ...scope,
       test_files: JSON.stringify(selectedFiles),
       test_matrix: JSON.stringify({ include: await shardTests(selectedFiles, timings) }),
+      desktop_test_files: JSON.stringify(
+        selectDesktopTests(
+          paths,
+          tracked.filter((path) => /^desktop\/test\/[^/]+\.test\.mjs$/.test(path)),
+        ),
+      ),
       quality_checks: JSON.stringify(quality),
       format_files: JSON.stringify(
         formatAll ? null : paths.filter((path) => tracked.includes(path)),
