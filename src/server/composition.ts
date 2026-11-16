@@ -1258,7 +1258,11 @@ async function initializeApplication(
   const integrations = await createIntegrations(pool, {
     localFiles,
     mailCheck: async (...args) => {
-      if (await preparationPaused()) return args[0].map(() => undefined);
+      if (await preparationPaused())
+        return args[0].map(
+          () =>
+            'background email checks wait while automatic preparation is paused, in quiet hours or at its monthly allowance',
+        );
       return ledger.withPreparation(randomUUID(), () => mailCheck(...args));
     },
     paused: preparationPaused,

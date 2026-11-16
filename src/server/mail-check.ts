@@ -30,26 +30,25 @@ export function createMailCheck({
   const waiting: Array<() => void> = [];
   async function request<T>(
     work: (stop: AbortSignal) => Promise<T>,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<T> {
-    const stop = AbortSignal.any([AbortSignal.timeout(15_000), ...(signal ? [signal] : [])]);
     await new Promise<void>((resolve, reject) => {
       const cancel = () => {
         const index = waiting.indexOf(start);
         if (index !== -1) waiting.splice(index, 1);
-        reject(stop.reason);
+        reject(signal.reason);
       };
       const start = () => {
-        if (stop.aborted) return cancel();
         checking += 1;
-        stop.removeEventListener('abort', cancel);
+        signal.removeEventListener('abort', cancel);
         resolve();
       };
-      stop.addEventListener('abort', cancel, { once: true });
-      if (stop.aborted) cancel();
-      else if (checking < 6) start();
+      if (signal.aborted) return reject(signal.reason);
+      signal.addEventListener('abort', cancel, { once: true });
+      if (checking < 6) start();
       else waiting.push(start);
     });
+    const stop = AbortSignal.any([AbortSignal.timeout(15_000), signal]);
     return new Promise<T>((resolve, reject) => {
       const cancel = () => reject(stop.reason);
       stop.addEventListener('abort', cancel, { once: true });
@@ -70,12 +69,17 @@ export function createMailCheck({
     });
   }
   return async (emails, signal) => {
-    if (!emails.length || signal?.aborted) return emails.map(() => undefined);
+    const stopped = 'the read was stopped before its check finished';
+    if (!emails.length) return [];
+    if (signal?.aborted) return emails.map(() => stopped);
     const decision = decisions?.configured === false ? undefined : decisions;
+    const read = new AbortController();
+    const stop = signal ? AbortSignal.any([signal, read.signal]) : read.signal;
     return Promise.all(
       emails.map(async (email) => {
         const input = { email };
-        if (JSON.stringify(input).length > 32_000) return undefined;
+        if (JSON.stringify(input).length > 32_000) return 'the email is too long to check';
+        if (!decision && !curator.configured) return 'no model is available for the check';
         try {
           const result = await request(
             async (stop) =>
@@ -84,24 +88,31 @@ export function createMailCheck({
                     { instructions: accessInstructions, input, question: accessQuestion },
                     stop,
                   )
-                : curator.configured
-                  ? curator.curate(
-                      {
-                        task: 'access',
-                        instructions: `${accessInstructions}\nReply with only JSON with one property, "access", whose value is true or false.`,
-                        input,
-                      },
-                      stop,
-                    )
-                  : undefined,
-            signal,
+                : curator.curate(
+                    {
+                      task: 'access',
+                      instructions: `${accessInstructions}\nReply with only JSON with one property, "access", whose value is true or false.`,
+                      input,
+                    },
+                    stop,
+                  ),
+            stop,
           );
           if (result && typeof result === 'object') {
             const access = (result as { access?: unknown }).access;
             if (typeof access === 'boolean') return access;
           }
-        } catch {}
-        return undefined;
+          return 'the check model gave no valid answer';
+        } catch (error) {
+          if (signal?.aborted) return stopped;
+          const timeout = error instanceof Error && error.name === 'TimeoutError';
+          if (timeout) read.abort(error);
+          return timeout
+            ? 'the check model did not answer within 15 seconds'
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        }
       }),
     );
   };
