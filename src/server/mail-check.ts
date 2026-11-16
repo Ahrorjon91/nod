@@ -48,7 +48,17 @@ export function createMailCheck({
       if (checking < 6) start();
       else waiting.push(start);
     });
-    const stop = AbortSignal.any([AbortSignal.timeout(15_000), signal]);
+    const limit = AbortSignal.timeout(15_000);
+    const stop = AbortSignal.any([limit, signal]);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      checking -= 1;
+      waiting.shift()?.();
+    };
+    const expire = () => setImmediate(release);
+    limit.addEventListener('abort', expire, { once: true });
     return new Promise<T>((resolve, reject) => {
       const cancel = () => reject(stop.reason);
       stop.addEventListener('abort', cancel, { once: true });
@@ -62,8 +72,8 @@ export function createMailCheck({
           reject(error);
         } finally {
           stop.removeEventListener('abort', cancel);
-          checking -= 1;
-          waiting.shift()?.();
+          limit.removeEventListener('abort', expire);
+          release();
         }
       })();
     });
@@ -109,9 +119,9 @@ export function createMailCheck({
           if (timeout) read.abort(error);
           return timeout
             ? 'the check model did not answer within 15 seconds'
-            : error instanceof Error
-              ? error.message
-              : String(error);
+            : typeof (error as { status?: unknown })?.status === 'number'
+              ? `the check model request failed (HTTP ${(error as { status: number }).status})`
+              : 'the check model request failed';
         }
       }),
     );

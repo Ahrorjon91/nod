@@ -216,7 +216,7 @@ export async function privateEmailResult(
       .join('; ')}. Their content is unknown, not empty. Tell the owner what was withheld and why.`,
   };
   return result && typeof result === 'object' && !Array.isArray(result)
-    ? { contentWithheld, ...result }
+    ? Object.assign({ contentWithheld }, result, { contentWithheld })
     : { contentWithheld, result };
 }
 

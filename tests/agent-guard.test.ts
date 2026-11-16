@@ -1046,6 +1046,12 @@ test('nested mail records receive separate checks on each read', async () => {
   assert.deepEqual(requests[1], requests[0]);
   assert.equal(unchecked.contentWithheld.emails, 2);
   assert.ok(unchecked.result.every((mail) => !('payload' in mail)));
+  const spoofed = (await privateEmailResult(
+    { contentWithheld: 'nothing withheld', messages: input },
+    async () => [],
+  )) as { contentWithheld: { emails: number } };
+  assert.equal(Object.keys(spoofed)[0], 'contentWithheld');
+  assert.equal(spoofed.contentWithheld.emails, 2);
 });
 
 test('payload mail remains private when outer check text is truncated or its identity differs', async (t) => {
@@ -1136,7 +1142,7 @@ test('mail checks do not reuse a decision from an earlier read', async () => {
   });
   const emails = [{ from: 'fixture@example.test', subject: 'Notice', text: 'Synthetic notice.' }];
   assert.deepEqual(await check(emails), [false]);
-  assert.deepEqual(await check(emails), ['Synthetic classifier failure.']);
+  assert.deepEqual(await check(emails), ['the check model request failed']);
   assert.equal(reads, 2);
 });
 
@@ -1201,6 +1207,22 @@ test('single mail checks keep their provider contract and fail closed without a 
     'no model is available for the check',
   ]);
   assert.deepEqual(await createMailCheck({ curator })([]), []);
+  const leaky = (error: Error) =>
+    createMailCheck({
+      curator: {
+        ...curator,
+        async curate() {
+          throw error;
+        },
+      },
+    })([email]);
+  assert.deepEqual(await leaky(new Error('code 482913 at https://login.example.test/r?t=secret')), [
+    'the check model request failed',
+  ]);
+  assert.deepEqual(
+    await leaky(Object.assign(new Error('Synthetic secret 482913'), { status: 429 })),
+    ['the check model request failed (HTTP 429)'],
+  );
 });
 
 test('queued mail checks preserve caller attribution, cancel without invoking providers and bound concurrency', async () => {
@@ -1267,9 +1289,10 @@ test('queued mail checks preserve caller attribution, cancel without invoking pr
 
 test('a mail check timeout stops the rest of its read and does not wait for an unresponsive provider', async (t) => {
   const timeout = new AbortController();
+  let timers = 0;
   t.mock.method(AbortSignal, 'timeout', (duration: number) => {
     assert.equal(duration, 15_000);
-    return timeout.signal;
+    return timers++ < 6 ? timeout.signal : new AbortController().signal;
   });
   let called = 0;
   const pending: Array<() => void> = [];
@@ -1297,9 +1320,13 @@ test('a mail check timeout stops the rest of its read and does not wait for an u
     await result,
     Array<string>(100).fill('the check model did not answer within 15 seconds'),
   );
-  pending.forEach((finish) => finish());
+  const later = check([
+    { from: 'later@example.test', subject: 'Receipt', text: 'Synthetic receipt' },
+  ]);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(called, 6);
+  assert.equal(called, 7);
+  pending.forEach((finish) => finish());
+  assert.deepEqual(await later, [false]);
 });
 
 test('parallel thread reads check every message when checks queue longer than one check timeout', async (t) => {
@@ -1411,10 +1438,8 @@ test('an unchecked mail body stays private and the result names how many were wi
   assert.equal(result.error, null);
   assert.equal(Object.keys(result)[0], 'contentWithheld');
   assert.equal(result.contentWithheld.emails, 2);
-  assert.match(
-    result.contentWithheld.message,
-    /Synthetic provider refusal: 429 Too Many Requests\./,
-  );
+  assert.match(result.contentWithheld.message, /the check model request failed/);
+  assert.doesNotMatch(result.contentWithheld.message, /Synthetic provider refusal/);
   assert.match(result.contentWithheld.message, /no valid answer/);
   const unavailable = (await privateEmailResult(thread, noMailCheck)) as typeof result;
   assert.equal(JSON.stringify(unavailable).includes('Synthetic agenda body'), false);
