@@ -18,6 +18,8 @@ Open chat in the desktop app and tell Nod what to do. Local file access starts o
 
 When access is off, Nod asks to turn it on in chat before it opens your files. Reply "yes" or select the approval button. Nod saves the setting, then continues your request. If you decline, access stays off.
 
+Work Nod starts on its own cannot request local file access. A schedule you create can ask you to enable access in chat.
+
 This setting covers allowed locations in your home folder and on external drives. It does not give access to one folder only. The file checks below still apply to each action.
 
 You can tell Nod to turn local file access on or off. You can also change **Local file access** in **Settings → Privacy & data**.

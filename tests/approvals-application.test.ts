@@ -114,7 +114,7 @@ test(
     const { createApplication } = await import('../src/server/composition.ts');
     const { pool } = await import('../src/server/db.ts');
     const { dataRoot, ownerId, port } = await import('../src/server/config.ts');
-    const { enqueueTurn } = await import('../src/server/thread.ts');
+    const { enqueueTurn, submitUserMessage } = await import('../src/server/thread.ts');
     const phases = new Map<string, number>();
     const results = new Map<string, AgentToolResult>();
     const plans = new Map<
@@ -3667,7 +3667,6 @@ test(
             /work the owner started/,
           );
           const readText = `Summarize contract.txt ${randomUUID()}`;
-          asked.add(readText);
           assert.equal((await request('GET', '/api/preferences')).json().localFilesEnabled, false);
           const opening = await propose(
             'read',
@@ -3679,6 +3678,7 @@ test(
           assert.equal(access.action, 'NOD_notification_preferences_update');
           assert.deepEqual(access.args, { localFilesEnabled: true });
           assert.doesNotMatch(text(opening), /Synthetic contract/);
+          asked.add(readText);
           repeatAfterConfirm = {
             tool: 'files',
             action: 'read',
@@ -3693,6 +3693,18 @@ test(
           await waitFor(accepted.json().turnId, 'succeeded');
           assert.equal((await request('GET', '/api/preferences')).json().localFilesEnabled, true);
           assert.match(text(accepted.json().turnId), /Synthetic contract/);
+          await request('PATCH', '/api/preferences', { localFilesEnabled: false });
+          const enableText = `Enable local file access and read contract.txt ${randomUUID()}`;
+          asked.add(enableText);
+          plans.set(enableText, {
+            tool: 'files',
+            action: 'read',
+            args: { path: join(folder, 'contract.txt') },
+          });
+          const enabled = await submitUserMessage(enableText);
+          await waitFor(enabled.turnId, 'succeeded');
+          assert.deepEqual(await approvalsFor(enabled.turnId), []);
+          assert.equal((await request('GET', '/api/preferences')).json().localFilesEnabled, true);
           const unnamed = await propose(
             'read',
             { path: `${folder}/sorted/../contract.txt` },

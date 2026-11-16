@@ -2604,6 +2604,8 @@ async function initializeApplication(
           const input = { localFilesEnabled: true };
           const verdict = await trust.check(turn, 'NOD_notification_preferences_update', input);
           return approvals.request(turn, 'NOD_notification_preferences_update', input, {
+            allowed: !verdict.confirm,
+            ...(verdict.confirm ? {} : { basis: verdict.basis }),
             signal: options.signal,
             admit: options.admit,
             expectedChatRevision: verdict.chatRevision,
