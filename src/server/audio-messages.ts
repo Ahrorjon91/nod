@@ -178,7 +178,7 @@ export function registerAudioMessages(app: FastifyInstance, dependencies: AppDep
         }
         if (!speech || !speech.transcriptionConfigured)
           throw new SpeechSetupError(
-            'Set up audio in Settings → General → Voice. Choose free voices or connect a voice service.',
+            'Set up audio in Settings → Voice & audio. Choose free voices or connect a voice service.',
           );
         if (
           !(dependencies.configuration?.() ?? configuration()).llmReady &&
