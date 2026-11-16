@@ -9467,6 +9467,51 @@ test('connection service refusals pause the install from Retry-After or a growin
   service.reply(() => busyReply());
   await assert.rejects(service.send());
   assert.equal(waited(), 120);
+  service.reply(() =>
+    Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' }),
+  );
+  await service.send();
+  const gates: (() => void)[] = [];
+  const answers = [busyReply(), busyReply()];
+  let reached!: () => void;
+  let reaching = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  service.reply(async () => {
+    const answer = answers.shift();
+    await new Promise<void>((resolve) => {
+      gates.push(resolve);
+      reached();
+    });
+    return (
+      answer ??
+      Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' })
+    );
+  });
+  const arrive = async (count: number) => {
+    while (gates.length < count) {
+      await reaching;
+      reaching = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+    }
+  };
+  const earlier = [service.send(), service.send()].map((send) =>
+    send.then(
+      () => 'sent',
+      () => 'refused',
+    ),
+  );
+  await arrive(2);
+  gates[0]!();
+  assert.equal(await Promise.race(earlier), 'refused');
+  const later = service.send();
+  await arrive(3);
+  gates[1]!();
+  assert.deepEqual(await Promise.all(earlier), ['refused', 'refused']);
+  gates[2]!();
+  await later;
+  assert.equal(waited(), 60);
 });
 
 test(
