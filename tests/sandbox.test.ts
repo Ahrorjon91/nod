@@ -19,7 +19,6 @@ import {
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import { basename, join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { parse } from 'yaml';
@@ -369,7 +368,7 @@ async function execute(session: WorkspaceSession, command: string) {
 async function local(programPrefix = '') {
   const directory = await mkdtemp('/tmp/nod-command-');
   const launch: WorkspaceCommandLauncher = (_command, args, options) =>
-    spawn('python3', ['-u', '-c', programPrefix + args.at(-1)!], {
+    spawn('python3', ['-u', '-c', programPrefix + args.at(-2)!, args.at(-1)!], {
       ...options,
       cwd: directory,
       stdio: 'pipe',
@@ -463,9 +462,11 @@ test('connected CLIs run only their sealed install with a clean environment', as
       'FIXTURE_TOKEN',
       'HOME',
       'LANG',
+      'NOD_COMMAND',
       'PATH',
       'XDG_CONFIG_HOME',
     ]);
+    assert.equal(environment.NOD_COMMAND, launches.at(-1)!.at(-1));
     assert.equal(
       environment.PATH,
       `${await realpath(prefix)}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
@@ -505,13 +506,14 @@ test('connected CLIs run only their sealed install with a clean environment', as
   }
 });
 
-test('an uncertain workspace operation cancels and drains commands already in flight', async () => {
-  const processes: Array<ReturnType<WorkspaceCommandLauncher>> = [];
-  let signalCancellation: () => void = () => {};
-  const cancelled = new Promise<void>((resolve) => {
-    signalCancellation = resolve;
-  });
-  const launch: WorkspaceCommandLauncher = () => {
+function fakeDocker(check: { code: number; stderr?: string }) {
+  const launches: Array<{
+    marker: string;
+    request: Promise<{ args: string[] }>;
+    cancelled: Promise<void>;
+    child: ReturnType<WorkspaceCommandLauncher> & EventEmitter;
+  }> = [];
+  const launch: WorkspaceCommandLauncher = (_command, args) => {
     const child = Object.assign(new EventEmitter(), {
       stdin: new PassThrough(),
       stdout: new PassThrough(),
@@ -520,11 +522,43 @@ test('an uncertain workspace operation cancels and drains commands already in fl
         return true;
       },
     });
-    child.stdin.on('data', (data) => {
-      if (data.toString() === '{"type":"cancel"}\n') signalCancellation();
+    let received: (request: { args: string[] }) => void = () => {};
+    let cancel: () => void = () => {};
+    const request = new Promise<{ args: string[] }>((resolve) => (received = resolve));
+    const cancelled = new Promise<void>((resolve) => (cancel = resolve));
+    let buffered = '';
+    child.stdin.on('data', (chunk: Buffer) => {
+      buffered += chunk.toString();
+      for (let end = buffered.indexOf('\n'); end >= 0; end = buffered.indexOf('\n')) {
+        const line = buffered.slice(0, end);
+        buffered = buffered.slice(end + 1);
+        if (line === '{"type":"cancel"}') cancel();
+        else received(JSON.parse(line));
+      }
     });
-    processes.push(child as unknown as ReturnType<WorkspaceCommandLauncher>);
-    return processes.at(-1)!;
+    const index = launches.length;
+    launches.push({
+      marker: args.at(-1)!,
+      request,
+      cancelled,
+      child: child as unknown as ReturnType<WorkspaceCommandLauncher> & EventEmitter,
+    });
+    void request.then(({ args }) => {
+      if (args.at(-1) === 'ok') setImmediate(() => exit(index, 0));
+      else if (args[0] === '/usr/bin/python3')
+        setImmediate(() => exit(index, check.code, null, check.stderr));
+    });
+    return child as unknown as ReturnType<WorkspaceCommandLauncher>;
+  };
+  const exit = (index: number, code: number, reason: string | null = null, stderr = '') => {
+    const { child } = launches[index]!;
+    if (stderr)
+      child.stdout.emit(
+        'data',
+        JSON.stringify({ type: 'stderr', data: Buffer.from(stderr).toString('base64') }) + '\n',
+      );
+    child.stdout.emit('data', JSON.stringify({ type: 'exit', code, reason }) + '\n');
+    child.emit('close', 0);
   };
   const workspace = createDockerWorkspace({
     container: 'nod-workspace-fixture',
@@ -536,35 +570,93 @@ test('an uncertain workspace operation cancels and drains commands already in fl
     workspacePath: '/synthetic/fixture',
     signal: new AbortController().signal,
   });
-  let failureSettled = false;
-  const failed = assert.rejects(execute(session, 'first'), /did not stop safely/).finally(() => {
-    failureSettled = true;
+  return { launches, workspace, session, exit };
+}
+
+test('an uncertain command is stopped once and the workspace keeps working', async () => {
+  const docker = fakeDocker({ code: 0 });
+  const first = execute(docker.session, 'first');
+  const second = execute(docker.session, 'second');
+  try {
+    docker.launches[0]!.child.stderr.emit('data', 'synthetic transport error\n');
+    docker.launches[0]!.child.emit('close', 1);
+    await docker.launches[1]!.cancelled;
+    docker.exit(1, -15, 'cancelled');
+    await assert.rejects(second, /Task cancelled/);
+    const failure = await first.then(
+      () => assert.fail('The first command should not finish.'),
+      (error: Error) => error,
+    );
+    assert.equal(await execute(docker.session, 'ok'), '');
+    assert.match(
+      failure.message,
+      /did not stop safely: its command stream closed before the command confirmed it finished \(exit code 1: synthetic transport error\)\. Its processes are confirmed stopped and its result is unknown\. The workspace is available\./,
+    );
+    const requests = await Promise.all(docker.launches.map(({ request }) => request));
+    assert.deepEqual(
+      requests.map(({ args }) => args.at(-1)),
+      ['first', 'second', docker.launches[0]!.marker, 'ok'],
+    );
+    assert.deepEqual(requests[2]!.args.slice(0, 3), ['/usr/bin/python3', '-I', '-c']);
+    assert.notEqual(docker.launches[2]!.marker, docker.launches[0]!.marker);
+  } finally {
+    await docker.workspace.dispose();
+    await Promise.allSettled([first, second]);
+  }
+});
+
+test('the workspace stays unavailable when an uncertain command cannot be confirmed stopped', async () => {
+  const docker = fakeDocker({
+    code: 1,
+    stderr: '2 of its processes are still running after SIGKILL.\n',
   });
-  const drained = assert.rejects(execute(session, 'second'), /Task cancelled/);
-  let acknowledged = false;
-  const acknowledge = () => {
-    if (acknowledged) return;
-    acknowledged = true;
-    processes[1].stdout.emit('data', '{"type":"exit","code":-15,"reason":"cancelled"}\n');
-    processes[1].emit('close', 0);
+  const first = execute(docker.session, 'first');
+  const reason =
+    /did not stop safely: .*Nod could not confirm that its processes stopped: 2 of its processes are still running after SIGKILL\. Restart Nod before continuing\./;
+  try {
+    docker.launches[0]!.child.emit('close', 137);
+    await assert.rejects(first, reason);
+    await assert.rejects(execute(docker.session, 'ok'), reason);
+    assert.equal(docker.launches.length, 2);
+  } finally {
+    await docker.workspace.dispose();
+    await Promise.allSettled([first]);
+  }
+});
+
+test('stopping an uncertain command ends the processes it detached', async () => {
+  const f = await local();
+  let pid = 0;
+  const running = async () => {
+    try {
+      return !/^\d+ \(.*\) [ZX] /.test(await readFile(`/proc/${pid}/stat`, 'utf8'));
+    } catch {
+      return false;
+    }
   };
   try {
-    processes[0].emit('close', 1);
-    await Promise.race([
-      cancelled,
-      delay(500).then(() => {
-        throw new Error('Existing command was not cancelled.');
-      }),
-    ]);
-    await assert.rejects(execute(session, 'later'), /Restart Nod/);
-    assert.equal(processes.length, 2);
-    assert.equal(failureSettled, false);
-    acknowledge();
-    await Promise.all([failed, drained]);
+    const error = await f
+      .run(['bash', '-c', 'setsid sleep 60 & echo $!; sleep 0.5; kill -9 $PPID'], {
+        onData: (chunk) => {
+          pid ||= Number(chunk.toString().trim());
+        },
+      })
+      .then(
+        () => assert.fail('The command should not finish.'),
+        (error: unknown) => error,
+      );
+    assert.ok(error instanceof WorkspaceCommandError && error.uncertain && error.stop);
+    assert.match(error.message, /closed before the command confirmed it finished/);
+    if (process.platform !== 'linux') {
+      await assert.rejects(error.stop(), /no \/proc/);
+      return;
+    }
+    assert.equal(await running(), true);
+    await error.stop();
+    assert.equal(await running(), false);
   } finally {
-    acknowledge();
-    await workspace.dispose();
-    await Promise.allSettled([failed, drained]);
+    if (process.platform === 'linux' && (await running())) process.kill(pid, 'SIGKILL');
+    await f.close();
   }
 });
 
@@ -642,6 +734,11 @@ test('self-hosted runtime limits Docker access to unprivileged execution in its 
     }
     response.writeHead(201, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ Id: executionId }));
+  });
+  engine.on('upgrade', (request, stream) => {
+    forwarded.push({ path: request.url!, body: {} });
+    stream.write('HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n');
+    stream.pipe(stream);
   });
   const proxy = createRuntimeProxy({
     socketPath: socket,
@@ -740,6 +837,37 @@ test('self-hosted runtime limits Docker access to unprivileged execution in its 
       (await call('/containers/nod-workspace-fixture/exec?unsafe=true', command)).status,
       403,
     );
+    const { connect } = await import('node:net');
+    const attach = (body: unknown) =>
+      new Promise<{ head: string; stream: ReturnType<typeof connect> }>((resolve, reject) => {
+        const stream = connect(address.port, '127.0.0.1');
+        const payload = JSON.stringify(body);
+        let head = '';
+        stream.on('error', reject);
+        stream.on('data', function read(chunk) {
+          head += chunk.toString();
+          if (!head.includes('\r\n\r\n')) return;
+          stream.off('data', read);
+          resolve({ head, stream });
+        });
+        stream.write(
+          `POST /v1.44/exec/${executionId}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(payload)}\r\n\r\n${payload}`,
+        );
+      });
+    const refused = await attach({ Detach: true, Tty: false });
+    assert.match(refused.head, /^HTTP\/1\.1 403 /);
+    refused.stream.destroy();
+    const attached = await attach({ Detach: false, Tty: false });
+    assert.match(attached.head, /^HTTP\/1\.1 101 /);
+    assert.equal(forwarded.at(-1)!.path, `/v1.44/exec/${executionId}/start`);
+    proxy.closeAllConnections();
+    const echoed = await new Promise<string>((resolve, reject) => {
+      attached.stream.once('data', (chunk) => resolve(chunk.toString()));
+      attached.stream.once('close', () => reject(new Error('The proxy closed the exec stream.')));
+      attached.stream.write('{"args":["synthetic"]}\n');
+    });
+    assert.equal(echoed, '{"args":["synthetic"]}\n');
+    attached.stream.destroy();
   } finally {
     await Promise.all([
       new Promise<void>((resolve) => proxy.close(() => resolve())),

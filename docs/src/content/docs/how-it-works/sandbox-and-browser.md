@@ -60,7 +60,7 @@ Both the workspace and browser containers drop all capabilities, set `no-new-pri
 
 For source installs, `pnpm start` uses the Docker daemon's CPU count when it is lower than these caps. It also respects lower `NOD_WORKSPACE_CPUS` and `NOD_BROWSER_CPUS` values from the shell or `.env`. Direct Compose commands keep the listed defaults; set those variables when using a smaller Docker VM.
 
-The self-hosted server reaches Docker through a restricted proxy for its workspace and browser containers. Its Compose configuration allows separate memory limits through `NOD_WORKSPACE_MEMORY` and `NOD_BROWSER_MEMORY`.
+The self-hosted server reaches Docker through a restricted proxy for its workspace and browser containers. The proxy hands each running command's stream over as a raw connection, so its HTTP time limits don't close commands that run longer. Its Compose configuration allows separate memory limits through `NOD_WORKSPACE_MEMORY` and `NOD_BROWSER_MEMORY`.
 
 ## The command supervisor
 
@@ -69,7 +69,7 @@ Every command goes through a small supervisor inside the container, in [`src/pro
 - It owns the command's session and signals every process in it, even ones that left the process group.
 - A command also ends the processes it detached, when the command itself ends, so work it left behind never outlives it. Stop ends the whole tree the same way, and escalates to `SIGKILL` for a process that ignores the first signal.
 - It enforces the timeout: 59 minutes for `bash` by default. The model can ask for longer.
-- It acknowledges when the command ends. If that acknowledgement is lost, the server fences the workspace: no more commands run until Nod restarts.
+- It acknowledges when the command ends. If that acknowledgement is lost, the command fails as uncertain with the specific reason, such as the command stream closing early, and never runs again. The server cancels the other running commands, then checks the workspace for processes the command left behind, by its supervisor and the `NOD_COMMAND` ID each of its processes inherits, and ends them. New commands wait for that check. When it confirms nothing is left, the workspace stays available. When it can't, the server fences the workspace with the reason: no more commands run until Nod restarts.
 
 ## Command output
 
@@ -83,7 +83,7 @@ Pi writes truncated output, codemode files and images, and extracted web PDFs to
 
 Each connected CLI runs as its own Linux user, derived from its path ID, in group `nod-connected`. Before each run, the supervisor installs the CLI's declared source into `/var/tmp/nod-cli-<path id>`, a folder only that user can open, if it's missing. It refuses an install folder or executable that another user can write, and refuses to run if another CLI's install belongs to the same user. So one CLI can't change another's install or read its token.
 
-The CLI then runs with an environment built from scratch: a fixed `PATH`, a private temporary `HOME` and `XDG_CONFIG_HOME`, `LANG` and the connection's credential variables. Nothing comes from the sandbox user's files or environment, so a program the model plants never receives the token. See [MCP, APIs and CLIs](/connect/mcp-api-cli/).
+The CLI then runs with an environment built from scratch: a fixed `PATH`, a private temporary `HOME` and `XDG_CONFIG_HOME`, `LANG`, the run's `NOD_COMMAND` ID and the connection's credential variables. Nothing comes from the sandbox user's files or environment, so a program the model plants never receives the token. See [MCP, APIs and CLIs](/connect/mcp-api-cli/).
 
 ## The browser container
 
