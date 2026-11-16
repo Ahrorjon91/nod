@@ -2767,7 +2767,10 @@ else {
               void updateEvent('native-error', {
                 code: error?.code,
                 domain: error?.domain,
-                message: error?.message,
+                message: String(error?.message ?? '')
+                  .split('{')[0]
+                  .replace(/[A-Za-z0-9+/=_-]{24,}/g, '<omitted>')
+                  .slice(0, 300),
               }),
           );
         }

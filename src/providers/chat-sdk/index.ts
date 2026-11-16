@@ -623,7 +623,13 @@ export function createChatSdkTransport(
               }
               const parsed = whatsappMessage.safeParse(raw);
               if (!parsed.success) {
-                dropped('whatsapp', 'unsupported_type');
+                dropped(
+                  'whatsapp',
+                  typeof (raw as { id?: unknown } | null)?.id === 'string' &&
+                    (raw as { id: string }).id
+                    ? 'unsupported_type'
+                    : 'missing_id',
+                );
                 continue;
               }
               const message = whatsapp.parseMessage({

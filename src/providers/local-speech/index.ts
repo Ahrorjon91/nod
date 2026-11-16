@@ -340,6 +340,7 @@ export function createLocalSpeechProvider(options: {
     preparing = preparation;
     failed.last = undefined;
     preparation.promise = (async () => {
+      stderr = '';
       try {
         await mkdir(options.cacheDir, { recursive: true });
         await call({ method: 'prepare', transcription }, preparation.controller.signal);

@@ -1,12 +1,12 @@
 export const feedbackClient: {
-  source: EventSource | undefined;
+  sources: EventSource[];
   lastEventAt: number | null;
   streamReconnects: number;
   savedMessages: number | null;
   pendingTurn: boolean | null;
   clockOffsetMs: number | null;
 } = {
-  source: undefined,
+  sources: [],
   lastEventAt: null,
   streamReconnects: 0,
   savedMessages: null,
@@ -14,12 +14,23 @@ export const feedbackClient: {
   clockOffsetMs: null,
 };
 
+export function resetFeedbackClient() {
+  Object.assign(feedbackClient, {
+    lastEventAt: null,
+    streamReconnects: 0,
+    savedMessages: null,
+    pendingTurn: null,
+    clockOffsetMs: null,
+  });
+}
+
 const count = (value: number, max = 1_000_000) =>
   Math.min(max, Math.max(0, Math.round(value) || 0));
 const age = (value: number) => count(value, 31_536_000_000);
 
 export function feedbackClientState() {
-  const { source, lastEventAt, savedMessages, clockOffsetMs } = feedbackClient;
+  const { lastEventAt, savedMessages, clockOffsetMs } = feedbackClient;
+  const source = feedbackClient.sources.at(-1);
   const locale = navigator.language;
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return {

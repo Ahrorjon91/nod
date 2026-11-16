@@ -110,7 +110,11 @@ For how a request moves through these parts, read [Architecture](/how-it-works/a
 
 ### Data sent to the Nod team
 
-Diagnostic reports, failure and startup logs, traces and analytics are redacted on the device before they are sent. Mask names, addresses, account and device identifiers, paths, links and message content whenever the data still does its job without them. When triage needs a detail, add a bounded technical field such as a fixed choice, count, version, error class or status code. Don't loosen a redaction rule to keep it. Add a test that a private value stays out. The report builder is `src/server/bug-report.ts` and its redactor is `src/server/feedback-redaction.ts`.
+Diagnostic reports and the failure and startup logs behind them are redacted on the device before they are sent to the configured feedback recipient. Redaction masks recognized names, addresses, account and device identifiers, paths, links and known secrets. It can miss details, so the owner reviews the report before sending. When triage needs a detail, add a bounded technical field such as a fixed choice, count, version, error class or status code. Don't loosen a redaction rule to keep it. Add a test that a private value stays out.
+
+Analytics events carry bounded values only, with the exceptions that [Change analytics](/contribute/analytics/) lists. Conversation traces are pseudonymised, not anonymous.
+
+The report builder is `src/server/bug-report.ts` and its redactor is `src/server/feedback-redaction.ts`.
 
 ## Coding agents
 

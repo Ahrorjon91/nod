@@ -3038,7 +3038,7 @@ test('rich feedback redaction keeps error classes, frame files, sizes and model 
       sid: 'session-value',
       jti: 'token-id-value',
       nonce: 'nonce-value',
-      aud: 'audience-value',
+      aud: ['audience-value'],
     },
   });
   const safe = redactor.value({

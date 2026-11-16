@@ -183,6 +183,10 @@ export function useAppState(accountId?: string) {
     feedbackClient.pendingTurn = state
       ? state.turns.some((turn) => turn.status === 'queued' || turn.status === 'running')
       : null;
+    return () => {
+      feedbackClient.savedMessages = null;
+      feedbackClient.pendingTurn = null;
+    };
   }, [state]);
 
   const streams = Object.fromEntries(

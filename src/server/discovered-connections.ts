@@ -139,6 +139,20 @@ type ReturnTarget = 'apps' | 'onboarding' | 'window' | 'desktop';
 
 const catalogMs = 10 * 60_000;
 
+const oauthErrors = [
+  'access_denied',
+  'invalid_request',
+  'unauthorized_client',
+  'unsupported_response_type',
+  'invalid_scope',
+  'server_error',
+  'temporarily_unavailable',
+  'interaction_required',
+  'login_required',
+  'consent_required',
+  'account_selection_required',
+];
+
 export const officialMcp = new Map<
   string,
   { name: string; endpoint?: string; scope?: string; instancePath?: string; local?: string }
@@ -1002,13 +1016,20 @@ export async function createDiscoveredConnections(
     if (parsed.error || !parsed.code)
       return failed('cancelled', undefined, {
         step: 'callback',
-        error: { code: parsed.error?.slice(0, 64) ?? 'missing_code' },
+        error: {
+          code: !parsed.error
+            ? 'missing_code'
+            : oauthErrors.includes(parsed.error)
+              ? parsed.error
+              : 'other',
+        },
       });
     const path = pending.paths[0];
     if (path?.kind !== 'mcp' || path.auth !== 'oauth')
       return failed('failed', 'invalid_configuration');
     let failureReason: 'authorization_failed' | 'verification_failed' | 'unknown' =
       'authorization_failed';
+    let step = 'callback';
     try {
       const grant = JSON.parse((await options.grantVault.read(pending.id)).value);
       const saved = (grant.state ?? grant) as DiscoveredOAuthState;
@@ -1022,13 +1043,16 @@ export async function createDiscoveredConnections(
         parsed.iss !== issuer
       )
         throw new Error('The issuer does not match.');
+      step = 'token';
       const connected = await via(path).oauth.finish(path.endpoint, saved, parsed.code);
       const token = connected.tokens?.access_token;
       if (!token) throw new Error('The service returned no access token.');
       failureReason = 'verification_failed';
+      step = 'list_tools';
       if (!(await via(path).transport.listTools(path.endpoint, headers(path, token))).tools.length)
         throw new Error('The server listed no tools.');
       failureReason = 'unknown';
+      step = 'save';
       const result = await save(
         pending,
         pending.account_name ?? 'Account',
@@ -1043,9 +1067,7 @@ export async function createDiscoveredConnections(
       };
     } catch (error) {
       return failed('failed', failureReason, {
-        step: { authorization_failed: 'token', verification_failed: 'list_tools', unknown: 'save' }[
-          failureReason
-        ],
+        step,
         error,
       });
     }

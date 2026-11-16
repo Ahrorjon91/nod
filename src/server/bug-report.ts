@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { constants, existsSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import os from 'node:os';
 import { join } from 'node:path';
@@ -721,28 +721,35 @@ export async function buildFeedbackReport(options: FeedbackReportOptions) {
   }
   lists.failures = [...repeated.values()].slice(-150);
   sections.failures.rows = lists.failures.length;
+  sections.failures.truncated ||= repeated.size > lists.failures.length;
   lists.startupLog = [];
   let startupLog: 'collected' | 'unavailable' = 'unavailable';
+  let startupTruncated = false;
   if (redact && options.dataRoot) {
     try {
-      const handle = await open(join(options.dataRoot, 'logs', 'startup.log'), 'r');
+      const handle = await open(
+        join(options.dataRoot, 'logs', 'startup.log'),
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
       try {
-        const { size } = await handle.stat();
+        const stat = await handle.stat();
+        if (!stat.isFile() || stat.nlink !== 1) throw new Error('Unsafe startup log.');
+        const { size } = stat;
         const bytes = Buffer.alloc(Math.min(size, 48_000));
         await handle.read(bytes, 0, bytes.length, size - bytes.length);
-        lists.startupLog = bytes
+        const lines = bytes
           .toString('utf8')
           .split('\n')
           .slice(size > bytes.length ? 1 : 0)
-          .filter(Boolean)
-          .slice(-200)
-          .map((line) => {
-            const stamp = /^(\d{4}-\d{2}-\d{2}T[\d:.]+Z) /.exec(line);
-            return {
-              ageMs: stamp ? amount(now - Date.parse(stamp[1])) : null,
-              line: redact!.text(line.slice(stamp?.[0].length ?? 0)).slice(0, 4000),
-            };
-          });
+          .filter(Boolean);
+        startupTruncated = size > bytes.length || lines.length > 200;
+        lists.startupLog = lines.slice(-200).map((line) => {
+          const stamp = /^(\d{4}-\d{2}-\d{2}T[\d:.]+Z) /.exec(line);
+          return {
+            ageMs: stamp ? amount(now - Date.parse(stamp[1])) : null,
+            line: redact!.text(line.slice(stamp?.[0].length ?? 0)).slice(0, 4000),
+          };
+        });
         startupLog = 'collected';
       } finally {
         await handle.close();
@@ -755,7 +762,7 @@ export async function buildFeedbackReport(options: FeedbackReportOptions) {
     status: startupLog,
     scope: 'recent',
     rows: lists.startupLog.length,
-    truncated: false,
+    truncated: startupTruncated,
   };
   lists.clientErrors = [];
   const errorsAvailable = options.errorsAvailable ?? options.errors !== undefined;

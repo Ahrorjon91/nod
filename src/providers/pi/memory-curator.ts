@@ -238,7 +238,7 @@ export function createPiMemoryCurator(options: {
             : reply.stopReason === 'length'
               ? ' The reply stopped at the token limit.'
               : '';
-        const status = /\(HTTP (\d{3})\)/.exec(reply.errorMessage ?? '')?.[1];
+        const status = [...(reply.errorMessage ?? '').matchAll(/\(HTTP (\d{3})\)/g)].at(-1)?.[1];
         throw Object.assign(
           new Error(`${label} Task: ${task}. Model: ${model.provider}/${model.id}.${detail}`),
           status ? { providerStatus: Number(status) } : {},

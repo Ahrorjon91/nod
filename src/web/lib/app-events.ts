@@ -35,12 +35,16 @@ export function subscribeAppEvents(
     }, delay);
     delay = Math.min(delay * 2, 30_000);
   }
+  function release() {
+    source?.close();
+    feedbackClient.sources = feedbackClient.sources.filter((item) => item !== source);
+  }
   function connect() {
     if (!current()) return;
-    source?.close();
+    release();
     const events = new EventSource(`/api/events?account=${encodeURIComponent(owner)}`);
     source = events;
-    feedbackClient.source = events;
+    feedbackClient.sources.push(events);
     let opened = false;
     const accepted = () => current() && source === events;
     events.onopen = () => {
@@ -74,8 +78,7 @@ export function subscribeAppEvents(
   function dispose() {
     disposed = true;
     clearRetry();
-    source?.close();
-    if (feedbackClient.source === source) feedbackClient.source = undefined;
+    release();
     source = undefined;
     unsubscribe();
   }

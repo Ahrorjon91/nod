@@ -306,7 +306,7 @@ export function createFeedbackRedactor(options: { secrets: string[]; profile: Pe
                 : privateNames.test(normalized) || (privateValue && key === 'value')
                   ? hidden
                   : personalKey(key) ||
-                      (typeof property.value === 'string' && claimKeys.test(normalized)) ||
+                      claimKeys.test(normalized) ||
                       (!error &&
                         privateKeys.test(normalized) &&
                         !(

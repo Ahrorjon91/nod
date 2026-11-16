@@ -1,3 +1,5 @@
+import { resetFeedbackClient } from './feedback-client';
+
 type FeedbackError = {
   at: number;
   type: 'render' | 'error' | 'rejection';
@@ -21,6 +23,7 @@ export function setFeedbackErrorOwner(id: string | null) {
   }
   owner = id;
   entries.length = 0;
+  resetFeedbackClient();
 }
 
 export function recordFeedbackError(type: FeedbackError['type'], error: unknown) {
@@ -28,7 +31,12 @@ export function recordFeedbackError(type: FeedbackError['type'], error: unknown)
   const message =
     error instanceof Error ? error.message : typeof error === 'string' ? error : 'Unknown error';
   const last = entries.at(-1);
-  if (last && last.type === type && last.message === bounded(message)) {
+  if (
+    last &&
+    last.type === type &&
+    last.message === bounded(message) &&
+    Date.now() - last.at <= 1_800_000
+  ) {
     last.at = Date.now();
     last.count++;
     return;
