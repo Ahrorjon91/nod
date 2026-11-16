@@ -159,6 +159,12 @@ export function createWhatsAppLinkedTransport(options: {
           : numberOf(message.key.remoteJidAlt);
       if (!phone && options.mode !== 'self-chat')
         phone = numberOf(await current.signalRepository.lidMapping.getPNForLID(jid));
+      if (!phone && options.mode === 'bot' && options.allowedNumber) {
+        const lid = await current.signalRepository.lidMapping.getLIDForPN(
+          `${options.allowedNumber}@s.whatsapp.net`,
+        );
+        if (lid && jidNormalizedUser(lid) === jidNormalizedUser(jid)) phone = options.allowedNumber;
+      }
     }
     if (!phone || !channel.allowedSenderIds.includes(phone)) return;
     if (options.mode === 'self-chat') {

@@ -698,6 +698,7 @@ test(
                 lidMapping: {
                   getPNForLID: async (lid: string) =>
                     ['55555555@lid', '66666666@lid'].includes(lid) ? jid : null,
+                  getLIDForPN: async (pn: string) => (pn === jid ? '77777777@lid' : null),
                 },
               },
               end: () => {},
@@ -818,6 +819,8 @@ test(
                   },
                 },
                 envelope('lid', '55555555@lid'),
+                envelope('unmapped-lid', '77777777@lid'),
+                envelope('unmapped-intruder', '88888888@lid', false),
                 ...(mode === 'self-chat'
                   ? [
                       {
@@ -849,8 +852,11 @@ test(
             );
             assert.deepEqual(
               collected.map((message) => message.messageId),
-              ['owner', 'image', 'quoted', 'lid'],
+              mode === 'bot'
+                ? ['owner', 'image', 'quoted', 'lid', 'unmapped-lid']
+                : ['owner', 'image', 'quoted', 'lid'],
             );
+            if (mode === 'bot') assert.equal(collected[4].threadId, '77777777@lid');
             assert.equal(collected[2].replyToMessageId, 'task-prompt');
             assert.deepEqual(reacted, ['task-prompt']);
             assert.equal(downloads, 0);
