@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { appendFile } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { affectedTests, readTimings, shardTests } from './ci-tests.mjs';
 
 const checks = [
@@ -192,28 +193,6 @@ export function selectChecks(paths) {
   return { ...scope, testMode, testFiles };
 }
 
-export function requireChecks(needs) {
-  if (needs.scope?.result !== 'success')
-    throw new Error('CI could not select the required checks.');
-  for (const name of checks) {
-    if (!['true', 'false'].includes(needs.scope.outputs?.[name]))
-      throw new Error(`The ${name} scope is missing or invalid.`);
-  }
-  for (const [name, job] of Object.entries(needs)) {
-    if (!['success', 'skipped'].includes(job.result))
-      throw new Error(`The ${name} check did not pass: ${job.result}.`);
-  }
-  for (const name of [
-    'quality',
-    'secrets',
-    ...checks.filter((name) => !['types', 'build', 'ci', 'network'].includes(name)),
-  ]) {
-    const required = ['quality', 'secrets'].includes(name) || needs.scope.outputs[name] === 'true';
-    if (required && needs[name]?.result !== 'success')
-      throw new Error(`${name} check did not pass: ${needs[name]?.result ?? 'missing'}.`);
-  }
-}
-
 export function selectDesktopTests(paths, available) {
   const applicationOnly =
     paths !== null &&
@@ -228,7 +207,7 @@ export function selectDesktopTests(paths, available) {
     : available;
 }
 
-if (import.meta.main) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (process.argv.includes('--format')) {
     const files = JSON.parse(process.env.NOD_FORMAT_FILES);
     if (files === null || files.length)
@@ -241,8 +220,6 @@ if (import.meta.main) {
     execFileSync(process.execPath, ['--test', ...JSON.parse(process.env.NOD_DESKTOP_TEST_FILES)], {
       stdio: 'inherit',
     });
-  } else if (process.argv.includes('--require-checks')) {
-    requireChecks(JSON.parse(process.env.CI_NEEDS));
   } else {
     let base = process.env.CI_DIFF_BASE;
     if (!base && process.env.GITHUB_REF === 'refs/heads/release/desktop')

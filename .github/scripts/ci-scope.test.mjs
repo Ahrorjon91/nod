@@ -6,8 +6,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { requireChecks, selectChecks, selectDesktopTests } from './ci-scope.mjs';
+import { selectChecks, selectDesktopTests } from './ci-scope.mjs';
 import { readTimings, shardTests } from './ci-tests.mjs';
+
+const ciWorkflow = parse(await readFile(new URL('../workflows/ci.yml', import.meta.url), 'utf8'));
+const requireChecks = (needs) =>
+  new Function('process', ciWorkflow.jobs.checks.steps[0].run)({
+    env: { CI_NEEDS: JSON.stringify(needs) },
+  });
 
 const enabled = (paths) =>
   Object.entries(selectChecks(paths))

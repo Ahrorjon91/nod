@@ -212,7 +212,7 @@ A daily CI run at 03:17 UTC uses every check, including both Mac architectures a
 
 The **Self-host bundle** workflow builds and checks both Linux architectures when package, container, deployment, or bundled documentation inputs change. It also runs each Sunday at 04:47 UTC and on request. Ordinary web and server changes do not create both bundles. To get a bundle for a specific revision, run that workflow on the revision. Draft release creation still needs its separate manual input.
 
-The selection and required-result rules are in [`.github/scripts/ci-scope.mjs`](https://github.com/n8n-io/nod/blob/main/.github/scripts/ci-scope.mjs). CI tests these rules with disposable Git repositories, including renames, removed tests and version-only releases. Workflow changes also run a pinned, checksum-verified actionlint to check syntax and expressions.
+The selection rules are in [`.github/scripts/ci-scope.mjs`](https://github.com/n8n-io/nod/blob/main/.github/scripts/ci-scope.mjs). The workflow checks the required results with Node.js, without a checkout or dependency install. CI tests these rules with disposable Git repositories, including renames, removed tests and version-only releases. Workflow changes also run a pinned, checksum-verified actionlint to check syntax and expressions.
 
 Actionlint 1.7.12 [does not yet accept GitHub's `queue` key](https://github.com/rhysd/actionlint/issues/657). CI ignores that specific parser error and checks the queue values and cancellation settings in its own tests.
 
