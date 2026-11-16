@@ -2,6 +2,38 @@
 
 Releases from before the rename to Nod are the `desktop-v*` [GitHub releases](https://github.com/n8n-io/nod/releases).
 
+## 0.8.2 - 2026-11-16
+
+### Features
+
+- **local-files:** Enable file access through chat approval. [#949](https://github.com/n8n-io/nod/pull/949) (d87da94)
+
+### Fixes
+
+- **desktop:** Install guest images atomically and recover first starts. [#913](https://github.com/n8n-io/nod/pull/913) (60598bd)
+- **channels:** Parse quoted contact card parameters. [#915](https://github.com/n8n-io/nod/pull/915) (1201345)
+- **desktop:** Separate account onboarding from device setup. [commit](https://github.com/n8n-io/nod/commit/bdec709de4698e9857946890b0a9bcb975728353) (bdec709)
+- **apps:** Count one connection service refusal per wait step. [commit](https://github.com/n8n-io/nod/commit/9fc4cc9d5f946f89ec276648f40da73e21eb1cc3) (9fc4cc9)
+- **models:** Recommend Gemini 4 Argon for Google. [#950](https://github.com/n8n-io/nod/pull/950) (866158b)
+- **pi:** Fit requests before context overflow. [#946](https://github.com/n8n-io/nod/pull/946) (48e853c)
+
+<details>
+<summary>Maintenance (1 changes)</summary>
+
+- **evals:** Add local files capability evals. [#941](https://github.com/n8n-io/nod/pull/941) (d4a1b6c)
+
+</details>
+
+[Full changelog](https://github.com/n8n-io/nod/compare/nod-v0.8.1...60598bd3cac73a5ea6bc3814cf28faf46e7aaf18)
+
+<details>
+<summary>Build details</summary>
+
+Source: `60598bd3cac73a5ea6bc3814cf28faf46e7aaf18`
+Previous release: `nod-v0.8.1`
+
+</details>
+
 ## 0.8.1 - 2026-11-16
 
 ### Fixes

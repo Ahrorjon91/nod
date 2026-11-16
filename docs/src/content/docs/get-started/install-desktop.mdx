@@ -133,6 +133,8 @@ The Linux x64 app is a Flatpak preview. It needs a 64-bit Intel or AMD computer,
 
 Linux ARM builds are not published. Developers can [build the Flatpak from source](/contribute/desktop-releases/#build-a-linux-flatpak).
 
+Linux setup copies and verifies the guest image before it starts the private computer. This also works with encrypted home folders that reject optimized file copies. Nod records new first setups and replaces them on the next attempt if they are interrupted. Computers that completed setup are kept.
+
 ## Keep Nod running
 
 For a local assistant, closing the window keeps Nod running in the menu bar on a Mac, or the tray on Windows and Linux. Linux tray support depends on your desktop. **Quit Nod** stops Nod and its private computer. On Windows, running the installer or uninstaller while Nod is open offers to quit it first.

@@ -59,6 +59,8 @@ For a local source install without `NOD_AUTH_TOKEN`, Nod prints a link with `#ac
 
 A local Linux desktop assistant requires hardware virtualization and access to `/dev/kvm`. Check that virtualization is enabled in your firmware and that your Linux account can use KVM. On distributions with a `kvm` group, your account must belong to it. Sign out and back in after a group change, then reopen Nod. Nod does not use software emulation as a fallback.
 
+If an older build reported `copy_file_range failed: invalid argument`, install the latest Nod bundle and retry. Nod now uses normal reads and writes to copy its first guest image. It verifies the complete copy before Lima can use it. An older empty disk is replaced only after Nod checks that every byte is zero and stops the computer. Disks with other data are kept.
+
 ### Linux cannot save or unlock keys
 
 Start and unlock your desktop's secret store, such as GNOME Keyring or KWallet, then reopen Nod. The Flatpak uses Secret Service for saved keys and server tokens. Nod refuses plain-text storage. Keep your existing profile and secret store entries.
@@ -98,6 +100,10 @@ On Windows, the message reads "Nod needs more free disk space to prepare its pri
 ### Setup fails or stops partway
 
 Retry first. Do not delete the profile, VM, database, or runtime cache by hand to fix it. If it still fails, [send feedback](#send-feedback-with-a-diagnostic-report). If the chat cannot open, select **Show startup log** on the error screen. Send that log with a screenshot of the error. When a setup command fails, the message includes the last lines of its output.
+
+On Mac and Linux, Nod records new first setups and marks them complete after the computer passes its startup checks. If a recorded setup fails or is interrupted, the next attempt replaces the unfinished computer. A failed replacement reports its own error and stops the attempt. Computers that completed setup are kept. Missing configuration for an existing computer also stops setup and keeps its files.
+
+An interrupted Mac setup from an older version can lack that record. If retry still fails, keep its files and [send feedback with the startup log](#send-feedback-with-a-diagnostic-report).
 
 If the background service does not respond within two minutes, the startup log records the elapsed wait and the last health check failure. It also records whether the service reported its port. An unexpected service exit has a separate log entry.
 
