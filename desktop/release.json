@@ -3,5 +3,8 @@
   "previousTag": "nod-v0.8.0",
   "source": "b40b6329e34a78f4f1628a741efb776950683fb1",
   "highlights": "## Clearer app connection errors\n\nIf an app connection cannot start, Nod now shows the connection service's status and a recognized reason. That makes a rate limit or temporary service error easier to distinguish from a sign-in problem when you send feedback.\n\nIf an Attio request receives a Cloudflare HTML 403 response, the error includes the UTC time and a validated Ray ID when one is available. Send those details with your feedback so we can trace the request. This adds a diagnostic; it does not change the access rule.\n\n## Quieter background checks\n\nNod skips connection watch checks for disabled or replaced scheduled jobs. Gmail inbox checks wait until their next scheduled poll after a known connection-service 429 or 503 refusal, instead of retrying immediately. The inbox cursor and completed messages are preserved for the next poll.",
-  "video": null
+  "video": {
+    "url": "https://github.com/user-attachments/assets/06ed7c58-ccb9-4973-b831-5194056c145f",
+    "releaseSha256": "5ae8498f5492f3df90604cc0e5e66a6b78084d96066a3106d06f19a442059bc4"
+  }
 }
