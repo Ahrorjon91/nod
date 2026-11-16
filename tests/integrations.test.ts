@@ -1423,6 +1423,7 @@ test('a refused broker request keeps the broker status and only known codes', as
         const root = await mkdtemp(join(tmpdir(), 'nod-clock-skew-'));
         t.after(() => rm(root, { recursive: true, force: true }));
         const signed: Array<{ path: string; current: boolean }> = [];
+        const requestIds: string[] = [];
         const proxy = createComposioProxy({
           dataRoot: root,
           ownerId: 'fixture-owner',
@@ -1435,6 +1436,7 @@ test('a refused broker request keeps the broker status and only known codes', as
             const path = new URL(request.url).pathname;
             const service = Date.now() + skew;
             const issuedAt = Number(request.headers.get('x-nod-timestamp')) * 1000;
+            requestIds.push(request.headers.get('x-nod-request-id') ?? '');
             const current = accepted && issuedAt >= service - 60_000 && issuedAt <= service + 5_000;
             signed.push({ path, current });
             const headers = { Date: new Date(service).toUTCString() };
@@ -1464,6 +1466,7 @@ test('a refused broker request keeps the broker status and only known codes', as
             { path: '/v2/access/enroll', current: true },
             { path: '/v2/connect/start', current: true },
           ]);
+          assert.equal(new Set(requestIds).size, requestIds.length);
           return;
         }
         await assert.rejects(attempt, (error: unknown) => {
@@ -1476,6 +1479,7 @@ test('a refused broker request keeps the broker status and only known codes', as
           { path: '/v2/access/enroll', current: false },
           { path: '/v2/access/enroll', current: false },
         ]);
+        assert.equal(new Set(requestIds).size, requestIds.length);
       },
     );
   }
