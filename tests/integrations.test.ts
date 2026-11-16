@@ -9471,46 +9471,65 @@ test('connection service refusals pause the install from Retry-After or a growin
     Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' }),
   );
   await service.send();
-  const gates: (() => void)[] = [];
-  const answers = [busyReply(), busyReply()];
-  let reached!: () => void;
-  let reaching = new Promise<void>((resolve) => {
-    reached = resolve;
-  });
-  service.reply(async () => {
-    const answer = answers.shift();
-    await new Promise<void>((resolve) => {
-      gates.push(resolve);
-      reached();
-    });
-    return (
-      answer ??
-      Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' })
-    );
-  });
-  const arrive = async (count: number) => {
-    while (gates.length < count) {
-      await reaching;
-      reaching = new Promise<void>((resolve) => {
-        reached = resolve;
+  const gated = (answers: Response[]) => {
+    const gates: (() => void)[] = [];
+    let reached = () => {};
+    service.reply(async () => {
+      const answer = answers.shift();
+      await new Promise<void>((resolve) => {
+        gates.push(resolve);
+        reached();
       });
-    }
+      return (
+        answer ??
+        Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' })
+      );
+    });
+    return {
+      open: (index: number) => gates[index]!(),
+      arrive: async (count: number) => {
+        while (gates.length < count)
+          await new Promise<void>((resolve) => {
+            reached = resolve;
+          });
+      },
+      sends: (count: number) =>
+        Array.from({ length: count }, () =>
+          service.send().then(
+            () => 'sent',
+            () => 'refused',
+          ),
+        ),
+    };
   };
-  const earlier = [service.send(), service.send()].map((send) =>
-    send.then(
-      () => 'sent',
-      () => 'refused',
-    ),
-  );
-  await arrive(2);
-  gates[0]!();
+  const overlap = gated([busyReply(), busyReply()]);
+  const earlier = overlap.sends(2);
+  await overlap.arrive(2);
+  overlap.open(0);
   assert.equal(await Promise.race(earlier), 'refused');
   const later = service.send();
-  await arrive(3);
-  gates[1]!();
+  await overlap.arrive(3);
+  overlap.open(1);
   assert.deepEqual(await Promise.all(earlier), ['refused', 'refused']);
-  gates[2]!();
+  overlap.open(2);
   await later;
+  assert.equal(waited(), 60);
+  service.reply(() =>
+    Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' }),
+  );
+  await service.send();
+  const stale = gated([busyReply(), busyReply()]);
+  const before = stale.sends(2);
+  await stale.arrive(2);
+  stale.open(0);
+  assert.equal(await Promise.race(before), 'refused');
+  const reset = service.send();
+  await stale.arrive(3);
+  stale.open(2);
+  await reset;
+  assert.equal(service.provider.connectionBackoff!(), undefined);
+  stale.open(1);
+  assert.deepEqual(await Promise.all(before), ['refused', 'refused']);
   assert.equal(waited(), 60);
 });
 
