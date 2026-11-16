@@ -16,7 +16,10 @@ import { createVault } from '../src/server/vault.ts';
 import { locksTable } from '../src/server/locks.ts';
 import { createChatSdkTransport } from '../src/providers/chat-sdk/index.ts';
 import type { MessagingTransport } from '../src/ports/messaging.ts';
-import { createWhatsAppLinkedTransport } from '../src/providers/chat-sdk/whatsapp.ts';
+import {
+  createWhatsAppLinkedTransport,
+  type WhatsAppDrop,
+} from '../src/providers/chat-sdk/whatsapp.ts';
 import { combineMessagingTransports } from '../src/providers/chat-sdk/combined.ts';
 import { createChannelSessionStore } from '../src/server/channel-session.ts';
 import { createChannelMedia } from '../src/server/channel-media.ts';
@@ -667,6 +670,7 @@ test(
             quoted: unknown;
           }[] = [];
           const collected: InboundMessage[] = [];
+          const dropped: WhatsAppDrop[] = [];
           const reacted: string[] = [];
           const presence: string[][] = [];
           let downloads = 0;
@@ -759,6 +763,7 @@ test(
               },
               createSocket,
               download,
+              onDrop: (drop) => dropped.push(drop),
             });
           let transport = open();
           try {
@@ -857,6 +862,14 @@ test(
                 : ['owner', 'image', 'quoted', 'lid'],
             );
             if (mode === 'bot') assert.equal(collected[4].threadId, '77777777@lid');
+            assert.deepEqual(
+              dropped.find((drop) => drop.addressing === 'lid'),
+              mode === 'bot'
+                ? { reason: 'sender_unmatched', mode: 'bot', addressing: 'lid', suppressed: 0 }
+                : { reason: 'self_chat_mismatch', mode: 'own', addressing: 'lid', suppressed: 0 },
+            );
+            assert.ok(dropped.some((drop) => drop.reason === 'resend_ignored'));
+            assert.doesNotMatch(JSON.stringify(dropped), /\d{5,}|@/);
             assert.equal(collected[2].replyToMessageId, 'task-prompt');
             assert.deepEqual(reacted, ['task-prompt']);
             assert.equal(downloads, 0);
@@ -941,6 +954,10 @@ test(
               collected.push(message);
             });
             const shared = collected.slice(-3);
+            assert.equal(
+              new Set(dropped.map((drop) => `${drop.reason}:${drop.addressing}`)).size,
+              dropped.length,
+            );
             assert.deepEqual(
               shared.map((message) => message.attachments![0].source),
               ['sticker', 'location', 'contact'],

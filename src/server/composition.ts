@@ -644,6 +644,8 @@ export function createDefaultAdapters(
             mode,
             allowedNumber: configured.WHATSAPP_ALLOWED_NUMBER,
             store: createChannelSessionStore({ pool, ownerId, keyStore }),
+            onDrop: (drop) =>
+              logFailure('channel_message_dropped', null, { provider: 'whatsapp', ...drop }),
           }),
         );
       },
