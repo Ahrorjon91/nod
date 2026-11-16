@@ -7989,6 +7989,23 @@ test('artifact exports keep owned bytes, safe names, separate saves and restrict
   }
 });
 
+test('artifact exports refuse a file over 90 MB and leave nothing on disk', async () => {
+  const { createArtifactFiles } = await import('../main/artifact-files.mjs');
+  const root = await mkdtemp(join(tmpdir(), 'nod-artifact-limit-'));
+  const files = createArtifactFiles({
+    temporary: root,
+    downloads: join(root, 'Downloads'),
+    fetchArtifact: async () => new Response(new Uint8Array(90 * 1024 * 1024 + 1)),
+  });
+  try {
+    await assert.rejects(files.prepare(randomUUID()), /too large/);
+    for (const name of await readdir(root)) assert.deepEqual(await readdir(join(root, name)), []);
+  } finally {
+    await files.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('ready desktop updates share Later across engine windows and reopen for a new version', async (t) => {
   let version = '0.5.2';
   const restarts = [];
