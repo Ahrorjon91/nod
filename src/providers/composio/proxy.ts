@@ -88,8 +88,10 @@ export function createComposioProxy(options: {
       return;
     }
     if (response.status !== 429 && response.status !== 503) return;
-    generation++;
-    refusals++;
+    if (started === generation) {
+      generation++;
+      refusals++;
+    }
     const header = response.headers.get('retry-after')?.trim() ?? '';
     const requested = /^\d+$/.test(header)
       ? Number(header) * 1000

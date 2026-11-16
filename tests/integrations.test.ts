@@ -9368,7 +9368,7 @@ async function connectionServiceFixture(t: TestContext) {
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls: string[] = [];
   let userId = '';
-  let reply = () =>
+  let reply: () => Response | Promise<Response> = () =>
     Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' });
   const proxy = createComposioProxy({
     dataRoot: root,
@@ -9396,7 +9396,7 @@ async function connectionServiceFixture(t: TestContext) {
   return {
     provider,
     executions: () => calls.filter((path) => path.endsWith('/execute')).length,
-    reply: (next: () => Response) => {
+    reply: (next: () => Response | Promise<Response>) => {
       reply = next;
     },
     send: async () =>
@@ -9447,6 +9447,26 @@ test('connection service refusals pause the install from Retry-After or a growin
   await assert.rejects(service.send());
   assert.equal(waited(), 60);
   assert.equal(service.executions(), 12);
+  service.reply(() =>
+    Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' }),
+  );
+  await service.send();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let arrived = 0;
+  service.reply(async () => {
+    if (++arrived === 4) release();
+    await held;
+    return busyReply();
+  });
+  const concurrent = await Promise.allSettled([1, 2, 3, 4].map(() => service.send()));
+  assert.ok(concurrent.every((outcome) => outcome.status === 'rejected'));
+  assert.equal(waited(), 60);
+  service.reply(() => busyReply());
+  await assert.rejects(service.send());
+  assert.equal(waited(), 120);
 });
 
 test(
