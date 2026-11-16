@@ -1058,6 +1058,7 @@ async function initializeApplication(
     memory,
     learnedSkills,
     models: adapters.models,
+    localFilesAvailable: Boolean(adapters.trash),
     consumers,
     stopConsumer: (id) => boss.offWork('scheduled-task', { id, wait: true }),
     taskModels: {
@@ -2597,6 +2598,23 @@ async function initializeApplication(
             readWork,
           );
           return result;
+        }
+        if (isLocalFilesAction(action) && localFiles.available && !(await localFiles.enabled())) {
+          await localFiles.assertStartedByOwner(turn);
+          const input = { localFilesEnabled: true };
+          const verdict = await trust.check(turn, 'NOD_notification_preferences_update', input);
+          return approvals.request(turn, 'NOD_notification_preferences_update', input, {
+            allowed: !verdict.confirm,
+            ...(verdict.confirm ? {} : { basis: verdict.basis }),
+            signal: options.signal,
+            admit: options.admit,
+            expectedChatRevision: verdict.chatRevision,
+            details: {
+              ...(typeof args.path === 'string' ? { requestedPath: args.path } : {}),
+              accessScope:
+                'Enable local file access in the home folder and external drives for work the owner starts. Hidden files, secrets, private system folders and kept-out folders stay blocked. This enables the setting only; the requested file action has not run.',
+            },
+          });
         }
         const prepare = () =>
           hasWorkspaceFiles(args)

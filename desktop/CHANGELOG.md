@@ -2,6 +2,44 @@
 
 Releases from before the rename to Nod are the `desktop-v*` [GitHub releases](https://github.com/n8n-io/nod/releases).
 
+## 0.8.1 - 2026-11-16
+
+### Fixes
+
+- **integrations:** Defer Gmail polling after proxy refusals. [#944](https://github.com/n8n-io/nod/pull/944) (b40b632)
+- **apps:** Include Cloudflare Ray ID on HTML 403s. [#943](https://github.com/n8n-io/nod/pull/943) (13cda50)
+- **schedules:** Skip watch polling for stale jobs. [#942](https://github.com/n8n-io/nod/pull/942) (7438960)
+- **apps:** Keep the connection service's status and code when an app connection can't start. [#877](https://github.com/n8n-io/nod/pull/877) (67298e9)
+
+<details>
+<summary>Maintenance (13 changes)</summary>
+
+- **deps:** Keep only the reviewed dependency changes. [commit](https://github.com/n8n-io/nod/commit/b72529fe8b78de0ef227c4bc0c8ca366100789aa) (b72529f)
+- **deps-dev:** Bump the tiptap group across 1 directory with 9 updates. [commit](https://github.com/n8n-io/nod/commit/1912c3220591e4c3eddb68c4b75637935485bf6a) (1912c32)
+- **deps:** Bump the docs group across 1 directory with 2 updates. [commit](https://github.com/n8n-io/nod/commit/c9dbec4c462966d93b09bfe91c8a448c7a09e1ac) (c9dbec4)
+- **deps-dev:** Bump the tailwindcss group across 1 directory with 2 updates. [commit](https://github.com/n8n-io/nod/commit/74cf053714cf4d22cdd07173a460133971010b37) (74cf053)
+- **deps:** Bump the pi group across 1 directory with 2 updates. [commit](https://github.com/n8n-io/nod/commit/bfe15cf06bc560c01a22d83754260f2cfa8df49e) (bfe15cf)
+- **deps:** Bump posthog-node from 5.60.1 to 5.71.0. [commit](https://github.com/n8n-io/nod/commit/e27b383249d9fe87dc0f8b313cade6a4c2ec4a18) (e27b383)
+- **deps:** Bump parse5 from 8.0.1 to 8.1.1. [commit](https://github.com/n8n-io/nod/commit/bbd9c57c51ea9dcd9f46ad62fc9612cb8b3683d9) (bbd9c57)
+- **deps:** Bump dotenv from 18.0.9 to 18.0.10. [commit](https://github.com/n8n-io/nod/commit/e40879fef970804d481fdfb89ad2fd2f4f546850) (e40879f)
+- **deps-dev:** Bump unist-util-visit from 5.1.0 to 5.2.0. [commit](https://github.com/n8n-io/nod/commit/5f78872989e2b581456ef8211191234e112e0da9) (5f78872)
+- **deps-dev:** Bump lucide-react from 1.61.0 to 1.72.0. [commit](https://github.com/n8n-io/nod/commit/cb3e81569b7928c3f2e1dbbff4279e48a7024da5) (cb3e815)
+- **deps:** Bump jose from 6.2.14 to 6.2.17. [commit](https://github.com/n8n-io/nod/commit/4ee956c645078241198f23a8f7796bab6a15d31f) (4ee956c)
+- **deps:** Bump peter-evans/create-pull-request. [commit](https://github.com/n8n-io/nod/commit/8155369f177f02cb501c829a2c7acc9fb0b3a421) (8155369)
+- **deps:** Bump rust in /. [commit](https://github.com/n8n-io/nod/commit/3def1e2bc084bd5210512716a22b3a5ff77e666c) (3def1e2)
+
+</details>
+
+[Full changelog](https://github.com/n8n-io/nod/compare/nod-v0.8.0...b40b6329e34a78f4f1628a741efb776950683fb1)
+
+<details>
+<summary>Build details</summary>
+
+Source: `b40b6329e34a78f4f1628a741efb776950683fb1`
+Previous release: `nod-v0.8.0`
+
+</details>
+
 ## 0.8.0 - 2026-11-16
 
 ### Features

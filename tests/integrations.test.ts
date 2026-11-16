@@ -9653,7 +9653,7 @@ async function connectionServiceFixture(t: TestContext) {
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls: string[] = [];
   let userId = '';
-  let reply = () =>
+  let reply: () => Response | Promise<Response> = () =>
     Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' });
   const proxy = createComposioProxy({
     dataRoot: root,
@@ -9681,7 +9681,7 @@ async function connectionServiceFixture(t: TestContext) {
   return {
     provider,
     executions: () => calls.filter((path) => path.endsWith('/execute')).length,
-    reply: (next: () => Response) => {
+    reply: (next: () => Response | Promise<Response>) => {
       reply = next;
     },
     send: async () =>
@@ -9732,6 +9732,90 @@ test('connection service refusals pause the install from Retry-After or a growin
   await assert.rejects(service.send());
   assert.equal(waited(), 60);
   assert.equal(service.executions(), 12);
+  service.reply(() =>
+    Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' }),
+  );
+  await service.send();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let arrived = 0;
+  service.reply(async () => {
+    if (++arrived === 4) release();
+    await held;
+    return busyReply();
+  });
+  const concurrent = await Promise.allSettled([1, 2, 3, 4].map(() => service.send()));
+  assert.ok(concurrent.every((outcome) => outcome.status === 'rejected'));
+  assert.equal(waited(), 60);
+  service.reply(() => busyReply());
+  await assert.rejects(service.send());
+  assert.equal(waited(), 120);
+  service.reply(() =>
+    Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' }),
+  );
+  await service.send();
+  const gated = (answers: Response[]) => {
+    const gates: (() => void)[] = [];
+    let reached = () => {};
+    service.reply(async () => {
+      const answer = answers.shift();
+      await new Promise<void>((resolve) => {
+        gates.push(resolve);
+        reached();
+      });
+      return (
+        answer ??
+        Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' })
+      );
+    });
+    return {
+      open: (index: number) => gates[index]!(),
+      arrive: async (count: number) => {
+        while (gates.length < count)
+          await new Promise<void>((resolve) => {
+            reached = resolve;
+          });
+      },
+      sends: (count: number) =>
+        Array.from({ length: count }, () =>
+          service.send().then(
+            () => 'sent',
+            () => 'refused',
+          ),
+        ),
+    };
+  };
+  const overlap = gated([busyReply(), busyReply()]);
+  const earlier = overlap.sends(2);
+  await overlap.arrive(2);
+  overlap.open(0);
+  assert.equal(await Promise.race(earlier), 'refused');
+  const later = service.send();
+  await overlap.arrive(3);
+  overlap.open(1);
+  assert.deepEqual(await Promise.all(earlier), ['refused', 'refused']);
+  overlap.open(2);
+  await later;
+  assert.equal(waited(), 60);
+  service.reply(() =>
+    Response.json({ data: {}, error: null, log_id: 'fixture-log', result_type: 'completed' }),
+  );
+  await service.send();
+  const stale = gated([busyReply(), busyReply()]);
+  const before = stale.sends(2);
+  await stale.arrive(2);
+  stale.open(0);
+  assert.equal(await Promise.race(before), 'refused');
+  const reset = service.send();
+  await stale.arrive(3);
+  stale.open(2);
+  await reset;
+  assert.equal(service.provider.connectionBackoff!(), undefined);
+  stale.open(1);
+  assert.deepEqual(await Promise.all(before), ['refused', 'refused']);
+  assert.equal(waited(), 60);
 });
 
 test(

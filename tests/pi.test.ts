@@ -5,7 +5,7 @@ import { createPiModelBackend, createPiModelRuntime } from '../src/providers/pi/
 import type { Presentation } from '../src/shared/presentation.ts';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -440,12 +440,15 @@ test('models and routers complete tool discovery inside the endpoint context', a
         assert.ok((await localText(join(directory, 'sessions/fixture'))).includes(earlier));
       if (!['fixture-large', 'fixture-mcp-large'].includes(id)) {
         const before = bodies.length;
-        await assert.rejects(
-          runtime.runTurn({
-            ...input,
-            turnId: randomUUID(),
-            prompt: 'Oversized current request. '.repeat(5000),
-          }),
+        assert.equal(
+          (
+            await runtime.runTurn({
+              ...input,
+              turnId: randomUUID(),
+              prompt: 'Oversized current request. '.repeat(5000),
+            })
+          ).status,
+          'succeeded',
         );
         assert.ok(bodies.length > before);
         assert.equal(published.length, 1);
@@ -573,6 +576,26 @@ test('model checks fit the output limit of the selected text model', async (t) =
     });
 });
 
+test('wide output models reserve room for request input', async (t) => {
+  const { bodies, url, close } = await contextRecoveryServer(0, 1, -1, false, 100_000);
+  t.after(close);
+  const access = smallContextAccess('compatible', 'fixture-output-limit', 100_000);
+  access.definition.spec = { ...access.definition.spec, baseUrl: url, maxTokens: 65_000 };
+  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+  const { runtime, model } = await createPiModelRuntime(access);
+  const result = await runtime.completeSimple(
+    model,
+    {
+      systemPrompt: 'Answer the synthetic request.',
+      messages: [{ role: 'user', content: 'Synthetic input. '.repeat(1000), timestamp: 1 }],
+    },
+    { maxTokens: 65_000 },
+  );
+  assert.equal(result.stopReason, 'stop');
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].max_tokens, 50_000);
+});
+
 test('small Pi sessions save full output and keep nested results available to scripts', async (t) => {
   const { workspace, prefix, root } = await hostSandbox(t);
   const directory = await mkdtemp(join(tmpdir(), 'nod-small-output-'));
@@ -617,6 +640,14 @@ test('small Pi sessions save full output and keep nested results available to sc
           return { content: [] };
         },
       },
+      {
+        name: 'skills',
+        description: 'Read a synthetic learned skill.',
+        parameters: { type: 'object', properties: {} },
+        execute: async () => ({
+          content: [{ type: 'text', text: untrustedBlock('learned skill', full) }],
+        }),
+      },
     ],
     shouldStop: () => false,
     onEvent: () => {},
@@ -625,6 +656,16 @@ test('small Pi sessions save full output and keep nested results available to sc
   const run = (tool: ToolDefinition, id: string) =>
     tool.execute(id, {}, undefined, undefined, undefined as never);
   const result = await run(external, 'direct');
+  const learned = await run(
+    captured!.customTools!.find((tool) => tool.name === 'skills')!,
+    'direct',
+  );
+  const { untrustedParts } = await import('../src/shared/untrusted.ts');
+  assert.ok(
+    learned.content.some(
+      (part) => part.type === 'text' && part.text.startsWith(untrustedParts('learned skill').open),
+    ),
+  );
   const preview = result.content.find((part) => part.type === 'text')!.text;
   assert.ok(preview.length < 2000);
   assert.match(preview, /untrusted_tool_result/);
@@ -655,7 +696,7 @@ test('small Pi sessions save full output and keep nested results available to sc
   };
   const shown = command.content.find((part) => part.type === 'text')!.text;
   assert.match(shown, /"workspaceFile"/);
-  assert.equal(shown.includes('synthetic-last-line'), false);
+  assert.ok(shown.includes('synthetic-last-line'));
   assert.equal(command.exitCode, 4);
   assert.match(command.commandOutput!, /synthetic-line-00600\nsynthetic-last-line/);
   await session.dispose();
@@ -677,6 +718,7 @@ test('direct image results save over-budget images in the workspace', async (t) 
   const mixedImage = { ...image, mimeType: 'image/png ; charset=binary' };
   const mixedText = 'Synthetic screenshot description. ' + 'detail '.repeat(500);
   const trailingText = 'Synthetic caption after the screenshot.';
+  const shortCaption = 'Synthetic bitmap caption. '.repeat(30);
   let captured: Parameters<typeof createAgentSession>[0];
   const agent = createPiAgent({
     provider: 'compatible',
@@ -719,6 +761,7 @@ test('direct image results save over-budget images in the workspace', async (t) 
         execute: async () => ({
           content: [
             { type: 'image' as const, data: bmp.toString('base64'), mimeType: 'image/bmp' },
+            { type: 'text' as const, text: shortCaption },
           ],
         }),
       },
@@ -736,6 +779,7 @@ test('direct image results save over-budget images in the workspace', async (t) 
     );
     const pointer = result.content.find((part) => part.type === 'text')!.text;
     assert.match(pointer, /untrusted_tool_result/);
+    if (name === 'fixture_bmp') assert.ok(pointer.includes(shortCaption));
     const file = pointer.match(/"workspaceFile":"([^"]+)"/)![1];
     assert.ok(file.startsWith('.nod/outputs/'));
     const manifest = JSON.parse(
@@ -4249,6 +4293,9 @@ test('owner context stays out of the system prompt and compaction summaries and 
       JSON.stringify(six.messages).lastIndexOf('Synthetic request 6'),
   );
   assert.ok(!JSON.stringify(six).includes('Jordi Fixture'));
+  const seven = await turn(owner('Private fixture preferences. '.repeat(8000)), 7);
+  assert.ok(JSON.stringify(seven).includes('workspaceFile'));
+  assert.ok(!JSON.stringify(recorded).includes('Private fixture preferences.'));
 
   assert.ok(recorded.length >= 6);
   assert.ok(JSON.stringify(recorded).includes('[owner context omitted]'));
@@ -4258,7 +4305,7 @@ test('owner context stays out of the system prompt and compaction summaries and 
   assert.equal(recorded[0].metadata.session_id, execution.sessionId);
 });
 
-test('Pi compacts at its threshold with the selected model settings', async (t) => {
+test('Pi compacts at its threshold with the lowest supported summary effort', async (t) => {
   const { createServer } = await import('node:http');
   const chunk = (value: object) => `data: ${JSON.stringify(value)}\n\n`;
   const bodies: Array<{ messages: unknown[]; reasoning_effort?: string }> = [];
@@ -4367,7 +4414,7 @@ test('Pi compacts at its threshold with the selected model settings', async (t) 
   assert.deepEqual(bodies.map(summary), [false, false, false, true, false]);
   assert.deepEqual(
     bodies.map((body) => body.reasoning_effort),
-    ['high', 'high', 'high', 'high', 'high'],
+    ['high', 'high', 'high', 'low', 'high'],
   );
   const answered = events.findIndex(
     (event) => event.type === 'final' && event.text === 'Synthetic answer 4',
@@ -4383,11 +4430,18 @@ async function contextRecoveryServer(
   toolCalls = 0,
   callsPerStep = 1,
   overflowStep = 0,
-  summaryOverflow = false,
+  summaryOverflow: boolean | 'output-limit' = false,
+  maximumContext?: number,
+  actions?: Array<{ name: string; args: Record<string, unknown> }>,
 ) {
   const { createServer } = await import('node:http');
   const chunk = (value: object) => `data: ${JSON.stringify(value)}\n\n`;
-  const bodies: Array<{ model: string; messages: unknown[]; tools?: unknown[] }> = [];
+  const bodies: Array<{
+    model: string;
+    messages: unknown[];
+    tools?: unknown[];
+    max_tokens: number;
+  }> = [];
   const summary = (body: (typeof bodies)[number]) =>
     (toolCalls > 0 && !body.tools?.length) ||
     JSON.stringify(body.messages).includes('<conversation>') ||
@@ -4401,7 +4455,16 @@ async function contextRecoveryServer(
       bodies.push(body);
       const summarizing = summary(body);
       const step = summarizing ? 0 : ++agentRequests;
-      if (step === overflowStep || (summarizing && summaryOverflow)) {
+      if (
+        step === overflowStep ||
+        (summarizing && summaryOverflow === true) ||
+        (maximumContext !== undefined &&
+          (Buffer.byteLength(JSON.stringify(body.messages)) +
+            Buffer.byteLength(JSON.stringify(body.tools ?? []))) /
+            4 +
+            body.max_tokens >
+            maximumContext)
+      ) {
         response.writeHead(400, { 'content-type': 'application/json' });
         response.end(
           JSON.stringify({
@@ -4410,7 +4473,8 @@ async function contextRecoveryServer(
         );
         return;
       }
-      const toolCall = step > 0 && step <= toolCalls;
+      const action = summarizing ? undefined : actions?.[step - 1];
+      const toolCall = Boolean(action) || (step > 0 && step <= toolCalls);
       const delta = toolCall
         ? {
             role: 'assistant',
@@ -4419,8 +4483,8 @@ async function contextRecoveryServer(
               id: `inspect-${step}-${index}`,
               type: 'function',
               function: {
-                name: index ? `inspect_fixture_${index}` : 'inspect_fixture',
-                arguments: '{}',
+                name: action?.name ?? (index ? `inspect_fixture_${index}` : 'inspect_fixture'),
+                arguments: JSON.stringify(action?.args ?? {}),
               },
             })),
           }
@@ -4446,7 +4510,17 @@ async function contextRecoveryServer(
         }) +
           chunk({
             id: `context-${bodies.length}`,
-            choices: [{ index: 0, delta: {}, finish_reason: toolCall ? 'tool_calls' : 'stop' }],
+            choices: [
+              {
+                index: 0,
+                delta: {},
+                finish_reason: toolCall
+                  ? 'tool_calls'
+                  : summarizing && summaryOverflow === 'output-limit'
+                    ? 'length'
+                    : 'stop',
+              },
+            ],
             usage: {
               prompt_tokens: promptTokens,
               completion_tokens: 2,
@@ -4519,14 +4593,19 @@ test('Pi recovers a text companion overflow under an audio model selection', asy
 });
 
 test('a provider-reported mid-turn context overflow compacts without repeating tools', async (t) => {
-  for (const variant of ['summary', 'summary-overflow', 'short-history'] as const)
+  for (const variant of [
+    'summary',
+    'summary-overflow',
+    'summary-output-limit',
+    'short-history',
+  ] as const)
     await t.test(variant, async (t) => {
       const count = variant === 'short-history' ? 1 : 7;
       const { bodies, summary, url, close } = await contextRecoveryServer(
         count,
         1,
         count + 1,
-        variant === 'summary-overflow',
+        variant === 'summary-output-limit' ? 'output-limit' : variant === 'summary-overflow',
       );
       t.after(close);
       const access = smallContextAccess('compatible', 'fixture-context', 131_072);
@@ -4591,6 +4670,22 @@ test('a provider-reported mid-turn context overflow compacts without repeating t
         ),
       );
       assert.equal(bodies.filter(summary).length, 1);
+      if (variant === 'summary-output-limit') {
+        const usages = events.flatMap((event) =>
+          event.type === 'provider_usage' && event.usage.operation === 'compaction'
+            ? [event.usage]
+            : [],
+        );
+        assert.equal(
+          usages.reduce((total, usage) => total + (usage.outputTokens ?? 0), 0),
+          2,
+        );
+        assert.ok(
+          !JSON.stringify(
+            openLocalSession(join(directory, sessionId)).buildSessionContext(),
+          ).includes('Synthetic summary:'),
+        );
+      }
       const summaryRequest = bodies.find(summary);
       assert.ok(summaryRequest);
       assert.ok(JSON.stringify(summaryRequest.messages).includes('Inspect the synthetic fixture.'));
@@ -4615,6 +4710,283 @@ test('a provider-reported mid-turn context overflow compacts without repeating t
           ),
       );
     });
+});
+
+test('oversized owner input stays complete in the workspace and permits later turns', async (t) => {
+  const window = 16_384;
+  const { bodies, url, close } = await contextRecoveryServer(0, 1, -1, false, window);
+  t.after(close);
+  const access = smallContextAccess('compatible', 'fixture-context', window);
+  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+  access.definition.spec = { ...access.definition.spec, baseUrl: url };
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-owner-capacity-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { workspace, prefix, root } = await hostSandbox(t);
+  const events: AgentEvent[] = [];
+  const agent = createPiAgent({
+    provider: 'compatible',
+    sessionRoot: directory,
+    resolve: async () => access,
+  });
+  t.after(() => agent.dispose());
+  const sessionId = randomUUID();
+  const owner = 'Inspect these synthetic records.\n' + randomBytes(45_000).toString('hex');
+  for (const text of [owner, 'Reply OK.', 'Reply OK again.', 'A new short request.']) {
+    const session = await agent.open({
+      ...fakeExecution(sessionId),
+      restricted: true,
+      systemPrompt: 'Read the supplied records.',
+      workspace,
+      tools: [],
+      runTool: async (_name, _params, run) => run(),
+      shouldStop: () => false,
+      onEvent: (event) => events.push(event),
+    });
+    await session.prompt(text, []);
+    await session.dispose();
+  }
+  assert.deepEqual(
+    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
+    Array(4).fill('Synthetic answer'),
+  );
+  assert.ok(!events.some((event) => event.type === 'error'));
+  assert.equal(bodies.length, 4);
+  const file = JSON.stringify(bodies[0]).match(/workspaceFile\\":\\"([^\\]+)\\"/)![1];
+  assert.equal(await readFile(join(workspace.path, file).replace(prefix, root), 'utf8'), owner);
+  assert.ok(
+    openLocalSession(join(directory, sessionId))
+      .getEntries()
+      .some(
+        (entry) =>
+          entry.type === 'message' &&
+          entry.message.role === 'user' &&
+          (typeof entry.message.content === 'string'
+            ? entry.message.content
+            : entry.message.content
+                .flatMap((part) => (part.type === 'text' ? [part.text] : []))
+                .join('\n')) === owner,
+      ),
+  );
+});
+
+test('a loaded schema that exceeds the request budget returns to deferred tools', async (t) => {
+  const window = 131_072;
+  const { bodies, url, close } = await contextRecoveryServer(2, 1, -1, false, window, [
+    { name: 'nod_tool_search', args: { query: 'synthetic_deferred_schema', limit: 1 } },
+    { name: 'synthetic_deferred_schema', args: {} },
+  ]);
+  t.after(close);
+  const access = smallContextAccess('compatible', 'fixture-context', window);
+  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+  access.definition.spec = { ...access.definition.spec, baseUrl: url };
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-schema-capacity-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { workspace, prefix, root } = await hostSandbox(t);
+  const events: AgentEvent[] = [];
+  let executions = 0;
+  const agent = createPiAgent({
+    provider: 'compatible',
+    sessionRoot: directory,
+    resolve: async () => access,
+  });
+  t.after(() => agent.dispose());
+  const description = 'Synthetic description. ' + 'x'.repeat(600_000);
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    restricted: true,
+    systemPrompt: 'Use synthetic tools.',
+    workspace,
+    runTool: async (_name, _params, run) => run(),
+    tools: [
+      {
+        name: 'synthetic_deferred_schema',
+        description,
+        deferred: { namespace: 'synthetic', description: 'Synthetic tools.' },
+        parameters: Type.Object({}),
+        execute: async () => {
+          executions++;
+          return { content: [{ type: 'text', text: 'Synthetic result.' }] };
+        },
+      },
+    ],
+    shouldStop: () => false,
+    onEvent: (event) => events.push(event),
+  });
+  await session.prompt('Inspect the synthetic record.', []);
+  await session.dispose();
+  assert.equal(executions, 1);
+  assert.deepEqual(
+    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
+    ['Synthetic answer'],
+  );
+  assert.ok(!events.some((event) => event.type === 'error'));
+  assert.equal(bodies.length, 3);
+  const files = await readdir(join(workspace.path, '.nod/outputs').replace(prefix, root));
+  const sources = await Promise.all(
+    files.map((file) =>
+      readFile(join(workspace.path, '.nod/outputs', file).replace(prefix, root), 'utf8'),
+    ),
+  );
+  assert.ok(sources.some((source) => source.includes(description)));
+});
+
+test('a failed request cannot remain inside a compaction checkpoint', async (t) => {
+  for (const prior of [false, true])
+    await t.test(prior ? 'with a valid checkpoint' : 'without a checkpoint', async (t) => {
+      const directory = await mkdtemp(join(tmpdir(), 'nod-pi-failed-checkpoint-'));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const manager = openLocalSession(directory);
+      const first = manager.appendMessage({
+        role: 'user',
+        content: 'Earlier valid request.',
+        timestamp: 1,
+      });
+      const details = {
+        readFiles: ['synthetic-input.txt'],
+        modifiedFiles: ['synthetic-output.txt'],
+      };
+      if (prior) manager.appendCompaction('Earlier valid facts.', first, 1000, details);
+      manager.appendMessage(fauxAssistantMessage('Earlier valid answer.'));
+      const failed = manager.appendMessage({
+        role: 'user',
+        content: 'Withdraw this failed request.',
+        timestamp: 2,
+      });
+      manager.appendCompaction(
+        'Withdraw this failed request.\n' + 'x'.repeat(90_000),
+        failed,
+        23_000,
+      );
+      manager.appendMessage({
+        ...fauxAssistantMessage(''),
+        stopReason: 'error',
+        errorMessage: 'Context length exceeded.',
+      });
+      assert.equal(dropFailedInput(manager), true);
+      const reopened = openLocalSession(directory);
+      const context = JSON.stringify(reopened.buildSessionContext());
+      assert.ok(!context.includes('Withdraw this failed request.'));
+      assert.ok(context.includes(prior ? 'Earlier valid facts.' : 'Earlier valid request.'));
+      assert.ok(JSON.stringify(reopened.getEntries()).includes('Withdraw this failed request.'));
+      const checkpoint = reopened.getBranch().findLast((entry) => entry.type === 'compaction');
+      assert.ok(checkpoint?.type === 'compaction' && checkpoint.tokensBefore > 0);
+      if (prior) assert.deepEqual(checkpoint.details, details);
+      assert.equal(dropFailedInput(reopened), false);
+    });
+});
+
+test('an oversized saved summary becomes a bounded checkpoint', async (t) => {
+  const window = 16_384;
+  const { bodies, url, close } = await contextRecoveryServer(0, 1, -1, false, window);
+  t.after(close);
+  const access = smallContextAccess('compatible', 'fixture-context', window);
+  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+  access.definition.spec = { ...access.definition.spec, baseUrl: url };
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-saved-summary-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const sessionId = randomUUID();
+  const saved = join(directory, sessionId);
+  await mkdir(saved);
+  const manager = openLocalSession(saved);
+  manager.appendMessage({ role: 'user', content: 'Earlier synthetic request.', timestamp: 1 });
+  const answer = manager.appendMessage(fauxAssistantMessage('Earlier work finished.'));
+  const summary = 'Earlier synthetic details. ' + 'x'.repeat(90_000);
+  manager.appendCompaction(summary, answer, 23_000);
+  const { workspace, prefix, root } = await hostSandbox(t);
+  const events: AgentEvent[] = [];
+  let piSession: Awaited<ReturnType<typeof createAgentSession>>['session'];
+  const agent = createPiAgent({
+    provider: 'compatible',
+    sessionRoot: directory,
+    resolve: async () => access,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      piSession = result.session;
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const session = await agent.open({
+    ...fakeExecution(sessionId),
+    restricted: true,
+    systemPrompt: 'Answer the current request.',
+    workspace,
+    tools: [],
+    runTool: async (_name, _params, run) => run(),
+    shouldStop: () => false,
+    onEvent: (event) => events.push(event),
+  });
+  await session.prompt('Reply OK.', []);
+  piSession!.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 0 } });
+  await piSession!.compact();
+  await session.dispose();
+  assert.deepEqual(
+    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
+    ['Synthetic answer'],
+  );
+  assert.ok(bodies.length > 0);
+  const checkpoint = openLocalSession(saved)
+    .getBranch()
+    .findLast((entry) => entry.type === 'compaction');
+  assert.ok(checkpoint?.type === 'compaction' && checkpoint.summary.length < 4000);
+  const file = checkpoint.summary.match(/"workspaceFile":"([^"]+)"/)![1];
+  assert.ok(
+    (await readFile(join(workspace.path, file).replace(prefix, root), 'utf8')).includes(summary),
+  );
+});
+
+test('repeated parallel batches compact without repeating completed tools', async (t) => {
+  const window = 131_072;
+  const count = 16;
+  const steps = 12;
+  const { bodies, summary, url, close } = await contextRecoveryServer(
+    steps,
+    count,
+    -1,
+    false,
+    window,
+  );
+  t.after(close);
+  const access = smallContextAccess('compatible', 'fixture-context', window);
+  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+  access.definition.spec = { ...access.definition.spec, baseUrl: url };
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-repeated-batches-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const events: AgentEvent[] = [];
+  let executions = 0;
+  const agent = createPiAgent({
+    provider: 'compatible',
+    sessionRoot: directory,
+    resolve: async () => access,
+  });
+  t.after(() => agent.dispose());
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    restricted: true,
+    systemPrompt: 'Inspect synthetic records once.',
+    workspace: recordingWorkspace().workspace,
+    runTool: async (_name, _params, run) => run(),
+    tools: Array.from({ length: count }, (_, index) => ({
+      name: index ? `inspect_fixture_${index}` : 'inspect_fixture',
+      description: 'Read a synthetic record.',
+      parameters: Type.Object({}),
+      parallel: true,
+      execute: async () => {
+        executions++;
+        return { content: [{ type: 'text' as const, text: 'x'.repeat(3000) }] };
+      },
+    })),
+    shouldStop: () => false,
+    onEvent: (event) => events.push(event),
+  });
+  await session.prompt('Inspect the synthetic records.', []);
+  await session.dispose();
+  assert.equal(executions, steps * count);
+  assert.deepEqual(
+    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
+    ['Synthetic answer'],
+  );
+  assert.ok(bodies.some(summary));
 });
 
 test('a dense single tool result stays within the model context', async (t) => {
@@ -4780,6 +5152,76 @@ test('parallel tool results share the remaining model context', async (t) => {
   assert.equal(JSON.stringify(answer.messages).match(/workspaceFile/g)?.length, 2);
 });
 
+test('a parallel batch of individually bounded tool results fits the next model request', async (t) => {
+  const window = 131_072;
+  const count = 16;
+  const { bodies, summary, url, close } = await contextRecoveryServer(1, count, -1, false, window);
+  t.after(close);
+  const access = smallContextAccess('compatible', 'fixture-context', window);
+  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+  access.definition.spec = { ...access.definition.spec, baseUrl: url };
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-parallel-batch-context-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const events: AgentEvent[] = [];
+  const executions = new Map<string, number>();
+  const workspace = await hostSandbox(t);
+  const agent = createPiAgent({
+    provider: 'compatible',
+    sessionRoot: directory,
+    resolve: async () => access,
+  });
+  t.after(() => agent.dispose());
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    restricted: true,
+    systemPrompt: 'Inspect each synthetic record once and report the result.',
+    workspace: workspace.workspace,
+    runTool: async (_name, _params, run) => run(),
+    tools: Array.from({ length: count }, (_, index) => {
+      const name = index ? `inspect_fixture_${index}` : 'inspect_fixture';
+      return {
+        name,
+        description: 'Inspect one synthetic record.',
+        parameters: Type.Object({}),
+        parallel: true,
+        execute: async () => {
+          executions.set(name, (executions.get(name) ?? 0) + 1);
+          return {
+            content: [
+              { type: 'text' as const, text: `Synthetic record ${index}: ` + 'x'.repeat(56_000) },
+            ],
+          };
+        },
+      };
+    }),
+    shouldStop: () => false,
+    onEvent: (event) => events.push(event),
+  });
+  await session.prompt('Inspect all sixteen synthetic records.', []);
+  await session.dispose();
+  assert.equal(executions.size, count);
+  assert.ok([...executions.values()].every((calls) => calls === 1));
+  assert.deepEqual(
+    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
+    ['Synthetic answer'],
+    JSON.stringify(events.flatMap((event) => (event.type === 'error' ? [event.message] : []))),
+  );
+  const answer = bodies.findLast((body) => !summary(body));
+  assert.ok(answer);
+  assert.ok(bodies.every((body) => Buffer.byteLength(JSON.stringify(body.messages)) / 4 <= window));
+  assert.ok(JSON.stringify(answer.messages).includes('workspaceFile'));
+  const outputs = join(workspace.root, 'workspace', '.nod', 'outputs');
+  const files = await readdir(outputs);
+  assert.equal(files.length, count);
+  assert.deepEqual(
+    (await Promise.all(files.map((file) => readFile(join(outputs, file), 'utf8')))).sort(),
+    Array.from(
+      { length: count },
+      (_, index) => `Synthetic record ${index}: ` + 'x'.repeat(56_000),
+    ).sort(),
+  );
+});
+
 test('Pi recovers saved tool history across final deliveries, waits and model changes', async (t) => {
   for (const ending of ['final', 'waiting', 'switched', 'switched-summary-overflow'] as const)
     await t.test(ending, async (t) => {
@@ -4927,7 +5369,7 @@ test('Pi recovers saved tool history across final deliveries, waits and model ch
 });
 
 test('Pi stops failed or aborted summaries without a second request', async (t) => {
-  for (const failure of ['output-limit', 'token-rate', 'aborted'] as const)
+  for (const failure of ['token-rate', 'aborted'] as const)
     await t.test(failure, async (t) => {
       const directory = await mkdtemp(join(tmpdir(), 'nod-pi-summary-failure-'));
       t.after(() => rm(directory, { recursive: true, force: true }));
@@ -5057,7 +5499,7 @@ test('Pi stops failed or aborted summaries without a second request', async (t) 
       if (failure !== 'aborted')
         assert.match(
           events.filter((event) => event.type === 'error').at(-1)!.message,
-          failure === 'output-limit' ? /summary is incomplete/ : /tokens per minute.*Limit 6000/,
+          /tokens per minute.*Limit 6000/,
         );
       assert.ok(
         !openLocalSession(saved)
@@ -5713,8 +6155,7 @@ test('full 32k Pi sessions distinguish context exhaustion from output truncation
   for (const prompt of ['yes', 'continue', 'continue'])
     exhausted.push(await turn('fixture-full-context', prompt));
   assert.ok(bodies.some((body) => !body.tools?.length));
-  assert.equal(scripts.length, 1);
-  assert.ok(scripts[0].includes('fixture-list-calendars'));
+  assert.equal(scripts.filter((script) => script.includes('fixture-list-calendars')).length, 1);
   for (const attempt of exhausted)
     assert.ok(
       attempt.usage.some((usage) => usage.inputTokens === 32_750 && usage.outputTokens === 17),

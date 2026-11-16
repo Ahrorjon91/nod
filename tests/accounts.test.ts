@@ -3271,28 +3271,28 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     };
     const google = await f.create('fixture-google-default', backend);
     await google.addKey('google', 'fixture-google-key');
-    assert.equal(google.view().selection?.modelId, 'gemini-3.8-flash');
+    assert.equal(google.view().selection?.modelId, 'gemini-4-argon');
     assert.equal(google.view().selection?.effort, 'medium');
     const chosen = google.view().selection!;
     await google.addKey('mistral', 'fixture-mistral-key');
     assert.deepEqual(google.view().selection, chosen);
-    const paidGoogle = await f.create('fixture-google-paid-choice', {
+    const freeGoogle = await f.create('fixture-google-free-choice', {
       ...backend,
       catalog: async () =>
         (await backend.catalog('google')).filter(
-          (definition) => definition.choice.id === 'gemini-4-argon',
+          (definition) => definition.choice.id === 'gemini-3.8-flash',
         ),
     });
-    const paidConnection = await paidGoogle.addKey('google', 'fixture-google-paid-key');
-    assert.equal(paidGoogle.view().selection, null);
-    assert.equal(paidGoogle.configured, false);
-    await paidGoogle.select({
-      connectionId: paidConnection,
-      modelId: 'gemini-4-argon',
+    const freeConnection = await freeGoogle.addKey('google', 'fixture-google-free-key');
+    assert.equal(freeGoogle.view().selection, null);
+    assert.equal(freeGoogle.configured, false);
+    await freeGoogle.select({
+      connectionId: freeConnection,
+      modelId: 'gemini-3.8-flash',
       effort: 'medium',
     });
-    assert.equal(paidGoogle.configured, true);
-    assert.equal((await paidGoogle.resolve()).definition.choice.id, 'gemini-4-argon');
+    assert.equal(freeGoogle.configured, true);
+    assert.equal((await freeGoogle.resolve()).definition.choice.id, 'gemini-3.8-flash');
     const bedrock = await f.create('fixture-bedrock-default', backend);
     await bedrock.addKey('amazon-bedrock', 'fixture-bedrock-key', { region: 'eu-west-1' });
     assert.equal(bedrock.view().selection, null);
@@ -6301,7 +6301,8 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
       CREATE TABLE preferences(owner_id text PRIMARY KEY,notification_rule text NOT NULL DEFAULT '',rules text NOT NULL DEFAULT '',
         time_zone text,quiet_start text NOT NULL DEFAULT '22:00',quiet_end text NOT NULL DEFAULT '08:00',
         quiet_hours_enabled boolean NOT NULL DEFAULT true,locale text,hour_cycle text NOT NULL DEFAULT 'auto',
-        speech_voice text,speech_reply text NOT NULL DEFAULT 'auto',proactive_paused boolean NOT NULL DEFAULT false)`);
+        speech_voice text,speech_reply text NOT NULL DEFAULT 'auto',proactive_paused boolean NOT NULL DEFAULT false,
+        local_files_enabled boolean NOT NULL DEFAULT false)`);
     const captured: Parameters<ProductAnalytics['capture']>[0][] = [];
     const analytics = await createAnalytics({
       provider: { capture: (event) => captured.push(event), shutdown: async () => {} },

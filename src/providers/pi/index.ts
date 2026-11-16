@@ -10,13 +10,19 @@ import {
   InMemoryCredentialStore,
   isContextOverflow,
   isRecoverableLength,
+  clampThinkingLevel,
+  createInitialSystemMessage,
+  getCurrentSystemMessage,
+  getSystemMessageText,
   type AssistantMessage,
 } from '@earendil-works/pi-ai';
 import { Agent as Connections, Dispatcher1Wrapper, buildConnector } from 'undici';
 import { Compile } from 'typebox/compile';
 import {
   compact,
+  convertToLlm,
   estimateTokens,
+  serializeConversation,
   createAgentSession,
   createCodemodeExtension,
   createToolSearchExtension,
@@ -30,6 +36,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime, localModelSilenceMs } from './models.ts';
 import { modelContext } from './context.ts';
+import { contextTokens, createContextOutput, toolOutputReference } from './context-output.ts';
 import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
 import { piModelTrace } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
@@ -42,12 +49,13 @@ import {
   keptImages,
   openLocalSession,
   removedImage,
+  recoveryContext,
 } from './checkpoint.ts';
 import { threadIdentity } from '../../ports/thread-identity.ts';
 import { createPiUsageTracker, piUsageMetrics, usageId } from './usage.ts';
 import { agentModels } from '../../shared/model-defaults.ts';
 import type { ModelSelection } from '../../shared/models.ts';
-import { createSandbox, workspaceOutputs, writeWorkspaceFile } from './sandbox.ts';
+import { createSandbox, workspaceOutputs } from './sandbox.ts';
 import { untrustedBlock } from '../../shared/untrusted.ts';
 import { isPublicAddress, publicLookup } from '../agent-browser/network.ts';
 
@@ -387,15 +395,6 @@ function completeAssistantMessages(pi: ExtensionAPI) {
 
 const tokenRateLimit = /\b(?:tokens? per (?:minute|day)|[tr]p[md])\b/i;
 
-const imageOutputExtensions: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/jpg': 'jpg',
-  'image/webp': 'webp',
-  'image/gif': 'gif',
-  'image/bmp': 'bmp',
-};
-
 export function createPiAgent(options: {
   provider: string;
   resolve?: (choice?: ModelSelection) => Promise<ModelAccess>;
@@ -522,6 +521,14 @@ export function createPiAgent(options: {
       );
       if (budget.compact && input.compactInstructions)
         input = { ...input, ...input.compactInstructions };
+      const output = createContextOutput(
+        input.workspace,
+        input.shouldStop,
+        input.ownerContext?.split('\n', 1)[0],
+      );
+      let compacting = false;
+      let recovering = false;
+      let toolCallCount = 1;
       const boundedOutput = async (
         name: string,
         run: () => ReturnType<ToolDefinition['execute']>,
@@ -531,13 +538,10 @@ export function createPiAgent(options: {
         const result = await run();
         if (nested) return result;
         const text = result.content
-          .filter((part) => part.type === 'text')
-          .map((part) => part.text)
+          .flatMap((part) => (part.type === 'text' ? [part.text] : []))
           .join('\n');
-        const images = result.content.filter((part) => part.type === 'image');
-        if (!text && !images.length) return result;
         if (
-          Buffer.byteLength(text) <= budget.toolOutput.maxBytes &&
+          Buffer.byteLength(text) <= budget.toolOutput.maxBytes / toolCallCount &&
           estimateTokens({
             role: 'toolResult',
             toolCallId: '',
@@ -545,67 +549,23 @@ export function createPiAgent(options: {
             content: result.content,
             isError: result.isError ?? false,
             timestamp: 0,
-          }) <= budget.toolOutput.maxTokens
+          }) <=
+            budget.toolOutput.maxTokens / toolCallCount
         )
           return result;
-        signal?.throwIfAborted();
-        if (input.shouldStop()) throw new Error('The turn was stopped.');
-        const directory = `${input.workspace.path}/.nod/outputs`;
-        const stem = `.nod/outputs/${randomBytes(12).toString('base64url')}`;
-        const textFile = `${stem}.txt`;
-        if (
-          (
-            await input.workspace.exec(`mkdir -p -- '${directory.replaceAll("'", "'\\''")}'`, {
-              signal,
-            })
-          ).exitCode
-        )
-          throw new Error('The full tool output could not be saved.');
-        let file = textFile;
-        if (images.length) {
-          const savedContent = [];
-          for (const [index, part] of result.content.entries()) {
-            const mimeType =
-              part.type === 'image' ? part.mimeType.toLowerCase().split(';')[0]!.trim() : '';
-            const partFile =
-              part.type === 'image'
-                ? `${stem}-${index}.${imageOutputExtensions[mimeType] ?? 'bin'}`
-                : `${stem}-${index}.txt`;
-            await writeWorkspaceFile(
-              input.workspace,
-              `${input.workspace.path}/${partFile}`,
-              part.type === 'image' ? Buffer.from(part.data, 'base64') : Buffer.from(part.text),
-              signal,
-            );
-            savedContent.push(
-              part.type === 'image'
-                ? { type: 'image', path: partFile, mimeType: part.mimeType }
-                : { type: 'text', path: partFile },
-            );
-          }
-          file = `${stem}.json`;
-          await writeWorkspaceFile(
-            input.workspace,
-            `${input.workspace.path}/${file}`,
-            Buffer.from(JSON.stringify({ content: savedContent })),
-            signal,
-          );
-        } else
-          await writeWorkspaceFile(
-            input.workspace,
-            `${input.workspace.path}/${textFile}`,
-            Buffer.from(text),
-            signal,
-          );
-        const saved = JSON.stringify({
-          workspaceFile: file,
-          characters: text.length,
-          preview: text.slice(0, budget.toolOutput.previewCharacters),
-        });
-        const pointer = result.isError ? saved : untrustedBlock(name, saved);
+        const saved = await output.save(
+          result.content,
+          Math.floor(budget.toolOutput.previewCharacters / toolCallCount),
+          signal,
+        );
         return {
           ...result,
-          content: [{ type: 'text' as const, text: pointer }],
+          content: [
+            {
+              type: 'text' as const,
+              text: result.isError ? saved : toolOutputReference(name, result.content, saved),
+            },
+          ],
         };
       };
       let idle = false;
@@ -799,61 +759,98 @@ export function createPiAgent(options: {
           ownerContextCopies(input.ownerContext),
           (pi: ExtensionAPI) =>
             pi.on('session_before_compact', async ({ preparation, customInstructions, signal }) => {
-              const target = readsNativeAudio(model) ? model : (session.model ?? model);
+              const selected = readsNativeAudio(model)
+                ? (connection?.textModel ?? model)
+                : (session.model ?? model);
+              const target = {
+                ...selected,
+                maxTokens: Math.min(selected.maxTokens, Math.floor(selected.contextWindow / 4)),
+              };
+              compacting = true;
               try {
-                return {
-                  compaction: await compact(
-                    preparation,
-                    target,
-                    undefined,
-                    undefined,
-                    customInstructions,
-                    signal,
-                    session.thinkingLevel,
-                    session.agent.streamFunction,
-                    undefined,
-                    settings.getRetrySettings(),
-                  ),
-                };
+                const result = await compact(
+                  preparation,
+                  target,
+                  undefined,
+                  undefined,
+                  customInstructions,
+                  signal,
+                  clampThinkingLevel(target, 'off'),
+                  session.agent.streamFunction,
+                  undefined,
+                  settings.getRetrySettings(),
+                );
+                if (
+                  estimateTokens({ role: 'user', content: result.summary, timestamp: 0 }) >
+                  target.contextWindow / 4
+                )
+                  result.summary =
+                    recoveryContext +
+                    '\n' +
+                    untrustedBlock(
+                      'saved context',
+                      await output.save([{ type: 'text', text: result.summary }], 1000, signal),
+                    );
+                return { compaction: result };
               } catch (error) {
                 if (signal.aborted) return { cancel: true };
                 const message = error instanceof Error ? error.message : String(error);
                 if (
                   tokenRateLimit.test(message) ||
-                  !isContextOverflow({
+                  (!isContextOverflow({
                     stopReason: 'error',
                     errorMessage: message,
                     provider: target.provider,
-                  } as AssistantMessage)
+                  } as AssistantMessage) &&
+                    compaction?.requests.at(-1)?.stopReason !== 'length')
                 ) {
                   compaction!.error = `Compaction failed: ${message}`;
                   return { cancel: true };
                 }
-                const request = preparation.turnPrefixMessages
-                  .flatMap((message) => {
-                    if (
-                      message.role !== 'user' &&
-                      (message.role !== 'custom' || message.customType !== 'nod-audio-input')
-                    )
-                      return [];
-                    return [
-                      typeof message.content === 'string'
-                        ? message.content
-                        : message.content
-                            .flatMap((part) => (part.type === 'text' ? [part.text] : []))
-                            .join('\n'),
-                    ];
-                  })
+                const saved = await output.save(
+                  [
+                    {
+                      type: 'text',
+                      text: [
+                        preparation.previousSummary ?? '',
+                        serializeConversation(convertToLlm(preparation.messagesToSummarize)),
+                        serializeConversation(convertToLlm(preparation.turnPrefixMessages)),
+                      ].join('\n\n'),
+                    },
+                  ],
+                  0,
+                  signal,
+                );
+                const request = convertToLlm(preparation.turnPrefixMessages)
+                  .flatMap((message) =>
+                    message.role === 'user'
+                      ? [
+                          typeof message.content === 'string'
+                            ? message.content
+                            : message.content
+                                .flatMap((part) => (part.type === 'text' ? [part.text] : []))
+                                .join('\n'),
+                        ]
+                      : [],
+                  )
                   .join('\n\n');
+                const owner =
+                  request.length > 1000
+                    ? await output.save([{ type: 'text', text: request }], 1000, signal)
+                    : request;
                 return {
                   compaction: {
                     summary:
-                      'Earlier context remains in the saved transcript. Use history_search for earlier owner instructions and action results. Do not infer missing facts or repeat completed or uncertain actions.' +
-                      (request ? `\n\nOwner input before the retained work:\n${request}` : ''),
+                      recoveryContext +
+                      '\n' +
+                      untrustedBlock('saved context', saved) +
+                      (owner ? '\nCurrent request:\n' + owner : ''),
                     firstKeptEntryId: preparation.firstKeptEntryId,
                     tokensBefore: preparation.tokensBefore,
                   },
                 };
+              } finally {
+                compacting = false;
               }
             }),
           (pi: ExtensionAPI) =>
@@ -963,6 +960,7 @@ export function createPiAgent(options: {
         }
       }
       const guidelines = [
+        'Use sandbox tools to search and process referenced workspace files. Previews are incomplete. Read the source before using its facts.',
         ...new Set(
           [
             ...tools,
@@ -1005,6 +1003,19 @@ export function createPiAgent(options: {
         });
         sessionModel = runtime.getModel(model.provider, id)!;
       }
+      const directTools = [
+        ...tools
+          .filter((tool) => budget.compact || tool.exposure !== 'deferred')
+          .map((tool) => tool.name),
+        ...extensions.extensions.flatMap((extension) =>
+          [...extension.tools.entries()]
+            .filter(([, tool]) => budget.compact || tool.definition.exposure !== 'deferred')
+            .map(([name]) => name),
+        ),
+      ];
+      const coreTools = budget.compact
+        ? [...sandboxTools.map((tool) => tool.name), 'nod_tool_search']
+        : directTools;
       const resumed = !restart && manager.buildSessionContext().messages.length > 0;
       const { session } = await (options.createSession ?? createAgentSession)({
         cwd: input.workspace.path,
@@ -1012,16 +1023,7 @@ export function createPiAgent(options: {
         modelRuntime: runtime,
         model: sessionModel,
         thinkingLevel: access?.effort ?? 'high',
-        tools: [
-          ...tools
-            .filter((tool) => budget.compact || tool.exposure !== 'deferred')
-            .map((tool) => `+${tool.name}`),
-          ...extensions.extensions.flatMap((extension) =>
-            [...extension.tools.entries()]
-              .filter(([, tool]) => budget.compact || tool.definition.exposure !== 'deferred')
-              .map(([name]) => `+${name}`),
-          ),
-        ],
+        tools: directTools.map((name) => `+${name}`),
         customTools: tools,
         noTools: 'builtin',
         resourceLoader: resources(systemPrompt, extensions),
@@ -1034,6 +1036,58 @@ export function createPiAgent(options: {
         session.dispose();
         throw new Error('The agent service has stopped.');
       }
+
+      const stream = session.agent.streamFunction;
+      session.agent.streamFunction = async (target, context, options) => {
+        const { margin, model: limits } = modelContext(target);
+        const requested = Math.min(options?.maxTokens ?? limits.maxTokens, limits.maxTokens);
+        const available = Math.max(0, limits.contextWindow - requested - margin);
+        let fitted = compacting
+          ? context
+          : await output.fit(
+              context,
+              recovering ? Math.min(available, Math.floor(limits.contextWindow / 8)) : available,
+              options?.signal,
+            );
+        if (!compacting && contextTokens(fitted) > available) {
+          const system = getCurrentSystemMessage(fitted.messages);
+          const declared = system?.toolsAdded ?? [];
+          const retained = declared.filter((tool) => coreTools.includes(tool.name));
+          if (system && retained.length < declared.length) {
+            const saved = await output.save(
+              [{ type: 'text', text: JSON.stringify(declared) }],
+              0,
+              options?.signal,
+            );
+            session.setActiveToolsByName(coreTools);
+            const next = createInitialSystemMessage(
+              getSystemMessageText(system) +
+                '\nTool schemas were deferred to fit. Full schemas: ' +
+                saved +
+                (retained.some((tool) => tool.name === 'codemode')
+                  ? '\nUse codemode to inspect and call deferred tools.'
+                  : '\nLoad only the needed tools. A schema larger than the context window needs a model with more context.'),
+              retained,
+            )!;
+            fitted = await output.fit(
+              {
+                ...fitted,
+                messages: [next, ...fitted.messages.filter((message) => message.role !== 'system')],
+              },
+              available,
+              options?.signal,
+            );
+          }
+        }
+        const tokens = contextTokens(fitted);
+        if (tokens > available)
+          throw new Error(
+            `Context length exceeded before provider dispatch: about ${tokens} input tokens and ${requested} output tokens exceed the request budget for the ${limits.contextWindow}-token window, with a ${margin}-token safety margin. Reduce the current input or use a model with more context.`,
+          );
+        const response = await stream(target, fitted, options);
+        if (compacting) compaction?.requests.push(await response.result());
+        return response;
+      };
 
       const finishTurn = session.agent.finishTurn;
       session.agent.finishTurn = async (turn, signal) => {
@@ -1070,7 +1124,8 @@ export function createPiAgent(options: {
       };
       let textBlock: number | undefined;
       let thinking = { index: -1, text: '', scanned: 0 };
-      let compaction: { id: string; started: number; error?: string } | undefined;
+      let compaction:
+        { id: string; started: number; error?: string; requests: AssistantMessage[] } | undefined;
       const auxiliarySeen = new Set(manager.getEntries().map((entry) => entry.id));
       const observeUsage = createPiUsageTracker({
         sessionId: manager.getSessionId(),
@@ -1084,7 +1139,7 @@ export function createPiAgent(options: {
       });
       const unsubscribe = session.subscribe((event) => {
         if (event.type === 'compaction_start')
-          compaction = { id: randomUUID(), started: performance.now() };
+          compaction = { id: randomUUID(), started: performance.now(), requests: [] };
         if (event.type === 'compaction_end') {
           settings.applyOverrides({ compaction: budget.compaction });
           const target = readsNativeAudio(model) ? (connection?.textModel ?? model) : model;
@@ -1095,20 +1150,24 @@ export function createPiAgent(options: {
               message: `${target.provider} / ${target.id}: ${error}`,
             });
           if (compaction)
-            input.onEvent({
-              type: 'provider_usage',
-              usage: {
-                id: compaction.id,
-                provider: target.provider,
-                category: 'agent',
-                operation: 'compaction',
-                model: target.id,
-                turnId: input.turnId,
-                status: error ? 'failed' : event.aborted ? 'cancelled' : 'succeeded',
-                durationMs: performance.now() - compaction.started,
-                ...piUsageMetrics(event.result?.usage),
-              },
-            });
+            for (const [index, message] of (compaction.requests.length
+              ? compaction.requests
+              : [undefined]
+            ).entries())
+              input.onEvent({
+                type: 'provider_usage',
+                usage: {
+                  id: usageId(manager.getSessionId(), `${compaction.id}:${index}`),
+                  provider: message?.provider ?? target.provider,
+                  category: 'agent',
+                  operation: 'compaction',
+                  model: message?.model ?? target.id,
+                  turnId: input.turnId,
+                  status: error ? 'failed' : event.aborted ? 'cancelled' : 'succeeded',
+                  durationMs: message?.durationMs ?? performance.now() - compaction.started,
+                  ...piUsageMetrics(message?.usage),
+                },
+              });
           compaction = undefined;
         }
         if (
@@ -1176,6 +1235,10 @@ export function createPiAgent(options: {
           }
         }
         if (event.type === 'message_end' && event.message.role === 'assistant') {
+          toolCallCount = Math.max(
+            1,
+            event.message.content.filter((part) => part.type === 'toolCall').length,
+          );
           if (
             event.message.stopReason === 'error' &&
             tokenRateLimit.test(event.message.errorMessage ?? '')
@@ -1184,8 +1247,10 @@ export function createPiAgent(options: {
           else if (
             isContextOverflow(event.message, model.contextWindow) ||
             isRecoverableLength(event.message, model.maxTokens)
-          )
+          ) {
+            recovering = true;
             settings.applyOverrides({ compaction: { keepRecentTokens: 0 } });
+          }
           const usage = observeUsage(event.message);
           if (usage) input.onEvent(usage);
           if (event.message.stopReason === 'error')
@@ -1262,6 +1327,7 @@ export function createPiAgent(options: {
               });
             else await session.prompt(text, { images, expandPromptTemplates: false });
           } finally {
+            recovering = false;
             settings.applyOverrides({ compaction: budget.compaction });
             if (dropFailedInput(manager)) session.refreshContext();
           }
