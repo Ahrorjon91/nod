@@ -16,7 +16,7 @@ const privateNames =
 const claimKeys = /^(?:sub|sid|jti|nonce|aud)$/;
 const opening = /\{(?=\s*["}])|\[(?=\s*(?:[\[\]{"\d-]|true\b|false\b|null\b))/g;
 const appFile =
-  /^(?:(?:src\/(?:server|providers|ports|shared|web|runtime)|dist|desktop\/main|node_modules)\/[\w@.+-]+(?:\/[\w@.+-]+)*|[\w@.+-]+)$/;
+  /^(?:src\/(?:server|providers|ports|shared|web|runtime)|dist|desktop\/main|node_modules)\/[\w@.+-]+(?:\/[\w@.+-]+)*$/;
 const className = /^[A-Za-z][A-Za-z0-9_$]{0,80}$/;
 
 function normalize(key: string) {
@@ -106,9 +106,8 @@ export function createFeedbackRedactor(options: { secrets: string[]; profile: Pe
           modules >= 0
             ? modules
             : Math.max(...['/src/', '/dist/', '/desktop/'].map((part) => file.lastIndexOf(part)));
-        const marked = file.slice((start >= 0 ? start : file.lastIndexOf('/')) + 1);
-        const kept = appFile.test(marked) ? marked : marked.slice(marked.lastIndexOf('/') + 1);
-        if (!appFile.test(kept)) return '[path]';
+        const kept = file.slice(start + 1);
+        if (start < 0 || !appFile.test(kept)) return '[path]';
         frames.push(kept);
         return `\0${frames.length - 1}\0`;
       };

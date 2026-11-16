@@ -239,6 +239,8 @@ The redactor omits individual strings longer than 32,000 characters before scann
 
 The report includes a coverage record for each database section and the runtime journal: collection status, entry count, and omitted-entry indicators. These markers do not count entries dropped or expired from the app activity and error buffers. The final attachment is capped at 512 KiB. Older entries are removed if needed, and their sections mark that truncation. Failures, the startup log and settings are removed last. An empty or incomplete section doesn't prove that no problem occurred.
 
+A model ID is included only when every word in it is a known public model, vendor or variant name. Any other ID is left out, and the model family stays. A stack frame keeps its file only when the file is inside Nod's own source folders or a dependency. Every other file path is masked.
+
 The desktop app writes the startup log to `logs/startup.log` in its profile folder and keeps at most 64 KiB. Reports include its last 200 lines after redaction.
 
 The report excludes credential fields, screenshots, binary data, system prompts, model thinking, the computer name, and account names. Text returned by a file, browser, or app tool can be included after redaction. Redaction can miss personal details, so review the complete attachment and leave it out if needed. A report also cannot recover details outside its time or size limits.

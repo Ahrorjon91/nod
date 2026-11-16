@@ -3053,19 +3053,22 @@ test('rich feedback redaction keeps error classes, frame files, sizes and model 
   assert.equal(safe.error.cause.name, '[personal]');
   assert.equal(safe.tool.name, '[personal]');
   assert.equal(safe.entry.name, '[personal]');
-  assert.ok(safe.error.stack.includes('(job.ts:5:1)'));
+  assert.ok(safe.error.stack.includes('([path]:5:1)'));
   for (const frame of [
     '(src/server/thread.ts:281:13)',
     '(node_modules/@fixture/pg/lib/client.js:10:2)',
     '(dist/server/index.js:7:9)',
-    'at worker.ts:18:4',
-    'at run.js:3:1',
+    'at [path]:18:4',
+    'at [path]:3:1',
   ])
     assert.ok(safe.error.stack.includes(frame), frame);
   for (const sensitive of [
     'private-owner',
     'private-project',
     'Private-Project',
+    'worker.ts',
+    'run.js',
+    'job.ts',
     'Users',
     'AppData',
     'C:',

@@ -11602,6 +11602,7 @@ test(
             { id: 'qwen2.5-coder:7b', name: privateText, contextWindow: 8192, efforts: ['low'] },
             { id: 'models/Marta Vidal/private.gguf', contextWindow: 4096 },
             { id: 'C:/Users/owner/private.gguf', contextWindow: 4096 },
+            { id: 'customer-jane/private-model', contextWindow: 4096 },
           ]),
         ],
       );
@@ -11676,7 +11677,7 @@ test(
         {
           event: 'browser_bridge_failed',
           error: new Error('bridge exited'),
-          context: { reason: 'exit', exitCode: 137 },
+          context: { reason: 'exit', exitCode: 137, count: 2 },
         },
         scope,
       );
@@ -11851,7 +11852,7 @@ test(
     assert.match(requestFailure.data.error.message, /Gmail fetch failed with HTTP 503/);
     assert.equal(requestFailure.count, 1);
     assert.equal(bridgeFailure.data.context.exitCode, 137);
-    assert.equal(bridgeFailure.count, 3);
+    assert.equal(bridgeFailure.count, 6);
     assert.equal(bridgeFailure.runId, child.runId);
     assert.equal(report.startupLog.length, 1);
     assert.match(report.startupLog[0].line, /^update check result=offered version=9\.9\.9/);
@@ -11873,6 +11874,7 @@ test(
     ]);
     assert.deepEqual(report.modelConnections[0].models, [
       { id: 'qwen2.5-coder:7b', contextWindow: 8192, images: false, efforts: ['low'] },
+      { id: null, contextWindow: 4096, images: false, efforts: [] },
       { id: null, contextWindow: 4096, images: false, efforts: [] },
       { id: null, contextWindow: 4096, images: false, efforts: [] },
     ]);

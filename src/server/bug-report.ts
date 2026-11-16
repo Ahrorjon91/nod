@@ -146,8 +146,25 @@ function modelFamily(value: unknown) {
   return family?.toLowerCase() ?? 'custom';
 }
 
+const modelWords = new Set(
+  `gpt claude gemini gemma llama deepseek qwen qwq mistral mixtral codestral devstral phi grok kimi glm
+  minimax command nova titan sonnet opus haiku fable mythos mini nano pro max flash lite turbo preview
+  latest instruct chat coder code codex reasoner thinking vision large medium small tiny base plus ultra
+  exp experimental it gguf openai anthropic google meta mistralai xai ai microsoft amazon cohere
+  moonshotai zai nvidia bedrock vertex us eu global oss free nitro online high low compatible`.split(
+    /\s+/,
+  ),
+);
+
 function modelName(value: unknown) {
-  return typeof value === 'string' && /^[A-Za-z0-9][\w.:/@+-]{0,199}$/.test(value) ? value : null;
+  return typeof value === 'string' &&
+    value.length <= 120 &&
+    /^[A-Za-z0-9][\w.:/@-]*$/.test(value) &&
+    (value.toLowerCase().match(/[a-z]+/g) ?? []).every(
+      (word) => word.length <= 2 || modelWords.has(word),
+    )
+    ? value
+    : null;
 }
 
 function clip(value: unknown) {
@@ -696,7 +713,8 @@ export async function buildFeedbackReport(options: FeedbackReportOptions) {
     repeated.delete(key);
     repeated.set(key, {
       ...entryRow(entry),
-      count: ((previous?.count as number) ?? 0) + 1,
+      count:
+        ((previous?.count as number) ?? 0) + Math.max(1, amount(record(data.context).count) ?? 1),
       firstAgeMs: previous?.firstAgeMs ?? amount(now - entry.at),
       data,
     });
