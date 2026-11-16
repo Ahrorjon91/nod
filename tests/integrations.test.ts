@@ -1412,6 +1412,73 @@ test('a refused broker request keeps the broker status and only known codes', as
         error.code === 'public_budget_exceeded',
     );
   });
+  for (const [skew, accepted] of [
+    [-30_000, true],
+    [10 * 60_000, true],
+    [-30_000, false],
+  ] as const) {
+    await t.test(
+      `a computer clock ${Math.abs(skew / 1000)}s ${skew < 0 ? 'fast' : 'slow'} ${accepted ? 'connects' : 'keeps a repeated refusal'}`,
+      async (t) => {
+        const root = await mkdtemp(join(tmpdir(), 'nod-clock-skew-'));
+        t.after(() => rm(root, { recursive: true, force: true }));
+        const signed: Array<{ path: string; current: boolean }> = [];
+        const proxy = createComposioProxy({
+          dataRoot: root,
+          ownerId: 'fixture-owner',
+          keyStore: installationKeyStore,
+          checkpoint: fixtureIdentityCheckpoint,
+          url: 'https://proxy.example.test',
+          browser: eagerConnectionBrowser(),
+          request: async (input, init) => {
+            const request = new Request(input, init);
+            const path = new URL(request.url).pathname;
+            const service = Date.now() + skew;
+            const issuedAt = Number(request.headers.get('x-nod-timestamp')) * 1000;
+            const current = accepted && issuedAt >= service - 60_000 && issuedAt <= service + 5_000;
+            signed.push({ path, current });
+            const headers = { Date: new Date(service).toUTCString() };
+            if (!current)
+              return Response.json({ error: 'expired_authentication' }, { status: 401, headers });
+            if (path === '/v2/access/enroll')
+              return Response.json({ state: 'enabled', userId: proxy.userId }, { headers });
+            assert.equal(path, '/v2/connect/start');
+            return Response.json(
+              {
+                redirectUrl: 'https://proxy.example.test/v2/connect/pair?ticket=synthetic',
+                transactionId: JSON.parse(await request.text()).transactionId,
+              },
+              { headers },
+            );
+          },
+        });
+        await proxy.initialize();
+        const attempt = proxy.authorize(
+          'gmail',
+          `http://localhost:4310/api/apps/callback?state=${randomBytes(32).toString('base64url')}`,
+        );
+        if (accepted) {
+          await attempt;
+          assert.deepEqual(signed, [
+            { path: '/v2/access/enroll', current: false },
+            { path: '/v2/access/enroll', current: true },
+            { path: '/v2/connect/start', current: true },
+          ]);
+          return;
+        }
+        await assert.rejects(attempt, (error: unknown) => {
+          assert.ok(error instanceof IntegrationConnectionError);
+          assert.equal(error.status, 401);
+          assert.equal(error.code, 'expired_authentication');
+          return true;
+        });
+        assert.deepEqual(signed, [
+          { path: '/v2/access/enroll', current: false },
+          { path: '/v2/access/enroll', current: false },
+        ]);
+      },
+    );
+  }
 });
 
 test('hosted app connection bridge keeps browser proof on the configured origin', async (t) => {
