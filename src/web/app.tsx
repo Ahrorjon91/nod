@@ -39,6 +39,7 @@ import { resolveBrowserRegion, setDateFormat } from './lib/date-format';
 import { useBrowserTimeZone } from './hooks/use-browser-time-zone';
 import {
   desktopSettingsAvailable,
+  desktopRuntimeAvailable,
   desktopRendererReady,
   saveDesktopSettings,
   onFeedbackRequested,
@@ -566,8 +567,7 @@ function AuthenticatedApp({
             setFinishingOnboarding(true);
             if (!session.settings!.onboardingCompleted)
               await onAccountUpdate({ onboardingCompleted: true });
-            if (desktopSettingsAvailable())
-              await saveDesktopSettings({ onboardingCompleted: true });
+            if (desktopRuntimeAvailable()) await saveDesktopSettings({ onboardingCompleted: true });
             pendingDesktopPage.current = null;
             replaceNavigation('/');
             setFinishingOnboarding(false);
