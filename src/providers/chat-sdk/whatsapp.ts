@@ -15,7 +15,6 @@ import makeWASocket, {
 import { randomUUID } from 'node:crypto';
 import { splitMessage } from '@chat-adapter/whatsapp';
 import type { ChannelSession, ChannelSessionStore } from '../../ports/channel-session.ts';
-import { logRepeatedFailure } from '../../ports/failure-log.ts';
 import { MessagingAttachmentError } from '../../ports/messaging.ts';
 import type {
   InboundMessage,
@@ -46,6 +45,26 @@ const numberOf = (jid: string | null | undefined) => {
 };
 const qrLifetimeMs = 60_000;
 
+export type WhatsAppDrop = {
+  reason:
+    | 'unsupported_chat'
+    | 'sender_unmatched'
+    | 'self_chat_mismatch'
+    | 'from_me'
+    | 'before_link'
+    | 'invalid_time'
+    | 'own_echo'
+    | 'missing_id'
+    | 'lid_lookup_failed'
+    | 'decrypt_failed'
+    | 'unsupported_type'
+    | 'resend_ignored'
+    | 'queue_full';
+  mode: 'bot' | 'own';
+  addressing: 'lid' | 'phone' | 'other';
+  suppressed: number;
+};
+
 type Socket = Pick<
   WASocket,
   'ev' | 'sendMessage' | 'sendPresenceUpdate' | 'logout' | 'end' | 'user' | 'signalRepository'
@@ -57,6 +76,7 @@ export function createWhatsAppLinkedTransport(options: {
   store: ChannelSessionStore;
   createSocket?: (configuration: Parameters<typeof makeWASocket>[0]) => Socket;
   download?: typeof downloadMediaMessage;
+  onDrop?: (drop: WhatsAppDrop) => void;
 }): MessagingTransport {
   let socket: Socket | undefined;
   let session: ChannelSession | undefined;
@@ -79,6 +99,7 @@ export function createWhatsAppLinkedTransport(options: {
   const reactions: InboundReaction[] = [];
   let received = Promise.resolve();
   let queued = 0;
+  const drops = new Map<string, { at: number; suppressed: number }>();
   const channel: MessagingChannel = {
     id: 'whatsapp',
     status: 'setup_required',
@@ -145,16 +166,35 @@ export function createWhatsAppLinkedTransport(options: {
     state.accountName = auth.creds.me?.name?.slice(0, 200);
     return channel.status === 'configured';
   }
-  function dropped(reason: string) {
-    logRepeatedFailure('channel_inbound_dropped', `whatsapp:${reason}`, undefined, {
-      provider: 'whatsapp',
+  function drop(reason: WhatsAppDrop['reason'], message?: WAMessage) {
+    const jid = message?.key.remoteJid ?? '';
+    const addressing = jid.endsWith('@lid')
+      ? 'lid'
+      : jid.endsWith('@s.whatsapp.net')
+        ? 'phone'
+        : 'other';
+    const key = `${reason}:${addressing}`;
+    const now = Date.now();
+    const last = drops.get(key);
+    if (last && now - last.at < 60_000) {
+      last.suppressed++;
+      return;
+    }
+    drops.set(key, { at: now, suppressed: 0 });
+    options.onDrop?.({
       reason,
+      mode: options.mode === 'bot' ? 'bot' : 'own',
+      addressing,
+      suppressed: last?.suppressed ?? 0,
     });
   }
-  async function sender(message: WAMessage, current: Socket) {
+  async function sender(
+    message: WAMessage,
+    current: Socket,
+  ): Promise<{ phone: string; jid: string } | WhatsAppDrop['reason']> {
     const jid = message.key.remoteJid;
     if (!jid || message.key.participant || !/^\d+(?::\d+)?@(s\.whatsapp\.net|lid)$/.test(jid))
-      return dropped('not_direct_chat');
+      return 'unsupported_chat';
     let phone = numberOf(jid);
     if (!phone && jid.endsWith('@lid')) {
       phone =
@@ -165,13 +205,22 @@ export function createWhatsAppLinkedTransport(options: {
             : undefined
           : numberOf(message.key.remoteJidAlt);
       if (!phone && options.mode !== 'self-chat')
-        phone = numberOf(await current.signalRepository.lidMapping.getPNForLID(jid));
+        phone = numberOf(
+          await current.signalRepository.lidMapping.getPNForLID(jid).catch(() => null),
+        );
+      if (!phone && options.mode === 'bot' && options.allowedNumber) {
+        const lid = await current.signalRepository.lidMapping
+          .getLIDForPN(`${options.allowedNumber}@s.whatsapp.net`)
+          .catch(() => false as const);
+        if (lid === false) return 'lid_lookup_failed';
+        if (lid && jidNormalizedUser(lid) === jidNormalizedUser(jid)) phone = options.allowedNumber;
+      }
     }
-    if (!phone) return dropped('hidden_sender');
-    if (!channel.allowedSenderIds.includes(phone)) return dropped('unknown_sender');
+    if (!phone || !channel.allowedSenderIds.includes(phone))
+      return options.mode === 'self-chat' ? 'self_chat_mismatch' : 'sender_unmatched';
     if (options.mode === 'self-chat') {
-      if (phone !== ownNumber() || !message.key.fromMe) return dropped('not_self_chat');
-    } else if (message.key.fromMe) return;
+      if (phone !== ownNumber() || !message.key.fromMe) return 'self_chat_mismatch';
+    } else if (message.key.fromMe) return 'from_me';
     return { phone, jid: jidNormalizedUser(jid) };
   }
   function attachment(message: WAMessage): MessagingAttachment[] {
@@ -285,18 +334,21 @@ export function createWhatsAppLinkedTransport(options: {
     if (closed || halted || socket !== current || !identity()) return;
     const id = message.key.id;
     const at = Number(message.messageTimestamp) * 1000;
-    if (
-      !id ||
-      sentIds.has(id) ||
-      !Number.isFinite(at) ||
-      at < linkedAt ||
-      at > Date.now() + 300_000
-    )
-      return;
+    if (!id) return drop('missing_id', message);
+    if (sentIds.has(id)) return drop('own_echo', message);
+    if (!Number.isFinite(at) || at > Date.now() + 300_000) return drop('invalid_time', message);
+    if (at < linkedAt) return drop('before_link', message);
     const source = await sender(message, current);
-    if (!source || closed || halted || socket !== current) return;
+    if (closed || halted || socket !== current) return;
+    if (typeof source === 'string') return drop(source, message);
     const content = normalizeMessageContent(message.message);
-    if (!content) return dropped('no_content');
+    if (!content)
+      return drop(
+        message.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT
+          ? 'decrypt_failed'
+          : 'unsupported_type',
+        message,
+      );
     const reaction = content.reactionMessage;
     if (reaction?.key?.id) {
       if (reactions.length < 1000)
@@ -317,8 +369,8 @@ export function createWhatsAppLinkedTransport(options: {
       content.documentMessage?.caption ??
       '';
     const files = attachment(message);
-    if ((!text && !files.length) || incoming.length >= 1000)
-      return dropped(incoming.length >= 1000 ? 'queue_full' : 'unsupported_type');
+    if (!text && !files.length) return drop('unsupported_type', message);
+    if (incoming.length >= 1000) return drop('queue_full', message);
     const context =
       content.extendedTextMessage?.contextInfo ??
       content.imageMessage?.contextInfo ??
@@ -368,16 +420,10 @@ export function createWhatsAppLinkedTransport(options: {
       defaultQueryTimeoutMs: 30_000,
       qrTimeout: qrLifetimeMs,
       shouldIgnoreJid: (jid) => {
-        if (jid === 'status@broadcast' || jid.endsWith('@g.us') || jid.endsWith('@newsletter')) {
-          dropped('group_or_broadcast');
+        if (jid === 'status@broadcast' || jid.endsWith('@g.us') || jid.endsWith('@newsletter'))
           return true;
-        }
         const phone = numberOf(jid);
-        const ignored = Boolean(
-          phone && !channel.allowedSenderIds.includes(phone) && phone !== ownNumber(),
-        );
-        if (ignored) dropped('unknown_sender');
-        return ignored;
+        return Boolean(phone && !channel.allowedSenderIds.includes(phone) && phone !== ownNumber());
       },
     });
     socket = current;
@@ -387,8 +433,11 @@ export function createWhatsAppLinkedTransport(options: {
       void save({ creds: JSON.stringify(auth.creds, BufferJSON.replacer) }).catch(() => {});
     });
     current.ev.on('messages.upsert', (event) => {
-      if (closed || halted || socket !== current || event.requestId) return;
+      if (closed || halted || socket !== current) return;
+      if (event.requestId) return drop('resend_ignored', event.messages[0]);
       const messages = event.messages.slice(0, Math.max(0, 1000 - queued));
+      if (messages.length < event.messages.length)
+        drop('queue_full', event.messages[messages.length]);
       queued += messages.length;
       received = received
         .then(async () => {

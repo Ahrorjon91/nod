@@ -300,6 +300,70 @@ test('live status stays out of chat replies and removes known secrets', async ()
   );
 });
 
+test('partial delivery continues across browser and app reads in chat and saved tasks', async () => {
+  for (const task of [false, true]) {
+    const delivered: string[] = [];
+    const steps: string[] = [];
+    const first = 'The public plan costs EUR 12 per seat. The account price is not checked yet.';
+    const final = 'Your account price is EUR 10 per seat, so keep your current plan.';
+    let reads = 0;
+    const { result, aborted } = await fixture(
+      async (tools, _emit, options) => {
+        await call(tools, 'browser', { action: 'open', url: 'https://example.com/pricing' });
+        await call(tools, 'send_message', { text: first, intent: 'update' });
+        assert.deepEqual(delivered, [first]);
+        assert.equal(options.shouldStop(), false);
+        await call(tools, 'set_status', { text: 'Checking the account price' });
+        await call(tools, 'apps', {
+          action: 'READ_PLAN',
+          args: { plan_id: 'synthetic-plan' },
+        });
+        await call(tools, 'send_message', { text: final, intent: 'final' });
+        assert.equal(options.shouldStop(), true);
+      },
+      {
+        ...(task
+          ? {
+              background: true,
+              taskContext: {
+                id: randomUUID(),
+                title: 'Compare synthetic prices',
+                brief: 'Compare the public and account prices for the synthetic plan.',
+                doneWhen: 'Both prices are checked and the comparison is delivered.',
+                revision: 1,
+              },
+            }
+          : {}),
+        integration: async () => {
+          reads++;
+          assert.deepEqual(delivered, [first]);
+          return { pricePerSeat: 10, currency: 'EUR' };
+        },
+        reply: async (text) => {
+          delivered.push(text);
+        },
+        emit: async (type, summary) => {
+          if (type === 'step') steps.push(summary);
+        },
+      },
+      {
+        computer: fakeComputer({
+          act: async () => {
+            reads++;
+            assert.deepEqual(delivered, []);
+            return { url: 'https://example.com/pricing', text: 'EUR 12 per seat.' };
+          },
+        }),
+      },
+    );
+    assert.equal(reads, 2);
+    assert.deepEqual(delivered, [first, final]);
+    assert.deepEqual(steps, ['Checking the account price']);
+    assert.equal(result.status, 'succeeded');
+    assert.equal(aborted, false);
+  }
+});
+
 test('native visual replies need no filler and deduplicate only identical content', async () => {
   const visual: Presentation = {
     version: 1,

@@ -168,6 +168,7 @@ let updateSource;
 let updates;
 let checkingUpdates;
 let updateRequestedManually = false;
+let updateRestartConfirmed = false;
 let updatePhase = 'idle';
 let updateProgress;
 let updateFailed = false;
@@ -1968,13 +1969,15 @@ function refreshUpdateMenu() {
   publishUpdateStatus();
 }
 
-async function checkForUpdates(manual = true, restartReady = false) {
+async function checkForUpdates(manual = true, restartReady = false, confirmed = false) {
   if (!updates || quitting) return;
   if (checkingUpdates) {
     if (manual) updateRequestedManually = true;
+    if (confirmed) updateRestartConfirmed = true;
     return checkingUpdates;
   }
   updateRequestedManually = manual;
+  updateRestartConfirmed = confirmed;
   const release = () => {
     if (checkingUpdates === checking) checkingUpdates = undefined;
     refreshUpdateMenu();
@@ -2006,18 +2009,20 @@ async function checkForUpdates(manual = true, restartReady = false) {
           if (candidate.version !== previousVersion) await notifyUpdate(candidate);
           if (!updateRequestedManually || quitting) return;
         }
-        const { response } = await dialog.showMessageBox({
-          message: `Nod ${candidate.version} is ready.`,
-          buttons: ['Restart', 'Later'],
-          defaultId: 1,
-          cancelId: 1,
-          noLink: true,
-        });
-        void updateEvent('prompt', {
-          version: candidate.version,
-          response: response === 0 ? 'restart' : 'later',
-        });
-        if (response !== 0 || quitting) return;
+        if (!updateRestartConfirmed) {
+          const { response } = await dialog.showMessageBox({
+            message: `Nod ${candidate.version} is ready.`,
+            buttons: ['Restart', 'Later'],
+            defaultId: 1,
+            cancelId: 1,
+            noLink: true,
+          });
+          void updateEvent('prompt', {
+            version: candidate.version,
+            response: response === 0 ? 'restart' : 'later',
+          });
+          if (response !== 0 || quitting) return;
+        }
         restarting = true;
         await updates.restart();
         return;
@@ -2865,7 +2870,7 @@ else {
         if (!isEngine(event)) throw new Error('This action is unavailable.');
         if ((!updates?.ready && !checkingUpdates) || quitting)
           throw new Error('No desktop update is ready.');
-        await checkForUpdates(true, true);
+        await checkForUpdates(true, true, true);
       });
       ipcMain.handle('nod:settings:get', (event) => {
         if (!isSetup(event) && !isEngine(event)) throw new Error('This action is unavailable.');
