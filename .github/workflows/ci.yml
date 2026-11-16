@@ -35,18 +35,32 @@ jobs:
       network: ${{ steps.scope.outputs.network }}
       ci: ${{ steps.scope.outputs.ci }}
       test_files: ${{ steps.scope.outputs.test_files }}
+      test_matrix: ${{ steps.scope.outputs.test_matrix }}
+      desktop_test_files: ${{ steps.scope.outputs.desktop_test_files }}
+      quality_checks: ${{ steps.scope.outputs.quality_checks }}
+      format_files: ${{ steps.scope.outputs.format_files }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.ref == 'refs/heads/release/desktop' && '0' || '2' }}
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+      - name: Check whether test selection needs the import graph
+        id: plan
+        env:
+          CI_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
+        run: node .github/scripts/ci-scope.mjs --plan
+      - uses: ./.github/actions/setup-node
+        if: steps.plan.outputs.graph == 'true'
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          node-version: '24.21.0'
+          path: .local/ci-test-timings
+          key: ci-test-timings-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ci-test-timings-v1-
       - name: Read the changed paths
         id: scope
         env:
           CI_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
+          CI_TEST_TIMINGS: .local/ci-test-timings
         run: node .github/scripts/ci-scope.mjs
 
   notes:
@@ -69,8 +83,12 @@ jobs:
             done
 
   quality:
-    name: Formatting, types and client build
+    name: Quality (${{ matrix.check }})
     needs: scope
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.scope.outputs.quality_checks) }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
@@ -82,24 +100,31 @@ jobs:
       - name: Install tooling and dependencies
         uses: ./.github/actions/setup-node
       - name: Check CI selection and required results
+        if: matrix.check == 'format'
         run: node --test .github/scripts/ci-scope.test.mjs
       - name: Check formatting
-        run: pnpm run format:check
-      - name: Check types and import boundaries
-        if: needs.scope.outputs.types == 'true'
+        if: matrix.check == 'format'
+        env:
+          NOD_FORMAT_FILES: ${{ needs.scope.outputs.format_files }}
+        run: node .github/scripts/ci-scope.mjs --format
+      - name: Check lint rules and import boundaries
+        if: matrix.check == 'lint'
         run: pnpm run lint
+      - name: Check types
+        if: matrix.check == 'types'
+        run: pnpm run typecheck
       - name: Build the web and desktop clients
-        if: needs.scope.outputs.build == 'true'
+        if: matrix.check == 'build'
         run: pnpm exec vite build && node desktop/scripts/build-ui.mjs
       - name: Check the release version and source
         if: >-
-          (github.event_name == 'pull_request' &&
+          matrix.check == 'format' && ((github.event_name == 'pull_request' &&
            github.head_ref == 'release/desktop' &&
            github.event.pull_request.head.repo.full_name == github.repository) ||
-          github.ref == 'refs/heads/release/desktop'
+          github.ref == 'refs/heads/release/desktop')
         run: node .github/scripts/prepare-desktop-release.mjs --check
       - name: Install verified actionlint 1.7.12
-        if: needs.scope.outputs.ci == 'true'
+        if: matrix.check == 'format' && needs.scope.outputs.ci == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -108,17 +133,20 @@ jobs:
           printf '%s  %s\n' '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --status
           tar --extract --gzip --file "$RUNNER_TEMP/actionlint.tar.gz" --directory "$RUNNER_TEMP/actionlint" actionlint
       - name: Check workflow syntax and expressions
-        if: needs.scope.outputs.ci == 'true'
+        if: matrix.check == 'format' && needs.scope.outputs.ci == 'true'
         run: >-
           "$RUNNER_TEMP/actionlint/actionlint" -shellcheck= -pyflakes=
           -ignore 'label "blacksmith-.*" is unknown'
           -ignore 'unexpected key "queue" for "concurrency" section'
 
   integration:
-    name: Linux integration tests
+    name: Linux integration tests (${{ matrix.shard }})
     needs: scope
     if: needs.scope.outputs.integration == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.scope.outputs.test_matrix) }}
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 20
     services:
       postgres:
@@ -148,13 +176,17 @@ jobs:
           cache-key: n8n-io/nod/ci-integration
       - name: Build the integration fixture
         run: docker buildx build --load --platform linux/amd64 --file scripts/Dockerfile.integration --tag nod-ci-integration .
+      - name: Prepare test timing output
+        run: mkdir -m 777 "$RUNNER_TEMP/integration-timings"
       - name: Build the web fixture and run the selected tests
         env:
-          NOD_TEST_FILES: ${{ needs.scope.outputs.test_files }}
+          NOD_TEST_FILES: ${{ toJSON(matrix.files) }}
+          NOD_TEST_TIMINGS: /timings/${{ matrix.shard }}.json
         run: >-
           docker run --rm --network host --shm-size=1g
           --env TEST_DATABASE_URL
           --env NOD_TEST_FILES
+          --env NOD_TEST_TIMINGS
           --env NOD_TEST_NATIVE_DOWNLOAD=true
           --env NOD_TEST_BROWSER_EXECUTABLE=/usr/bin/chromium
           --volume "$PWD/src:/app/src:ro"
@@ -168,11 +200,20 @@ jobs:
           --volume "$PWD/tsconfig.json:/app/tsconfig.json:ro"
           --volume "$PWD/vite.config.ts:/app/vite.config.ts:ro"
           --volume "$PWD/index.html:/app/index.html:ro"
+          --volume "$RUNNER_TEMP/integration-timings:/timings"
           --tmpfs /app/.local:uid=1000,gid=1000
           --tmpfs /app/dist:uid=1000,gid=1000
           --tmpfs /app/node_modules/.vite-temp:uid=1000,gid=1000
           --init --entrypoint sh nod-ci-integration
           -c 'node_modules/.bin/vite build && node scripts/test-integration.mjs --run'
+      - name: Save test file times
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: integration-timings-${{ matrix.shard }}
+          path: ${{ runner.temp }}/integration-timings/*.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   desktop:
     name: Desktop contracts and network isolation
@@ -192,7 +233,9 @@ jobs:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
         run: pnpm --dir desktop install --frozen-lockfile
       - name: Check desktop lifecycle, storage and release contracts
-        run: pnpm run desktop:test
+        env:
+          NOD_DESKTOP_TEST_FILES: ${{ needs.scope.outputs.desktop_test_files }}
+        run: node .github/scripts/ci-scope.mjs --desktop-tests
       - name: Check desktop network isolation during restart
         if: needs.scope.outputs.network == 'true'
         run: >-
@@ -296,16 +339,80 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
+      - name: Require every selected check to pass
+        shell: node {0}
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: |
+          const checks = [
+            'types',
+            'build',
+            'integration',
+            'desktop',
+            'macos',
+            'windows',
+            'n8n',
+            'evals',
+            'images',
+            'network',
+            'ci',
+          ];
+          const needs = JSON.parse(process.env.CI_NEEDS);
+          if (needs.scope?.result !== 'success') throw new Error('CI could not select the required checks.');
+          for (const name of checks) {
+            if (!['true', 'false'].includes(needs.scope.outputs?.[name]))
+              throw new Error(`The ${name} scope is missing or invalid.`);
+          }
+          for (const [name, job] of Object.entries(needs)) {
+            if (!['success', 'skipped'].includes(job.result))
+              throw new Error(`The ${name} check did not pass: ${job.result}.`);
+          }
+          for (const name of [
+            'quality',
+            'secrets',
+            ...checks.filter((name) => !['types', 'build', 'ci', 'network'].includes(name)),
+          ]) {
+            const required = ['quality', 'secrets'].includes(name) || needs.scope.outputs[name] === 'true';
+            if (required && needs[name]?.result !== 'success')
+              throw new Error(`${name} check did not pass: ${needs[name]?.result ?? 'missing'}.`);
+          }
+
+  timings:
+    name: Update test file times
+    needs: [scope, integration]
+    if: needs.integration.result == 'success'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: '24.21.0'
-      - name: Require every selected check to pass
+      - name: Restore previous test times
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: .local/ci-test-timings
+          key: ci-test-timings-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ci-test-timings-v1-
+      - name: Collect test file times
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: integration-timings-*
+          path: ${{ runner.temp }}/integration-timings
+          merge-multiple: true
+      - name: Merge test file times
         env:
-          CI_NEEDS: ${{ toJSON(needs) }}
-        run: node .github/scripts/ci-scope.mjs --require-checks
+          CI_TEST_TIMINGS: .local/ci-test-timings
+          CI_NEW_TEST_TIMINGS: ${{ runner.temp }}/integration-timings
+        run: node .github/scripts/ci-tests.mjs
+      - name: Cache test times for later runs
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: .local/ci-test-timings
+          key: ci-test-timings-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
   macos:
     name: macOS native identity and updates (${{ matrix.arch }})

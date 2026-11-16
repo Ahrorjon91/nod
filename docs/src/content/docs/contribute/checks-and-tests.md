@@ -40,7 +40,7 @@ pnpm run test:integration
 pnpm run build
 ```
 
-`pnpm run check` checks types, import boundaries, and formatting. `pnpm test` runs deterministic tests and skips database cases without `TEST_DATABASE_URL`. The integration command runs every test in Linux with disposable PostgreSQL and Chromium fixtures. The build command checks types and builds the app.
+`pnpm run check` checks types, lint rules, import boundaries, and formatting. `pnpm run typecheck` uses the pinned Bun type checker. `pnpm run lint` runs Oxlint and the import checks. `pnpm install` installs both tools. The application and its tests still run on Node.js. `pnpm test` runs deterministic tests and skips database cases without `TEST_DATABASE_URL`. The integration command runs every test in Linux with disposable PostgreSQL and Chromium fixtures. The build command checks types and builds the app.
 
 ## Git hooks
 
@@ -49,7 +49,7 @@ pnpm run build
 | Hook       | What runs                                                                                                                        |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | Pre-commit | Prettier formats your staged files. If [Gitleaks](https://github.com/gitleaks/gitleaks) is installed, it scans them for secrets. |
-| Pre-push   | `pnpm run lint`: `pnpm run check` without formatting. It type-checks and checks import boundaries.                               |
+| Pre-push   | `pnpm run typecheck` and `pnpm run lint` run in parallel.                                                                        |
 
 Secret scanning skips its generic keyword check in tests and fixtures. Known key formats fail everywhere, so keep test values synthetic.
 
@@ -116,6 +116,8 @@ flowchart LR
 
 The network has no internet access, and your source folders are mounted read-only. The run fails if any test is skipped.
 
+Use short retry intervals in fixtures that check retry results, not the delay. Keep the same request count and failure checks.
+
 Wait for a controlled frame to finish loading before checking an old control binding. A reload can still show the previous document while navigation is pending.
 
 ## Manual acceptance harness
@@ -169,42 +171,48 @@ To compare with an image built without RTK, run `--phase baseline --baseline <co
 
 ## What CI checks
 
-CI reads the changed files on pull requests, merge queue checks and pushes to `main`. Formatting, CI selection tests and secret scanning always run. The run summary lists the selected checks and the number of integration test files.
+CI reads the changed files on pull requests, merge queue checks and pushes to `main`. Formatting, CI selection tests and secret scanning always run. Formatting checks changed files. A change to formatter settings or root dependencies checks all files. The run summary lists the selected checks and the number of integration test files.
 
 The required **Checks, tests and build** result keeps its existing name. It waits for each selected job. A failed scope check, missing scope output, failed job or selected job that was skipped makes this result fail. The native Windows result is included. No branch protection change is needed.
 
-Application, desktop, native, eval and container jobs can run in parallel after file selection. Linux checks do not wait for Mac checks. Type checks run once in the quality job. Integration tests build their own web fixture inside the cached test image. They use the dependencies in that image without an install on the runner, and run up to four test files at a time, within the available CPU count.
+Formatting, Oxlint, type checks, client builds and tests run in parallel. File selection installs dependencies only when it needs the import graph. Desktop, native, eval and container jobs also start after file selection. Each integration runner builds its web fixture inside the cached test image. It uses that image’s dependencies without an install on the runner.
+
+CI splits the selected test files across up to four runners. It assigns the slowest files first, using recorded file times to balance the work. Each runner starts up to four test files at once. Successful test runs cache file paths and times for later runs. This cache update does not hold the required result. Without recorded times, file size sets the initial weight. Test results and private content do not enter this cache.
+
+On a pull request, Vitest lists files with `--changed` against the merge base. It follows imports and does not execute the tests. The existing Node.js runner executes the selected files with PostgreSQL and Chromium. A failed selection runs all files. Merge queue checks and pushes to `main` always run the full Linux suite.
+
+Inputs outside the import graph force a full test run. These include lockfiles, type and test configuration, client build settings, shared test fixtures, runtime skills and JSON data. Dynamically started provider workers, desktop code and self-host files also use full runs. Web source, public HTML and desktop UI code also use a full run because tests read the generated clients. Oxlint enables each stable rule that the current code can pass. Its configuration lists the rules disabled for existing findings.
 
 ```mermaid
 flowchart TD
   files[Changed files] --> scope{{Select checks}}:::accent
   scope -- text only --> light[Formatting and secrets]:::muted
-  scope -- web --> web[Client build and web tests]:::go
+  scope -- web --> web[Client build and Linux tests]:::go
   scope -- tests only --> tests[Changed test files]
-  scope -- server --> core[Full Linux test suite]:::go
+  scope -- server --> core[Tests reached through imports]:::go
   scope -- platform or container --> area[Checks for that area]
   scope -- unknown input --> all[Every check]:::go
 ```
 
-| You change                                                                  | CI also runs                                                                                                                                                                    |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `docs/`, Markdown files, `LICENSE` or `NOTICE`                              | No application checks. Docs changes also run the **Docs** workflow.                                                                                                             |
-| Only a release's version, manifest and changelog                            | The release metadata and source check. Installers are built after merge.                                                                                                        |
-| Web code or public HTML and JavaScript                                      | The client build and tests that refer to web code, built web files or public files. Web source changes also run type and import checks.                                         |
-| Web CSS or public images and fonts                                          | The client build. Web source changes also run type and import checks.                                                                                                           |
-| Test files only                                                             | Type checks and the changed test files that still exist. A renamed test runs under its new name. A change to a shared test fixture runs the full Linux suite.                   |
-| Server, runtime, provider, shared or port code                              | Type and import checks, the full Linux suite and eval harness checks. Shared and port code also select client and desktop checks.                                               |
-| Container recipes, container provider code or self-host deployment files    | Container build and deployment checks, plus desktop contracts.                                                                                                                  |
-| Desktop files                                                               | Desktop contracts. Desktop UI changes also select the client build and type checks. Native Mac and Windows checks run only for their source, package, fixture and build inputs. |
-| `evals/`                                                                    | Eval harness type and contract checks with disposable PostgreSQL schemas.                                                                                                       |
-| `deployment/n8n/`                                                           | n8n delivery contracts, plus Windows checks when installer inputs change.                                                                                                       |
-| Root package files, dependency patches, CI selection code or unknown inputs | Every check.                                                                                                                                                                    |
+| You change                                                                  | CI also runs                                                                                                                                                                                                                                                                                                           |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docs/`, Markdown files, `LICENSE` or `NOTICE`                              | No application checks. Docs changes also run the **Docs** workflow.                                                                                                                                                                                                                                                    |
+| Only a release's version, manifest and changelog                            | The release metadata and source check. Installers are built after merge.                                                                                                                                                                                                                                               |
+| Web code or public HTML and JavaScript                                      | The client build and full Linux suite. Web source changes also run type, lint and import checks.                                                                                                                                                                                                                       |
+| Web CSS or public images and fonts                                          | The client build. Web source changes also run type and import checks.                                                                                                                                                                                                                                                  |
+| Test files only                                                             | Type, lint, import and formatting checks, plus the changed test files that still exist. A renamed test runs under its new name. A change to a shared test fixture runs the full Linux suite.                                                                                                                           |
+| Server, runtime, provider, shared or port code                              | Type, lint and import checks, tests reached through imports, and eval harness checks. Shared and port code also select client and desktop checks.                                                                                                                                                                      |
+| Container recipes, container provider code or self-host deployment files    | Container build and deployment checks, plus desktop contracts. Self-host files also select the full Linux suite.                                                                                                                                                                                                       |
+| Desktop files                                                               | Desktop contracts. Desktop main, preload, runtime and UI changes also select the full Linux suite. UI changes select the client build and type checks. Application-only changes skip desktop release and runtime fixtures. Native Mac and Windows checks run only for their source, package, fixture and build inputs. |
+| `evals/`                                                                    | Eval harness type and contract checks with disposable PostgreSQL schemas.                                                                                                                                                                                                                                              |
+| `deployment/n8n/`                                                           | n8n delivery contracts, plus Windows checks when installer inputs change.                                                                                                                                                                                                                                              |
+| Root package files, dependency patches, CI selection code or unknown inputs | Every check.                                                                                                                                                                                                                                                                                                           |
 
-A daily CI run at 03:17 UTC uses every check, including both Mac architectures and full Windows update acceptance. A manual CI run also uses every check, except a run on `release/desktop`, which compares that branch with `main`. The scope job reads full Git history so a base branch update does not hide the diff base. If that base is unavailable, CI runs every check. New pull request commits cancel older runs for that pull request. Main runs stay bound to each commit because releases require CI to pass on their exact source. Daily runs have a separate group so a push cannot cancel them.
+A daily CI run at 03:17 UTC uses every check, including both Mac architectures and full Windows update acceptance. A manual CI run also uses every check, except a run on `release/desktop`, which compares that branch with `main`. The scope job fetches two commits to read the merge base. A manual run on `release/desktop` fetches full history. If that base is unavailable, CI runs every check. New pull request commits cancel older runs for that pull request. Main runs stay bound to each commit because releases require CI to pass on their exact source. Daily runs have a separate group so a push cannot cancel them.
 
 The **Self-host bundle** workflow builds and checks both Linux architectures when package, container, deployment, or bundled documentation inputs change. It also runs each Sunday at 04:47 UTC and on request. Ordinary web and server changes do not create both bundles. To get a bundle for a specific revision, run that workflow on the revision. Draft release creation still needs its separate manual input.
 
-The selection and required-result rules are in [`.github/scripts/ci-scope.mjs`](https://github.com/n8n-io/nod/blob/main/.github/scripts/ci-scope.mjs). CI tests these rules with disposable Git repositories, including renames, removed tests and version-only releases. Workflow changes also run a pinned, checksum-verified actionlint to check syntax and expressions.
+The selection rules are in [`.github/scripts/ci-scope.mjs`](https://github.com/n8n-io/nod/blob/main/.github/scripts/ci-scope.mjs). The workflow checks the required results with Node.js, without a checkout or dependency install. CI tests these rules with disposable Git repositories, including renames, removed tests and version-only releases. Workflow changes also run a pinned, checksum-verified actionlint to check syntax and expressions.
 
 Actionlint 1.7.12 [does not yet accept GitHub's `queue` key](https://github.com/rhysd/actionlint/issues/657). CI ignores that specific parser error and checks the queue values and cancellation settings in its own tests.
 
