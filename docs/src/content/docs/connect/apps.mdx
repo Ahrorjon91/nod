@@ -87,6 +87,8 @@ Nod checks Gmail for new mail while it's running. The connection service doesn't
 
 All apps connected through the connection service share one allowance for your Nod install. When the service answers HTTP 429 (too many requests) or 503 (unavailable), Nod pauses background reads of all those apps. The pause lasts as long as the service's `Retry-After` header asks, up to 15 minutes. Without that header, it lasts one minute and doubles after each refusal, up to 30 minutes. A successful app request that starts after the latest refusal ends the pause.
 
+When the connection service reports its own rate limit or outage during a Gmail inbox check, Nod waits instead of trying that check again immediately. It keeps its cursor and any completed messages for a later check.
+
 During the pause:
 
 - A read you ask for, in chat or a task you started, still tries once. If the service refuses it, the pause grows.

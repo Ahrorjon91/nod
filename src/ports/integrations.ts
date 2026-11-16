@@ -95,6 +95,7 @@ export class IntegrationInboxTransientError extends Error {
     readonly code?:
       | 'installation_busy'
       | 'public_budget_exceeded'
+      | 'rate_limited'
       | 'service_unavailable'
       | 'security_service_unavailable',
   ) {

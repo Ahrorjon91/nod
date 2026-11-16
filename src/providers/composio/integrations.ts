@@ -737,6 +737,7 @@ export function createComposioProvider(options: {
           .enum([
             'installation_busy',
             'public_budget_exceeded',
+            'rate_limited',
             'service_unavailable',
             'security_service_unavailable',
           ])
@@ -797,7 +798,13 @@ export function createComposioProvider(options: {
             const transient =
               error instanceof IntegrationInboxTransientError ? error : transientFailure(error);
             if (!transient) throw error;
-            if (!retriesRemaining || transient.code === 'public_budget_exceeded') throw transient;
+            if (
+              !retriesRemaining ||
+              (transient.code &&
+                (transient.code === 'public_budget_exceeded' ||
+                  !(error instanceof IntegrationInboxTransientError)))
+            )
+              throw transient;
             const attempt = 2 - retriesRemaining;
             retriesRemaining--;
             await delay(350 * 2 ** attempt + Math.floor(Math.random() * 150), undefined, {

@@ -11310,34 +11310,46 @@ test('Composio inbox polling shares a bounded retry budget across Gmail reads', 
   assert.deepEqual([historyReads, firstReads, secondReads], [2, 2, 1]);
 });
 
-test('Composio inbox polling defers shared budget failures without retrying and cancels backoff', async (t) => {
-  let budgetRequests = 0;
-  const budgetPoll = inboxPollFixture(t, () => {
-    budgetRequests++;
-    throw APIError.generate(429, { error: 'public_budget_exceeded' }, undefined, new Headers());
-  });
-  await assert.rejects(
-    budgetPoll('inbox-account', null, new AbortController().signal),
-    (error: unknown) => {
-      assert.ok(error instanceof IntegrationInboxTransientError);
-      assert.equal(error.status, 429);
-      assert.equal(error.code, 'public_budget_exceeded');
-      assert.equal(error.retryAfterMs, 300_000);
-      return true;
-    },
-  );
-  assert.equal(budgetRequests, 1);
+test('Composio inbox polling defers proxy refusals, retries provider errors and cancels backoff', async (t) => {
+  for (const [status, code, retryAfterMs] of [
+    [429, 'public_budget_exceeded', 300_000],
+    [429, 'rate_limited', 60_000],
+    [429, 'installation_busy', 60_000],
+    [503, 'service_unavailable', 60_000],
+    [503, 'security_service_unavailable', 60_000],
+  ] as const) {
+    let requests = 0;
+    const poll = inboxPollFixture(t, () => {
+      requests++;
+      throw APIError.generate(status, { error: code }, undefined, new Headers());
+    });
+    await assert.rejects(
+      poll('inbox-account', null, new AbortController().signal),
+      (error: unknown) => {
+        assert.ok(error instanceof IntegrationInboxTransientError);
+        assert.equal(error.status, status);
+        assert.equal(error.code, code);
+        assert.equal(error.retryAfterMs, retryAfterMs);
+        return true;
+      },
+    );
+    assert.equal(requests, 1);
+  }
 
-  let unavailableRequests = 0;
-  const unavailablePoll = inboxPollFixture(t, () => {
-    unavailableRequests++;
-    if (unavailableRequests === 1)
-      throw APIError.generate(503, { error: 'service_unavailable' }, undefined, new Headers());
-    return { status: 200, data: { historyId: '200' } };
-  });
-  const recovered = await unavailablePoll('inbox-account', null, new AbortController().signal);
-  assert.equal(JSON.parse(recovered.cursor).historyId, '200');
-  assert.equal(unavailableRequests, 2);
+  for (const [status, code] of [
+    [429, 'rate_limited'],
+    [503, 'service_unavailable'],
+  ] as const) {
+    let providerRequests = 0;
+    const providerPoll = inboxPollFixture(t, () => {
+      providerRequests++;
+      if (providerRequests === 1) return { status, data: { error: code } };
+      return { status: 200, data: { historyId: '200' } };
+    });
+    const recovered = await providerPoll('inbox-account', null, new AbortController().signal);
+    assert.equal(JSON.parse(recovered.cursor).historyId, '200');
+    assert.equal(providerRequests, 2);
+  }
 
   const controller = new AbortController();
   let cancelledRequests = 0;
