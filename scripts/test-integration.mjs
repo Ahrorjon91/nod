@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readdir } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { readdir, writeFile } from 'node:fs/promises';
+import { relative, resolve } from 'node:path';
 import { availableParallelism } from 'node:os';
 import { pipeline } from 'node:stream/promises';
 import { run } from 'node:test';
@@ -57,10 +57,15 @@ if (process.argv.includes('--run')) {
     concurrency: Math.min(4, availableParallelism()),
     execArgv: ['--import', 'tsx'],
   });
-  tests.on('test:summary', ({ success, counts }) => {
+  const timings = {};
+  tests.on('test:summary', ({ success, counts, file, duration_ms }) => {
     if (!success || counts.skipped || counts.todo || counts.cancelled) process.exitCode = 1;
+    if (file) timings[relative(process.cwd(), file)] = Math.ceil(duration_ms);
+    else console.error(`Integration timings: ${JSON.stringify(timings)}`);
   });
   await pipeline(tests, new spec(), process.stdout);
+  if (process.env.NOD_TEST_TIMINGS)
+    await writeFile(process.env.NOD_TEST_TIMINGS, JSON.stringify(timings));
 } else {
   const name = `nod-tests-${randomUUID()}`;
   const database = `${name}-db`;
@@ -148,6 +153,8 @@ if (process.argv.includes('--run')) {
       'NOD_TEST_NATIVE_DOWNLOAD=true',
       '--env',
       'NOD_TEST_BROWSER_EXECUTABLE=/usr/bin/chromium',
+      '--env',
+      'NOD_TEST_FILES',
       ...mounts,
       '--init',
       '--entrypoint',
