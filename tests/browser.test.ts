@@ -36,7 +36,7 @@ import {
   DaemonCommandError,
   existingDaemonCommand,
 } from '../src/providers/agent-browser/screens.ts';
-import { runProcess } from '../src/providers/process.ts';
+import { RuntimeTimeLimitError, runProcess } from '../src/providers/process.ts';
 import { containerBrowserOptions } from '../src/providers/container-browser/config.ts';
 import { openDevtools } from '../src/providers/agent-browser/devtools.ts';
 import { runBrowserBridge } from '../src/providers/container-browser/bridge.ts';
@@ -1107,32 +1107,36 @@ test('a browser that will not close is killed with its process groups so the nex
   }
 });
 
-test('a profile locked by a replaced browser container opens again', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'nod-browser-foreign-lock-'));
-  const fixture = stagedLoginBrowser();
-  const profile = join(directory, 'runtime', 'profiles', 'fixture');
-  const computer = createBrowserFixture({
-    dataRoot: directory,
-    run: async (executable, args, input) => {
-      const lock = await readlink(join(profile, 'SingletonLock')).catch(() => '');
-      if (args[args.indexOf('--idle-timeout') + 2] === 'open' && lock.startsWith('replaced-'))
-        throw new Error('Runtime command exceeded its time limit.');
-      return fixture.run(executable, args, input);
-    },
-  });
-  try {
-    await mkdir(profile, { recursive: true });
-    await symlink('replaced-container-56', join(profile, 'SingletonLock'));
-    const opened = await computer.act('fixture', {
-      action: 'open',
-      url: 'https://1.1.1.1/login',
+for (const [host, owner] of [
+  ['another host', 'replaced-container-56'],
+  ['a host named with this host as prefix', `${hostname()}-replaced-56`],
+])
+  test(`a profile locked by a replaced browser container on ${host} opens again`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nod-browser-foreign-lock-'));
+    const fixture = stagedLoginBrowser();
+    const profile = join(directory, 'runtime', 'profiles', 'fixture');
+    const computer = createBrowserFixture({
+      dataRoot: directory,
+      run: async (executable, args, input) => {
+        const lock = await readlink(join(profile, 'SingletonLock')).catch(() => '');
+        if (args[args.indexOf('--idle-timeout') + 2] === 'open' && lock === owner)
+          throw new RuntimeTimeLimitError();
+        return fixture.run(executable, args, input);
+      },
     });
-    assert.equal(opened.url, 'https://1.1.1.1/login');
-  } finally {
-    await computer.dispose().catch(() => {});
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+    try {
+      await mkdir(profile, { recursive: true });
+      await symlink(owner, join(profile, 'SingletonLock'));
+      const opened = await computer.act('fixture', {
+        action: 'open',
+        url: 'https://1.1.1.1/login',
+      });
+      assert.equal(opened.url, 'https://1.1.1.1/login');
+    } finally {
+      await computer.dispose().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
 type Execute = (
   id: string,
@@ -1660,8 +1664,8 @@ test('malformed methods and namespaces never reach a computer or filesystem path
   }
 });
 
-test('a failed workspace browser action keeps its reason without system paths', async () => {
-  let failure: Error = new Error('Runtime command exceeded its time limit.');
+test('a failed workspace browser action names only Nod-authored reasons', async () => {
+  let failure: Error = new RuntimeTimeLimitError();
   const fixture = await harness({
     computer: {
       ...syntheticComputer(),
@@ -1676,13 +1680,15 @@ test('a failed workspace browser action keeps its reason without system paths', 
       computer.act('task', { action: 'open', url: 'https://example.com/' }),
       /could not complete this action: Runtime command exceeded its time limit\.$/,
     );
-    failure = Object.assign(new Error("EACCES: permission denied, open '/data/profiles/task'"), {
-      code: 'EACCES',
-    });
-    await assert.rejects(
-      computer.act('task', { action: 'open', url: 'https://example.com/' }),
-      (error: Error) => !error.message.includes('/data/profiles/task'),
-    );
+    for (failure of [
+      Object.assign(new Error("EACCES: permission denied, open '/data/profiles/task'"), {
+        code: 'EACCES',
+      }),
+      new Error('Synthetic private page text'),
+    ])
+      await assert.rejects(computer.act('task', { action: 'open', url: 'https://example.com/' }), {
+        message: 'The workspace browser could not complete this action. Try again.',
+      });
   } finally {
     await fixture.close();
   }
