@@ -215,14 +215,14 @@ test('contact previews read vCard 2.1, 3.0 and 4.0 without treating field values
   assert.equal(cards[2].name, 'Synthetic <Contact>');
   assert.deepEqual(cards[2].phones, ['+34600000001']);
   assert.deepEqual(cards[2].emails, ['other@example.test']);
-  const start = performance.now();
-  assert.equal(
-    contactCards(
-      'BEGIN:VCARD\r\nX-BAD' + '\r\n A'.repeat(100_000) + '\r\nFN:Synthetic\r\nEND:VCARD',
-    )[0].name,
-    'Synthetic',
-  );
-  assert.ok(performance.now() - start < 5000);
+  for (const field of [
+    'X-BAD' + '\r\n A'.repeat(100_000) + '\r\nFN:Synthetic',
+    'FN;X-LABEL="Desk:' + '\r\n A:'.repeat(100_000) + '":Synthetic',
+  ]) {
+    const start = performance.now();
+    assert.equal(contactCards(`BEGIN:VCARD\r\n${field}\r\nEND:VCARD`)[0].name, 'Synthetic');
+    assert.ok(performance.now() - start < 5000);
+  }
   assert.deepEqual(
     contactCards('BEGIN:VCARD\r\nFN:First\r\nBEGIN:VCARD\r\nFN:Second\r\nEND:VCARD'),
     [],
@@ -236,6 +236,43 @@ test('contact previews read LF-only exports and unfold folded lines', () => {
   const [folded] = contactCards(vcardOf('FN:Synthetic', '  Folded', 'TEL:+3460', ' 0000000'));
   assert.equal(folded.name, 'Synthetic Folded');
   assert.deepEqual(folded.phones, ['+34600000000']);
+});
+
+test('contact previews keep quoted parameters out of field values', () => {
+  const text = vcardOf(
+    'VERSION:4.0',
+    'FN;ALTID="urn:synthetic:1":Synthetic "Contact": West',
+    'TEL;TYPE="voice,home";X-SOURCE="https://example.test/a;b";VALUE=uri:tel:+34600000000',
+    'item1.EMAIL;X-SOURCE="https://example.test/a;b":fixture@example.test',
+    'ADR;GEO="geo:12.3457,78.910";LABEL="Desk: west; floor 2":;;1 Example Street;Town;;;Country',
+    'URL;X-LABEL="Site: work":https://example.test/contact',
+  );
+  const [card] = contactCards(text);
+  assert.equal(card.name, 'Synthetic "Contact": West');
+  assert.deepEqual(card.phones, ['+34600000000']);
+  assert.deepEqual(card.emails, ['fixture@example.test']);
+  assert.deepEqual(card.addresses, ['1 Example Street, Town, Country']);
+  assert.deepEqual(card.urls, ['https://example.test/contact']);
+  assert.equal(card.vcard, text);
+});
+
+test('contact previews read encoding parameters outside quoted text and folded headers', () => {
+  const cards = contactCards(
+    [
+      vcardOf(
+        'VERSION:2.1',
+        'FN;X-LABEL="Desk:',
+        ' west;ENCODING=QUOTED-PRINTABLE;CHARSET=ISO-8859-1";CHARSET="UTF-8";',
+        ' ENCODING="QUOTED-PRINTABLE":Synthetic =C3=',
+        '=85ngstr=C3=B6m',
+      ),
+      vcardOf('VERSION:3.0', 'FN;X-LABEL="Desk: west;ENCODING=QUOTED-PRINTABLE":Synthetic =41'),
+    ].join('\r\n'),
+  );
+  assert.deepEqual(
+    cards.map((card) => card.name),
+    ['Synthetic Ångström', 'Synthetic =41'],
+  );
 });
 
 test('contact previews take only whole BEGIN and END lines as card boundaries', () => {
