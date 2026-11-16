@@ -133,7 +133,7 @@ The Linux x64 app is a Flatpak preview. It needs a 64-bit Intel or AMD computer,
 
 Linux ARM builds are not published. Developers can [build the Flatpak from source](/contribute/desktop-releases/#build-a-linux-flatpak).
 
-Linux setup copies and verifies the guest image before it starts the private computer. This also works with encrypted home folders that reject optimized file copies. An interrupted first setup is replaced on the next attempt. Computers that completed setup are kept.
+Linux setup copies and verifies the guest image before it starts the private computer. This also works with encrypted home folders that reject optimized file copies. Nod records new first setups and replaces them on the next attempt if they are interrupted. Computers that completed setup are kept.
 
 ## Keep Nod running
 

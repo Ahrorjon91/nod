@@ -3656,7 +3656,10 @@ test('first-start recovery survives failed starts, cancellation, interrupted cre
           if (args[0] === 'start' && first) {
             first = false;
             if (!scenario.existing) await writeFile(disk, 'Synthetic incomplete disk');
-            if (scenario.aborted) controller.abort(new Error('Synthetic stop'));
+            if (scenario.aborted) {
+              controller.abort(new Error('Synthetic stop'));
+              throw controller.signal.reason;
+            }
             throw new Error('Synthetic start failure');
           }
           if (args[0] === 'delete') {
@@ -3677,7 +3680,11 @@ test('first-start recovery survives failed starts, cancellation, interrupted cre
         );
       await assert.rejects(
         attempt(),
-        scenario.createFails ? /Synthetic create failure/ : /Synthetic start failure/,
+        scenario.createFails
+          ? /Synthetic create failure/
+          : scenario.aborted
+            ? /Synthetic stop/
+            : /Synthetic start failure/,
       );
       const saved = () =>
         readFile(join(dataRoot, 'desktop-runtime/state.json'), 'utf8').then(JSON.parse);
