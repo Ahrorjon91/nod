@@ -278,6 +278,10 @@ test('Git diffs handle renamed files, removed tests, release metadata and missin
   assert.equal(run('f'.repeat(40)).macos, true);
   assert.throws(() => run('not-a-commit'), /base revision is invalid/);
   assert.match(await readFile(join(root, '.git', 'scope-summary'), 'utf8'), /Selected checks/);
+  const beforeLock = git('rev-parse', 'HEAD');
+  await writeFile(join(root, 'pnpm-lock.yaml'), 'synthetic: true\n');
+  commit();
+  assert.ok(JSON.parse(run(beforeLock).quality_checks).includes('lint'));
 });
 
 test('test shards use recorded times and include each file once', async () => {

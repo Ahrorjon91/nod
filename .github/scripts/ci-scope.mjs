@@ -317,7 +317,12 @@ if (import.meta.main) {
       paths === null ||
       paths.some((path) => /^(\.prettier|package\.json$|pnpm-lock\.yaml$)/.test(path));
     const quality = ['format'];
-    if (paths === null || paths.some((path) => /\.[cm]?[jt]sx?$|\.oxlintrc\.json$/.test(path)))
+    if (
+      scope.types ||
+      scope.ci ||
+      paths === null ||
+      paths.some((path) => /\.[cm]?[jt]sx?$|\.oxlintrc\.json$/.test(path))
+    )
       quality.push('lint');
     if (scope.types) quality.push('types');
     if (scope.build) quality.push('build');
