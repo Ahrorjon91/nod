@@ -310,6 +310,41 @@ test('pinned HTTP transport sends no cookies or authorization and stops after bo
   }
 });
 
+test('pinned HTTP transport refuses encoded bodies and stops reading past the byte limit', async () => {
+  const server = createServer((incoming, reply) => {
+    if (incoming.url === '/encoded') {
+      reply.writeHead(200, { 'content-encoding': 'gzip' });
+      reply.end('x');
+    } else if (incoming.url === '/declared') {
+      reply.writeHead(200, { 'content-length': 4096 });
+      reply.end('x'.repeat(4096));
+    } else {
+      reply.writeHead(200);
+      reply.write('x'.repeat(2048));
+      reply.end('x'.repeat(2048));
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const port = (server.address() as { port: number }).port;
+    const fetchPath = (path: string) =>
+      requestPublicPreview({
+        url: new URL(`http://unresolvable.example:${port}${path}`),
+        address: '127.0.0.1',
+        signal: AbortSignal.timeout(2000),
+        maxBytes: 1024,
+        metadata: false,
+      });
+    await assert.rejects(fetchPath('/encoded'), /not supported/);
+    await assert.rejects(fetchPath('/declared'), /not supported/);
+    await assert.rejects(fetchPath('/streamed'), /too large/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test('connection navigation permits secure providers and same-origin app consent only', () => {
   const origin = 'http://localhost:4320';
   assert.equal(
