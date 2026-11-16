@@ -1880,7 +1880,7 @@ function refreshUpdateMenu() {
   publishUpdateStatus();
 }
 
-async function checkForUpdates(manual = true, restartReady = false) {
+async function checkForUpdates(manual = true, restartReady = false, confirmed = false) {
   if (!updates || quitting) return;
   if (checkingUpdates) {
     if (manual) updateRequestedManually = true;
@@ -1912,14 +1912,16 @@ async function checkForUpdates(manual = true, restartReady = false) {
           if (candidate.version !== previousVersion) await notifyUpdate(candidate);
           if (!updateRequestedManually || quitting) return;
         }
-        const { response } = await dialog.showMessageBox({
-          message: `Nod ${candidate.version} is ready.`,
-          buttons: ['Restart', 'Later'],
-          defaultId: 1,
-          cancelId: 1,
-          noLink: true,
-        });
-        if (response !== 0 || quitting) return;
+        if (!confirmed) {
+          const { response } = await dialog.showMessageBox({
+            message: `Nod ${candidate.version} is ready.`,
+            buttons: ['Restart', 'Later'],
+            defaultId: 1,
+            cancelId: 1,
+            noLink: true,
+          });
+          if (response !== 0 || quitting) return;
+        }
         restarting = true;
         await updates.restart();
         return;
@@ -2693,7 +2695,7 @@ else {
         if (!isEngine(event)) throw new Error('This action is unavailable.');
         if ((!updates?.ready && !checkingUpdates) || quitting)
           throw new Error('No desktop update is ready.');
-        await checkForUpdates(true, true);
+        await checkForUpdates(true, true, true);
       });
       ipcMain.handle('nod:settings:get', (event) => {
         if (!isSetup(event) && !isEngine(event)) throw new Error('This action is unavailable.');
