@@ -17,7 +17,7 @@ Choose **Connect to a server** on first launch. After setup, choose **Replay onb
 
 Nod checks the connection before saving it. The operating system's secure storage protects the token. The app restarts into the remote assistant without starting its local runtime. Loopback HTTP addresses work for an SSH tunnel.
 
-For a private certificate authority (CA), first trust its certificate in your operating system's certificate store. Restart Nod after you change that store. Both the desktop app and its local engine add system CAs to Node's default certificates at startup while keeping bundled certificates. The local engine does not inherit `NODE_EXTRA_CA_CERTS` from your shell.
+For a private certificate authority (CA), first trust its certificate in your operating system's certificate store. Restart Nod after you change that store. Both the desktop app and its local engine add system CAs to Node's default certificates at startup while keeping bundled certificates. They skip system certificates that have already expired, so an old copy in the Windows store can't replace the valid chain a website sends. The local engine does not inherit `NODE_EXTRA_CA_CERTS` from your shell.
 
 This applies to Node HTTPS requests in the desktop app and local engine. It includes server checks, Composio proxy calls, later API calls, update checks, and analytics. Certificate and hostname checks stay enabled. This uses Node's certificate verification rules, which can differ from the app window's Chromium rules. An operating system distrust setting does not remove a certificate that Node trusts from another source.
 

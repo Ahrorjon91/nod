@@ -5030,6 +5030,130 @@ commonName = supplied
   assert.equal(requests.length, 2);
 });
 
+test('expired system certificates do not replace a valid chain the server sends', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-expired-system-ca-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const defaults = getCACertificates('default');
+  t.after(() => setDefaultCACertificates(defaults));
+  const execute = promisify(execFile);
+  const openssl = (...args) =>
+    execute('openssl', args, { cwd: directory, timeout: 10_000, windowsHide: true });
+  await writeFile(
+    join(directory, 'ca.cnf'),
+    `[req]
+distinguished_name = dn
+[dn]
+[ca]
+default_ca = local
+[local]
+database = index
+new_certs_dir = .
+serial = serial
+default_md = sha256
+default_days = 1
+unique_subject = no
+policy = policy
+[policy]
+commonName = supplied
+`,
+  );
+  await writeFile(join(directory, 'index'), '');
+  await writeFile(join(directory, 'serial'), '01\n');
+  await writeFile(
+    join(directory, 'intermediate.ext'),
+    'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n',
+  );
+  await writeFile(
+    join(directory, 'server.ext'),
+    'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\nsubjectAltName=IP:127.0.0.1\n',
+  );
+  const keyOptions = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes'];
+  await openssl(
+    'req',
+    '-x509',
+    '-sha256',
+    ...keyOptions,
+    '-keyout',
+    'root.key',
+    '-out',
+    'root.pem',
+    '-days',
+    '1',
+    '-subj',
+    '/CN=Nod test root',
+    '-config',
+    'ca.cnf',
+    '-addext',
+    'basicConstraints=critical,CA:TRUE',
+    '-addext',
+    'keyUsage=critical,keyCertSign,cRLSign',
+  );
+  for (const name of ['intermediate', 'server'])
+    await openssl(
+      'req',
+      '-new',
+      ...keyOptions,
+      '-keyout',
+      `${name}.key`,
+      '-out',
+      `${name}.csr`,
+      '-subj',
+      `/CN=Nod test ${name}`,
+      '-config',
+      'ca.cnf',
+    );
+  const sign = (issuer, request, output, dates = []) =>
+    openssl(
+      'ca',
+      '-batch',
+      '-notext',
+      '-config',
+      'ca.cnf',
+      '-cert',
+      `${issuer}.pem`,
+      '-keyfile',
+      `${issuer}.key`,
+      '-in',
+      `${request}.csr`,
+      '-out',
+      `${output}.pem`,
+      '-extfile',
+      `${request}.ext`,
+      ...dates,
+    );
+  await sign('root', 'intermediate', 'intermediate');
+  await sign('root', 'intermediate', 'stale', [
+    '-startdate',
+    '20000101000000Z',
+    '-enddate',
+    '20000102000000Z',
+  ]);
+  await sign('intermediate', 'server', 'server');
+  const [root, intermediate, stale, leaf] = await Promise.all(
+    ['root', 'intermediate', 'stale', 'server'].map((name) =>
+      readFile(join(directory, `${name}.pem`), 'utf8'),
+    ),
+  );
+  const server = createHttpsServer(
+    { key: await readFile(join(directory, 'server.key')), cert: leaf + intermediate },
+    (_request, response) => response.end('ok'),
+  );
+  t.after(() => {
+    server.closeAllConnections();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `https://127.0.0.1:${server.address().port}`;
+  setDefaultCACertificates([...defaults, root, stale]);
+  await assert.rejects(fetch(url), (error) => error.cause?.code === 'CERT_HAS_EXPIRED');
+  setDefaultCACertificates(defaults);
+  trustSystemCertificates({
+    getCACertificates: (type) => (type === 'system' ? [root, stale] : getCACertificates(type)),
+    setDefaultCACertificates,
+  });
+  assert.equal(await (await fetch(url)).text(), 'ok');
+});
+
 test('remote setup remains visible and navigable while the encrypted server token waits for macOS storage', async (t) => {
   const output = await mkdtemp(join(tmpdir(), 'nod-native-remote-unlock-'));
   t.after(() => rm(output, { recursive: true, force: true }));
