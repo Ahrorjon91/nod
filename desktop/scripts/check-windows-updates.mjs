@@ -203,7 +203,7 @@ app.whenReady().then(async () => {
   if (fresh) await writeFile(join(profile, 'vault'), sealVaultValue(key, binding, secret));
   assert.equal(openVaultValue(key, binding, await readFile(join(profile, 'vault'), 'utf8')), secret);
   const saved = await store.get();
-  assert.equal(saved.onboardingCompleted, true);
+  assert.equal(Object.hasOwn(saved, 'onboardingCompleted'), false);
   assert.equal(saved.onboardingPreferenceStep, 'complete');
   const files = {};
   for (const name of ['settings.json', 'profile.json', 'vault', 'identity-checkpoint', 'integration-identity/' + hash(owner) + '.encrypted', 'integration-identity/' + hash(owner) + '.public']) files[name] = hash(await readFile(join(profile, name)));
