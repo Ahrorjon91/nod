@@ -5,7 +5,9 @@ const files = {
   'Documents/plan.md': '# Plan\n\nKeep this file as it is.\n',
 };
 const facts = [
-  /\b3(?:rd)? Dec|Dec\w* 3\b/i,
+  /\b3(?:rd)? (?:of )?Dec|Dec\w* 3(?:rd)?\b|\b12-03\b/i,
+  /beta/i,
+  /Friday/i,
   /Priya/,
   /pricing page/i,
   /Jonas/,

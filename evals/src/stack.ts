@@ -157,6 +157,8 @@ export async function startStack(options: {
   process.umask(0);
   await mkdir(workspaceRoot, { recursive: true });
   await mkdir(toolsRoot);
+  if (options.localFiles && process.platform === 'win32')
+    throw new Error('Local-file evals need macOS or Linux, where mounted drives can be kept out.');
   const home = options.localFiles ? join(directory, 'home') : undefined;
   const trashed: string[] = [];
   if (home) {
@@ -524,7 +526,8 @@ export async function startStack(options: {
               localFilesHome: home,
               trash: {
                 ready: async () => true,
-                async put(path: string) {
+                async put(path: string, signal?: AbortSignal) {
+                  signal?.throwIfAborted();
                   await rename(path, join(directory, 'trash', `${randomUUID()}-${basename(path)}`));
                   trashed.push(relative(home, path));
                 },

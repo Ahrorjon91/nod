@@ -34,12 +34,12 @@ flowchart TD
   grade --> judge[Independent judge<br/>for judgement calls]
 ```
 
-| Real                                                             | Fake                                                                                                                                                                     |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| The model, Pi, tools, turns, memory, schedules, approvals, Vault | Gmail, Calendar, Sheets, Drive, Docs and Slack as stateful fakes behind the same port as Composio; Notion and Linear as fake MCP servers that Nod signs in to with OAuth |
-| The workspace container, Chromium, downloads and uploads         | Websites with logins, codes, carts and bookings, served under made-up hostnames                                                                                          |
-| Local files and their path checks                                | The owner's home folder: a temporary folder for each attempt, with a fake Trash. Mounted drives are on the keep-out list                                                 |
-| The clock                                                        | The user: scripted answers and approvals, plus a model-voiced persona for other questions                                                                                |
+| Real                                                             | Fake                                                                                                                                                                                |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The model, Pi, tools, turns, memory, schedules, approvals, Vault | Gmail, Calendar, Sheets, Drive, Docs and Slack as stateful fakes behind the same port as Composio; Notion and Linear as fake MCP servers that Nod signs in to with OAuth            |
+| The workspace container, Chromium, downloads and uploads         | Websites with logins, codes, carts and bookings, served under made-up hostnames                                                                                                     |
+| Local files and their path checks                                | The owner's home folder: a temporary folder for each attempt, with a fake Trash. On macOS and Linux, mounted drives are on the keep-out list. Local-file evals don't run on Windows |
+| The clock                                                        | The user: scripted answers and approvals, plus a model-voiced persona for other questions                                                                                           |
 
 Web search and page fetch (`web_search` and `fetch_content`) run on the server. A fetch to a named fixture host uses the local test server. Other requests can reach the public web.
 
