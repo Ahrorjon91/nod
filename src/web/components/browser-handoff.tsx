@@ -60,7 +60,6 @@ export function BrowserHandoff({ turnId, paused = false }: { turnId: string; pau
       { resolve(value: Blob): void; reject(reason: unknown): void; writing: Promise<void> }
     >(),
   );
-  const view = useRef(crypto.randomUUID());
   const imageLoad = useRef<{
     url: string;
     resolve: () => void;
@@ -334,6 +333,7 @@ export function BrowserHandoff({ turnId, paused = false }: { turnId: string; pau
   useEffect(() => {
     if (closed || unavailable) return;
     const controller = new AbortController();
+    const viewId = crypto.randomUUID();
     let activeSignal: AbortSignal | undefined = controller.signal;
     let current = '';
     const release = () => {
@@ -345,7 +345,7 @@ export function BrowserHandoff({ turnId, paused = false }: { turnId: string; pau
     setShown(false);
     setFrame('');
     void apiStream(
-      `/api/browser-handoff/stream?turnId=${encodeURIComponent(turnId)}&view=${view.current}-${attempt}`,
+      `/api/browser-handoff/stream?turnId=${encodeURIComponent(turnId)}&view=${viewId}`,
       { signal: controller.signal },
       (body, signal) => {
         activeSignal = signal;
@@ -371,11 +371,7 @@ export function BrowserHandoff({ turnId, paused = false }: { turnId: string; pau
             signal?.addEventListener('abort', abort, { once: true });
             setFrame(url);
           });
-          await post(
-            '/api/browser-handoff/frame-ack',
-            { turnId, view: `${view.current}-${attempt}` },
-            signal,
-          );
+          await post('/api/browser-handoff/frame-ack', { turnId, view: viewId }, signal);
         });
       },
     )
