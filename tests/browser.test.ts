@@ -3,7 +3,17 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import { constants } from 'node:fs';
-import { mkdir, mkdtemp, open, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  readlink,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { connect, createServer, type Socket } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { hostname, tmpdir } from 'node:os';
@@ -1097,6 +1107,33 @@ test('a browser that will not close is killed with its process groups so the nex
   }
 });
 
+test('a profile locked by a replaced browser container opens again', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-browser-foreign-lock-'));
+  const fixture = stagedLoginBrowser();
+  const profile = join(directory, 'runtime', 'profiles', 'fixture');
+  const computer = createBrowserFixture({
+    dataRoot: directory,
+    run: async (executable, args, input) => {
+      const lock = await readlink(join(profile, 'SingletonLock')).catch(() => '');
+      if (args[args.indexOf('--idle-timeout') + 2] === 'open' && lock.startsWith('replaced-'))
+        throw new Error('Runtime command exceeded its time limit.');
+      return fixture.run(executable, args, input);
+    },
+  });
+  try {
+    await mkdir(profile, { recursive: true });
+    await symlink('replaced-container-56', join(profile, 'SingletonLock'));
+    const opened = await computer.act('fixture', {
+      action: 'open',
+      url: 'https://1.1.1.1/login',
+    });
+    assert.equal(opened.url, 'https://1.1.1.1/login');
+  } finally {
+    await computer.dispose().catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 type Execute = (
   id: string,
   input: Static<typeof toolDefinitions.browser.parameters>,
@@ -1618,6 +1655,34 @@ test('malformed methods and namespaces never reach a computer or filesystem path
     const computer = fixture.client('/synthetic/discard');
     await computer.act('task', { action: 'snapshot' });
     await assert.rejects(computer.discard!('../task'));
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('a failed workspace browser action keeps its reason without system paths', async () => {
+  let failure: Error = new Error('Runtime command exceeded its time limit.');
+  const fixture = await harness({
+    computer: {
+      ...syntheticComputer(),
+      act: async () => {
+        throw failure;
+      },
+    },
+  });
+  try {
+    const computer = fixture.client('/synthetic/failure-reason');
+    await assert.rejects(
+      computer.act('task', { action: 'open', url: 'https://example.com/' }),
+      /could not complete this action: Runtime command exceeded its time limit\.$/,
+    );
+    failure = Object.assign(new Error("EACCES: permission denied, open '/data/profiles/task'"), {
+      code: 'EACCES',
+    });
+    await assert.rejects(
+      computer.act('task', { action: 'open', url: 'https://example.com/' }),
+      (error: Error) => !error.message.includes('/data/profiles/task'),
+    );
   } finally {
     await fixture.close();
   }

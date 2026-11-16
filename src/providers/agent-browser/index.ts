@@ -537,6 +537,9 @@ export function createAgentBrowserComputer(options: {
     state.proxy ??= createBrowserProxy({ privateNetwork });
     const proxyUrl = await state.proxy.url();
     const profile = profilePath(state);
+    const lock = await readlink(resolve(profile, 'SingletonLock')).catch(() => '');
+    if (lock && !lock.startsWith(`${hostname()}-`))
+      await rm(resolve(profile, 'SingletonLock'), { force: true });
     const timeZone = browserTimeZone(state.saved.timeZone);
     const locale = browserLocale(state.saved.locale);
     const result = await drainInterruptedCommand(state, action, () =>
