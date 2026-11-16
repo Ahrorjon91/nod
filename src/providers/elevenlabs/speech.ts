@@ -102,7 +102,7 @@ export function createElevenLabsSpeechProvider(options: {
     await response.body?.cancel().catch(() => {});
     throw new SpeechProviderError(
       response.status === 401
-        ? 'ElevenLabs did not accept this API key. Reconnect ElevenLabs in Settings → General → Voice.'
+        ? 'ElevenLabs did not accept this API key. Reconnect ElevenLabs in Settings → Voice & audio.'
         : response.status === 403
           ? `Give this ElevenLabs API key ${operation === 'synthesize' ? 'Text to speech' : 'Speech to text'} permission, then try again.`
           : 'ElevenLabs reached a limit. Check your ElevenLabs account before trying again.',
