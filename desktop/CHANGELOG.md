@@ -2,6 +2,50 @@
 
 Releases from before the rename to Nod are the `desktop-v*` [GitHub releases](https://github.com/n8n-io/nod/releases).
 
+## 0.8.0 - 2026-11-16
+
+### Features
+
+- **desktop:** Keep the computer awake while a local task runs. [commit](https://github.com/n8n-io/nod/commit/df4cd6015090b80f2970f2b00326b82a22222d7e) (df4cd60)
+- **models:** Choose a model for schedules, Nod's own work and each task. [#910](https://github.com/n8n-io/nod/pull/910) (7635ffd)
+- **chat:** Show which task or schedule a question belongs to and its progress. [#887](https://github.com/n8n-io/nod/pull/887) (49ac827)
+- **evals:** Add a model capability matrix and computer-use cases. [commit](https://github.com/n8n-io/nod/commit/7c5fffa2c68a7de78648d71f4a172fac2d3cfcbc) (7c5fffa)
+
+### Fixes
+
+- **backend:** Correct the NOD\_PUBLIC\_URL host checks and document the error. [#893](https://github.com/n8n-io/nod/pull/893) (e1cf299)
+- **models:** Recover from failing model connections without guessing at error text. [#912](https://github.com/n8n-io/nod/pull/912) (27f202c)
+- **chat:** Guide users to a first useful task. [commit](https://github.com/n8n-io/nod/commit/cfa92109461c2efcc6aa12f1297f29f38b8b2abf) (cfa9210)
+- **pi:** Use native context recovery. [commit](https://github.com/n8n-io/nod/commit/d40be9c247872f819da7d0b8152564ed58bfaa5c) (d40be9c)
+- **apps:** Mark a write as not run when the connection service refuses session create. [#907](https://github.com/n8n-io/nod/pull/907) (15397ab)
+- **models:** Handle partial metadata across compatible servers. [commit](https://github.com/n8n-io/nod/commit/f41c721e2c1a0b2a8d27779ae2727f3d30946cf9) (f41c721)
+- **models:** Treat OpenAI-compatible servers as Ollama only when /api…. [commit](https://github.com/n8n-io/nod/commit/73f5b7eb0d94ae9693ffc0eefc43c6512228cc1f) (73f5b7e)
+- **local-files:** Attach a local file when the owner asks to see it. [#901](https://github.com/n8n-io/nod/pull/901) (3813cd6)
+- **deps:** Override vulnerable adm-zip to 0.6.1. [commit](https://github.com/n8n-io/nod/commit/ee7c178517cd8a846e2a266d8d73ee59d16bf921) (ee7c178)
+- **trust:** Preserve owner instructions across schedule updates. [#888](https://github.com/n8n-io/nod/pull/888) (9be6b24)
+- **deps:** Update vulnerable transitive dependencies. [commit](https://github.com/n8n-io/nod/commit/fb1cacd07cdb177be6783e561e48a6259aa7df72) (fb1cacd)
+- **local-files:** Expand \~ to the home folder in file paths. [#889](https://github.com/n8n-io/nod/pull/889) (b2c6f5d)
+- **deps:** Update HTTP dependencies for DEVP-1541. [commit](https://github.com/n8n-io/nod/commit/526ba31acbf6080dfafd9a6aa8a21de7d32fdb35) (526ba31)
+- **desktop:** Move the preview note below the server link on the welcome screen. [#886](https://github.com/n8n-io/nod/pull/886) (f77f9b2)
+- **apps:** Back off connection service reads after a rate limit. [commit](https://github.com/n8n-io/nod/commit/ac8854aceea1a7e1e5d6b14f5f8069a5750f50dd) (ac8854a)
+
+<details>
+<summary>Maintenance (1 changes)</summary>
+
+- **deps:** Bump undici to 7.30.2. [commit](https://github.com/n8n-io/nod/commit/f6400141f7c00223d59bdcd3f042ec935530aa00) (f640014)
+
+</details>
+
+[Full changelog](https://github.com/n8n-io/nod/compare/nod-v0.7.6...e1cf299e14a83973ec665ead9404b99bf4ab969b)
+
+<details>
+<summary>Build details</summary>
+
+Source: `e1cf299e14a83973ec665ead9404b99bf4ab969b`
+Previous release: `nod-v0.7.6`
+
+</details>
+
 ## 0.7.6 - 2026-11-13
 
 ### Features
