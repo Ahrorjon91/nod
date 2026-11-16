@@ -135,6 +135,10 @@ Return to **Apps** and select **Connect** again. Keep the sign-in page and any w
 
 If the connection service refuses the request, the sign-in page names its reason and HTTP status, such as `public_budget_exceeded` and `HTTP 429`. If the connection service is unavailable or reports a limit, try again later. If the problem persists, [send feedback with a diagnostic report](/deploy/troubleshooting/#send-feedback-with-a-diagnostic-report).
 
+### An app tool fails with HTTP 403
+
+For an HTML `HTTP 403` from an app tool, Nod shows the UTC time and available Cloudflare Ray ID for support. Remove the displayed `0x` prefix before looking up the Ray ID in Cloudflare.
+
 ### App sign-in opens an unreachable address on a remote server
 
 Update the server to a version with [remote app sign-in](/deploy/self-host/#connect-apps-on-the-server). Set `NOD_PUBLIC_URL` to the exact address you open Nod at, then [apply the configuration](/deploy/configuration/#apply-configuration-changes).
