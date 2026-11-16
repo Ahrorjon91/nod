@@ -379,12 +379,26 @@ export function createModelService(options: {
       status: 'waiting' | 'completing' | 'connected' | 'failed';
       error?: string;
       completion?: Promise<void>;
+      cancelled?: { reason: string; phase: string };
     }
   >();
-  async function cancel(state: string) {
+  function signInFailure(attempt: NonNullable<ReturnType<typeof attempts.get>>, error: unknown) {
+    return {
+      provider: attempt.provider,
+      reason: attempt.cancelled?.reason ?? Object(error).reason,
+      phase: attempt.cancelled?.phase ?? attempt.status,
+      elapsedMs: Date.now() - (attempt.expires - 600000),
+    };
+  }
+  async function cancel(state: string, reason = 'cancelled') {
     const attempt = attempts.get(state);
     if (!attempt) return;
     clearTimeout(attempt.timer);
+    if (attempt.status === 'waiting' || attempt.status === 'completing') {
+      attempt.cancelled ??= { reason, phase: attempt.status };
+      if (!attempt.completion)
+        logFailure('model_sign_in_failed', undefined, signInFailure(attempt, undefined));
+    }
     attempt.status = 'failed';
     attempt.controller.abort();
     await attempt.completion?.catch(() => {});
@@ -446,8 +460,16 @@ export function createModelService(options: {
     const key = `${row.id}:${state.selection!.modelId}:${credentialTag(credential(row))}`;
     if (key === checked) return;
     checked = key;
+    const saved = credential(row);
+    const port = saved?.type === 'endpoint' ? new URL(saved.url).port : undefined;
     pendingCheck = selectionCheck().catch((error: unknown) =>
-      logFailure('model_check_failed', error),
+      logFailure('model_check_failed', error, {
+        provider: row.provider,
+        ...(port === undefined
+          ? {}
+          : { serverKind: port === '11434' ? 'ollama' : port === '1234' ? 'lmstudio' : 'other' }),
+        status: Object(error).providerStatus,
+      }),
     );
   }
   function requested(row: ModelRecord | undefined, modelId: string | undefined) {
@@ -899,7 +921,7 @@ export function createModelService(options: {
       try {
         attempt.complete!(callback);
       } catch (error) {
-        await cancel(state);
+        await cancel(state, Object(Object(error).cause).reason ?? 'callback_rejected');
         throw error;
       }
     } else {
@@ -940,7 +962,8 @@ export function createModelService(options: {
       attempt.status = 'connected';
       connectionChanged(attempt.provider, method, 'connected');
     } catch (error) {
-      logFailure('model_sign_in_failed', error instanceof Error ? (error.cause ?? error) : error);
+      const cause = error instanceof Error ? (error.cause ?? error) : error;
+      logFailure('model_sign_in_failed', cause, signInFailure(attempt, cause));
       if (!attempt.controller.signal.aborted) connectionChanged(attempt.provider, method, 'failed');
       attempt.status = 'failed';
       attempt.error =
@@ -990,12 +1013,17 @@ export function createModelService(options: {
           attempt.provider === provider &&
           (attempt.controller.signal.aborted || ['waiting', 'completing'].includes(attempt.status)))
       )
-        await cancel(state);
+        await cancel(state, attempt.expires < Date.now() ? 'timeout' : 'superseded');
     if (closed) throw new ConnectionError('Model connections have stopped.');
     const controller = new AbortController();
     pendingControllers.add(controller);
     let flow: Awaited<ReturnType<ModelBackend['signIn']>> | undefined;
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const started = Date.now();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 15000);
     timeout.unref();
     try {
       const auth =
@@ -1013,7 +1041,7 @@ export function createModelService(options: {
       flow?.result.catch(() => {});
       controller.signal.throwIfAborted();
       const timer = setTimeout(() => {
-        void cancel(auth.state);
+        void cancel(auth.state, 'timeout');
       }, 600000);
       timer.unref();
       const attempt: NonNullable<ReturnType<typeof attempts.get>> = {
@@ -1034,6 +1062,13 @@ export function createModelService(options: {
       }
       return { url: auth.url, attempt: auth.state };
     } catch (error) {
+      const cause = error instanceof Error ? (error.cause ?? error) : error;
+      logFailure('model_sign_in_failed', cause, {
+        provider,
+        reason: timedOut ? 'timeout' : closed ? 'shutdown' : Object(cause).reason,
+        phase: 'start',
+        elapsedMs: Date.now() - started,
+      });
       controller.abort();
       await flow?.result.catch(() => {});
       throw error;
@@ -1341,7 +1376,8 @@ export function createModelService(options: {
     },
     async remove(id: string) {
       const capture = snapshotAnalytics(analytics);
-      for (const [state, attempt] of attempts) if (attempt.connectionId === id) await cancel(state);
+      for (const [state, attempt] of attempts)
+        if (attempt.connectionId === id) await cancel(state, 'connection_removed');
       const removed = await store.change((state) => {
         const row = state.connections.find((item) => item.id === id);
         if (row?.managed)
@@ -1589,6 +1625,7 @@ export function createModelService(options: {
                 .string()
                 .regex(/^[A-Za-z0-9_-]{32,128}$/)
                 .parse(request.params.attempt),
+              'client_cancelled',
             );
             return service.view();
           },
@@ -1622,7 +1659,7 @@ export function createModelService(options: {
       closed = true;
       for (const controller of pendingControllers) controller.abort();
       await starting;
-      await Promise.all([...attempts.keys()].map(cancel));
+      await Promise.all([...attempts.keys()].map((state) => cancel(state, 'shutdown')));
       observers.clear();
       secrets.clear();
     },

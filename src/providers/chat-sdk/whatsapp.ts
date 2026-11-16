@@ -15,6 +15,7 @@ import makeWASocket, {
 import { randomUUID } from 'node:crypto';
 import { splitMessage } from '@chat-adapter/whatsapp';
 import type { ChannelSession, ChannelSessionStore } from '../../ports/channel-session.ts';
+import { logRepeatedFailure } from '../../ports/failure-log.ts';
 import { MessagingAttachmentError } from '../../ports/messaging.ts';
 import type {
   InboundMessage,
@@ -144,10 +145,16 @@ export function createWhatsAppLinkedTransport(options: {
     state.accountName = auth.creds.me?.name?.slice(0, 200);
     return channel.status === 'configured';
   }
+  function dropped(reason: string) {
+    logRepeatedFailure('channel_inbound_dropped', `whatsapp:${reason}`, undefined, {
+      provider: 'whatsapp',
+      reason,
+    });
+  }
   async function sender(message: WAMessage, current: Socket) {
     const jid = message.key.remoteJid;
     if (!jid || message.key.participant || !/^\d+(?::\d+)?@(s\.whatsapp\.net|lid)$/.test(jid))
-      return;
+      return dropped('not_direct_chat');
     let phone = numberOf(jid);
     if (!phone && jid.endsWith('@lid')) {
       phone =
@@ -160,9 +167,10 @@ export function createWhatsAppLinkedTransport(options: {
       if (!phone && options.mode !== 'self-chat')
         phone = numberOf(await current.signalRepository.lidMapping.getPNForLID(jid));
     }
-    if (!phone || !channel.allowedSenderIds.includes(phone)) return;
+    if (!phone) return dropped('hidden_sender');
+    if (!channel.allowedSenderIds.includes(phone)) return dropped('unknown_sender');
     if (options.mode === 'self-chat') {
-      if (phone !== ownNumber() || !message.key.fromMe) return;
+      if (phone !== ownNumber() || !message.key.fromMe) return dropped('not_self_chat');
     } else if (message.key.fromMe) return;
     return { phone, jid: jidNormalizedUser(jid) };
   }
@@ -288,7 +296,7 @@ export function createWhatsAppLinkedTransport(options: {
     const source = await sender(message, current);
     if (!source || closed || halted || socket !== current) return;
     const content = normalizeMessageContent(message.message);
-    if (!content) return;
+    if (!content) return dropped('no_content');
     const reaction = content.reactionMessage;
     if (reaction?.key?.id) {
       if (reactions.length < 1000)
@@ -309,7 +317,8 @@ export function createWhatsAppLinkedTransport(options: {
       content.documentMessage?.caption ??
       '';
     const files = attachment(message);
-    if ((!text && !files.length) || incoming.length >= 1000) return;
+    if ((!text && !files.length) || incoming.length >= 1000)
+      return dropped(incoming.length >= 1000 ? 'queue_full' : 'unsupported_type');
     const context =
       content.extendedTextMessage?.contextInfo ??
       content.imageMessage?.contextInfo ??
@@ -359,10 +368,16 @@ export function createWhatsAppLinkedTransport(options: {
       defaultQueryTimeoutMs: 30_000,
       qrTimeout: qrLifetimeMs,
       shouldIgnoreJid: (jid) => {
-        if (jid === 'status@broadcast' || jid.endsWith('@g.us') || jid.endsWith('@newsletter'))
+        if (jid === 'status@broadcast' || jid.endsWith('@g.us') || jid.endsWith('@newsletter')) {
+          dropped('group_or_broadcast');
           return true;
+        }
         const phone = numberOf(jid);
-        return Boolean(phone && !channel.allowedSenderIds.includes(phone) && phone !== ownNumber());
+        const ignored = Boolean(
+          phone && !channel.allowedSenderIds.includes(phone) && phone !== ownNumber(),
+        );
+        if (ignored) dropped('unknown_sender');
+        return ignored;
       },
     });
     socket = current;

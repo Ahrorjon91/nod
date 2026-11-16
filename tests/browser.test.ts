@@ -2940,6 +2940,95 @@ test('rich feedback redaction bounds traversal and preserves sanitized Error dia
   assert.ok(!boundary.includes('bounded-private-secret'));
 });
 
+test('rich feedback redaction keeps error classes, frame files, sizes and model names without identity claims', async () => {
+  const { createFeedbackRedactor } = await import('../src/server/feedback-redaction.ts');
+  const redactor = createFeedbackRedactor({ secrets: [], profile: { names: [] } });
+  const flattened = Object.assign(Object.create(null), {
+    name: 'JWTExpired',
+    message: 'Context of 200000 tokens exceeds the 131072-token limit after 1048576 bytes.',
+    stack: [
+      'JWTExpired: expired',
+      '    at rpc (file:///Users/private-owner/git/nod/src/server/thread.ts:281:13)',
+      '    at query (/home/private-owner/nod/node_modules/@fixture/pg/lib/client.js:10:2)',
+      '    at main (C:\\Users\\private-owner\\AppData\\nod\\dist\\server\\index.js:7:9)',
+      '    at /home/private-owner/private-project/worker.ts:18:4',
+      '    at C:\\Users\\private-owner\\scripts\\run.js:3:1',
+      '    at job (/home/private-owner/src/Private-Project/job.ts:5:1)',
+    ].join('\n'),
+    payload: { ok: true },
+    cause: {
+      name: 'Private Person',
+      message: 'claims rejected',
+      payload: { sub: 'payload-subject' },
+      claims: { email: 'claims-value' },
+      id_token: 'id-token-value',
+      nested: { JWT: 'jwt-value', accessToken: 'access-value', refresh_token: 'refresh-value' },
+      sub: 'subject-value',
+      sid: 'session-value',
+      jti: 'token-id-value',
+      nonce: 'nonce-value',
+      aud: 'audience-value',
+    },
+  });
+  const safe = redactor.value({
+    error: flattened,
+    tool: { name: 'PrivateName' },
+    entry: { name: 'Alice', message: 'hello', stack: 'at home' },
+    record: 'Record 12345678 returned HTTP 1234567 for 2500000 items.',
+    relative: 'Read project/data/private-owner/file',
+  }) as any;
+  const encoded = JSON.stringify(safe);
+  assert.equal(safe.error.name, 'JWTExpired');
+  assert.equal(safe.error.cause.name, '[personal]');
+  assert.equal(safe.tool.name, '[personal]');
+  assert.equal(safe.entry.name, '[personal]');
+  assert.ok(safe.error.stack.includes('(job.ts:5:1)'));
+  for (const frame of [
+    '(src/server/thread.ts:281:13)',
+    '(node_modules/@fixture/pg/lib/client.js:10:2)',
+    '(dist/server/index.js:7:9)',
+    'at worker.ts:18:4',
+    'at run.js:3:1',
+  ])
+    assert.ok(safe.error.stack.includes(frame), frame);
+  for (const sensitive of [
+    'private-owner',
+    'private-project',
+    'Private-Project',
+    'Users',
+    'AppData',
+    'C:',
+    'payload-subject',
+    'claims-value',
+    'id-token-value',
+    'jwt-value',
+    'access-value',
+    'refresh-value',
+    'subject-value',
+    'session-value',
+    'token-id-value',
+    'nonce-value',
+    'audience-value',
+    '12345678',
+    '1234567',
+  ])
+    assert.ok(!encoded.includes(sensitive), sensitive);
+  assert.equal(safe.error.payload, '[redacted]');
+  assert.equal(
+    safe.error.message,
+    'Context of 200000 tokens exceeds the 131072-token limit after 1048576 bytes.',
+  );
+  assert.equal(safe.record, 'Record [identifier] returned HTTP [identifier] for 2500000 items.');
+  assert.equal(redactor.text('Model: compatible/qwen2.5:3b.'), 'Model: compatible/qwen2.5:3b.');
+  assert.equal(
+    redactor.text('model openrouter/meta-llama/llama-3.3-70b-instruct failed'),
+    'model openrouter/meta-llama/llama-3.3-70b-instruct failed',
+  );
+  assert.equal(redactor.text('Open /data/private-owner/a.txt'), 'Open [path]');
+  assert.equal(redactor.text('Open ~/private-owner/a.txt'), 'Open [path]');
+  assert.equal(redactor.text('Open D:\\private-owner\\a.txt'), 'Open [path]');
+});
+
 test('browser handoff preserves platform editing chords, text input and paste', async () => {
   const result = await runProcess(process.execPath, ['--import', 'tsx', '--input-type=module'], {
     timeoutMs: 20_000,

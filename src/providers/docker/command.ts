@@ -6,6 +6,7 @@ import {
 import { createHash } from 'node:crypto';
 import { serviceEnvironment } from '../process.ts';
 import type { ConnectedCli } from '../../ports/computer.ts';
+import { logFailure } from '../../ports/failure-log.ts';
 import { threadIdentity } from '../../ports/thread-identity.ts';
 import type { CommandProcess } from '../command-process.ts';
 
@@ -326,11 +327,13 @@ function runSupervisedCommand(options: {
     }) + '\n';
   if (Buffer.byteLength(request) > 1024 * 1024)
     throw new Error('The workspace command is too large.');
+  const started = Date.now();
   return new Promise((resolve, reject) => {
     let child: CommandProcess;
     try {
       child = options.launch();
-    } catch {
+    } catch (error) {
+      logFailure('workspace_unavailable', error, { reason: 'launch' });
       return reject(
         new WorkspaceCommandError(
           true,
@@ -346,6 +349,7 @@ function runSupervisedCommand(options: {
     let cancelling = false;
     let response: { code: number; reason: string | null } | undefined;
     let drain: ReturnType<typeof setTimeout> | undefined;
+    let stderr = '';
     const timer = setTimeout(
       () => cancel(),
       Math.min(
@@ -358,9 +362,18 @@ function runSupervisedCommand(options: {
       clearTimeout(drain);
       options.signal?.removeEventListener('abort', cancel);
     };
-    const unavailable = () => {
+    const unavailable = (
+      reason: string,
+      error?: Error,
+      exit?: { exitCode: number | null; signal: string | null },
+    ) => {
       if (settled) return;
       settled = true;
+      logFailure(
+        'workspace_command_failed',
+        { message: error?.message, stderr },
+        { reason, ...exit, timeoutMs, durationMs: Date.now() - started },
+      );
       cleanup();
       child.stdin.destroy();
       child.kill('SIGKILL');
@@ -376,12 +389,15 @@ function runSupervisedCommand(options: {
       cancelling = true;
       clearTimeout(timer);
       if (!response) child.stdin.write('{"type":"cancel"}\n');
-      drain = setTimeout(unavailable, options.drainTimeoutMs ?? 8000);
+      drain = setTimeout(() => unavailable('timeout'), options.drainTimeoutMs ?? 8000);
     }
     options.signal?.addEventListener('abort', cancel, { once: true });
-    child.on('error', unavailable);
-    child.stdin.on('error', unavailable);
-    child.stderr.resume();
+    child.on('error', (error) => unavailable('launch', error));
+    child.stdin.on('error', (error) => unavailable('stream_error', error));
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr = (stderr + chunk).slice(-2000);
+    });
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       incoming += chunk;
@@ -411,14 +427,18 @@ function runSupervisedCommand(options: {
             else (frame.type === 'stdout' ? output : errors).push(bytes);
           } else throw new Error();
         } catch {
-          return unavailable();
+          return unavailable('malformed_response');
         }
       }
-      if (Buffer.byteLength(incoming) > 32768) unavailable();
+      if (Buffer.byteLength(incoming) > 32768) unavailable('oversized_response');
     });
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (settled) return;
-      if (code !== 0 || !response || incoming) return unavailable();
+      if (code !== 0 || !response || incoming)
+        return unavailable(code !== 0 ? 'exit' : 'malformed_response', undefined, {
+          exitCode: code,
+          signal: signal ?? null,
+        });
       settled = true;
       cleanup();
       if (options.signal?.aborted || response.reason === 'cancelled')

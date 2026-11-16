@@ -1,6 +1,7 @@
 import { posix, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ConnectedCli, Workspace } from '../../ports/computer.ts';
+import { logRepeatedFailure } from '../../ports/failure-log.ts';
 import { threadIdentity } from '../../ports/thread-identity.ts';
 import {
   runWorkspaceCommand,
@@ -152,8 +153,11 @@ export function createCommandWorkspace(options: {
     run: (signal: AbortSignal) => Promise<CommandResult>,
     signal?: AbortSignal,
   ) {
-    if (unavailable || disposed)
+    if (unavailable || disposed) {
+      const reason = disposed ? 'disposed' : 'fenced';
+      logRepeatedFailure('workspace_unavailable', reason, undefined, { reason });
       throw new Error('The workspace is unavailable. Restart Nod before continuing.');
+    }
     const operation = run(signal ? AbortSignal.any([signal, lifecycle.signal]) : lifecycle.signal);
     pending.add(operation);
     try {
