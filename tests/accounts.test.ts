@@ -3580,6 +3580,36 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     assert.equal((await owner.resolve(true)).definition.choice.id, 'gpt-6.1-sol');
   });
 
+  test('Mistral uses GLM 5.3 Flash as its light model when available', async (t) => {
+    const f = await fixture(t);
+    const catalog = await f.backend.catalog('openai', 'api_key', {
+      type: 'api_key',
+      key: 'fixture-mistral-light-catalog',
+    });
+    const large = catalog.find((model) => model.choice.id === 'gpt-6.1-sol')!;
+    const backend = {
+      ...f.backend,
+      catalog: async () => [
+        {
+          ...large,
+          choice: { ...large.choice, id: 'mistral-large-4' },
+          spec: { ...large.spec, cost: { input: 2, output: 6 } },
+        },
+        {
+          ...large,
+          choice: { ...large.choice, id: 'zai-glm-5-3-flash' },
+          spec: { ...large.spec, cost: { input: 0.15, output: 0.5 } },
+        },
+      ],
+    };
+    const owner = await f.create('fixture-classification-mistral-glm', backend);
+    const connectionId = await owner.addKey('mistral', 'fixture-mistral-glm-key');
+    await owner.select({ connectionId, modelId: 'mistral-large-4', effort: 'high' });
+    const light = await owner.resolveClassification();
+    assert.equal(light?.provider, 'mistral');
+    assert.equal(light?.definition.choice.id, 'zai-glm-5-3-flash');
+  });
+
   test('classification rejects missing, unpriced and more expensive small models', async (t) => {
     const f = await fixture(t);
     const original = await f.backend.catalog('openai', 'api_key', {

@@ -47,7 +47,7 @@ export const memoryModels: Partial<Record<ModelProvider, string>> = {
   openrouter: 'openai/gpt-6-luna',
   google: 'gemini-3.8-flash',
   'google-vertex': 'gemini-3.8-flash',
-  mistral: 'mistral-small-latest',
+  mistral: 'zai-glm-5-3-flash',
   opencode: 'gpt-6-luna',
   'vercel-ai-gateway': 'openai/gpt-6-luna',
   radius: 'cheap',
