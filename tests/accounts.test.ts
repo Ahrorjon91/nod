@@ -958,6 +958,17 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     ['Look at the budget folder', undefined],
   ] as const)
     assert.equal(trustBasis({ run: true, because }, scheduled)?.kind, kind);
+  const informal = withOwnerIds(
+    { userMessages: [{ at: '2026-11-03T09:00:00Z', text: 'clica no icone de lapis e salva' }] },
+    ['owner-message'],
+  );
+  for (const [because, kind] of [
+    ['…clica no icone de lapis', 'message'],
+    ['clica no ícone de lápis', 'message'],
+    ['clica no ícone … salva', undefined],
+    ['apaga o ícone', undefined],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, informal)?.kind, kind, because);
   assert.equal(
     trustDecision(scheduled).question.choices.some(({ value }) =>
       String(value).startsWith('message:'),
