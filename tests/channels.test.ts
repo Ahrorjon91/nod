@@ -701,8 +701,10 @@ test(
               user: { id: `${own}:1@s.whatsapp.net`, lid: '55555555@lid', name: 'Fixture' },
               signalRepository: {
                 lidMapping: {
-                  getPNForLID: async (lid: string) =>
-                    ['55555555@lid', '66666666@lid'].includes(lid) ? jid : null,
+                  getPNForLID: async (lid: string) => {
+                    if (lid === '99999999@lid') throw new Error('Synthetic mapping failure.');
+                    return ['55555555@lid', '66666666@lid'].includes(lid) ? jid : null;
+                  },
                   getLIDForPN: async (pn: string) => {
                     if (++lidLookups === 2) throw new Error('Synthetic lookup failure.');
                     return pn === jid ? '77777777@lid' : null;

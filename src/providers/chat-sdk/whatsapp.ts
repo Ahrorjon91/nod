@@ -205,7 +205,9 @@ export function createWhatsAppLinkedTransport(options: {
             : undefined
           : numberOf(message.key.remoteJidAlt);
       if (!phone && options.mode !== 'self-chat')
-        phone = numberOf(await current.signalRepository.lidMapping.getPNForLID(jid));
+        phone = numberOf(
+          await current.signalRepository.lidMapping.getPNForLID(jid).catch(() => null),
+        );
       if (!phone && options.mode === 'bot' && options.allowedNumber) {
         const lid = await current.signalRepository.lidMapping
           .getLIDForPN(`${options.allowedNumber}@s.whatsapp.net`)
