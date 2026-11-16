@@ -81,7 +81,9 @@ export function trustDecision(words: TrustWords) {
 
 const plain = (text: string) =>
   text
-    .normalize('NFKC')
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .normalize('NFC')
     .toLowerCase()
     .replace(/[“”«»„]/g, '"')
     .replace(/[‘’‚]/g, "'")
@@ -141,7 +143,7 @@ export function trustBasis(
       : undefined;
   const quote = because
     .trim()
-    .replace(/^["'“”«»„‘’‚]+|["'“”«»„‘’‚.!?…]+$/gu, '')
+    .replace(/^["'“”«»„‘’‚.…]+|["'“”«»„‘’‚.!?…]+$/gu, '')
     .trim();
   const needle = plain(quote);
   if (!needle) return undefined;
