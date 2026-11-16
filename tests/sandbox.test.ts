@@ -899,8 +899,13 @@ test('local files stay in home, skip secrets and kept-out folders, and never ove
   const data = join(base, 'data');
   await mkdir(join(data, 'keys'), { recursive: true });
   const keep: string[] = [];
+  let enabled = false;
   const pool = {
     query: async (sql: string, values: string[]) => {
+      if (sql.startsWith('SELECT local_files_enabled')) {
+        assert.equal(values[0], 'owner');
+        return { rows: [{ local_files_enabled: enabled }] };
+      }
       if (sql.startsWith('WITH RECURSIVE'))
         return { rows: [{ id: values[0], source: 'user', message_id: 'm', proactive: false }] };
       if (sql.startsWith('INSERT') && !keep.includes(values[1]!)) keep.push(values[1]!);
@@ -922,6 +927,17 @@ test('local files stay in home, skip secrets and kept-out folders, and never ove
   });
   const turn = { turnId: 'turn', threadId: 'thread' };
   try {
+    await assert.rejects(files.prepare('LOCAL_FILES_LIST', { path: outside }), /access is off/);
+    await assert.rejects(files.execute('LOCAL_FILES_READ', { path: outside }), /access is off/);
+    enabled = true;
+    const prepared = await files.prepare('LOCAL_FILES_WRITE', {
+      path: join(shared, 'blocked.txt'),
+      text: 'Synthetic file',
+    });
+    enabled = false;
+    await assert.rejects(files.execute('LOCAL_FILES_WRITE', prepared), /access is off/);
+    assert.equal(existsSync(join(shared, 'blocked.txt')), false);
+    enabled = true;
     for (const path of [undefined, null, 42])
       await assert.rejects(
         files.keepOut(turn, path as unknown as string, pool),
