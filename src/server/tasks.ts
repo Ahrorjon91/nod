@@ -332,12 +332,38 @@ export function createTasks(options: {
   }
 
   async function recordInput(client: PoolClient, id: string, turnId: string) {
-    const task = (
+    const occupied = (
       await client.query(
-        "UPDATE tasks SET revision=revision+1,state='open',closed_at=NULL,turn_id=$3,updated_at=now() WHERE id=$1 AND owner_id=$2 RETURNING revision,session_id",
-        [id, ownerId, turnId],
+        `SELECT next.id FROM tasks old JOIN tasks next
+           ON next.owner_id=old.owner_id AND next.activity_identity_key=old.activity_identity_key
+         WHERE old.id=$1 AND old.owner_id=$2 AND old.state<>'open'
+           AND old.activity_identity_key IS NOT NULL AND next.state='open' AND next.id<>old.id
+         LIMIT 1`,
+        [id, ownerId],
       )
     ).rows[0];
+    if (occupied)
+      throw failure(
+        'Another open task already covers this monitoring activity. Reply to that task instead.',
+        409,
+      );
+    let task: { revision: number; session_id: string } | undefined;
+    try {
+      task = (
+        await client.query<{ revision: number; session_id: string }>(
+          "UPDATE tasks SET revision=revision+1,state='open',closed_at=NULL,turn_id=$3,updated_at=now() WHERE id=$1 AND owner_id=$2 RETURNING revision,session_id",
+          [id, ownerId, turnId],
+        )
+      ).rows[0];
+    } catch (error) {
+      // An overlapping task can be admitted after the read above.
+      if ((error as { code?: string }).code === '23505')
+        throw failure(
+          'Another open task already covers this monitoring activity. Reply to that task instead.',
+          409,
+        );
+      throw error;
+    }
     await client.query('UPDATE turns SET task_id=$1,task_revision=$2 WHERE id=$3 AND owner_id=$4', [
       id,
       task.revision,

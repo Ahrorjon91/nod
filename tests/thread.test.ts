@@ -10659,10 +10659,15 @@ test(
       await db.pool.query(
         'CREATE TABLE schedules (id uuid PRIMARY KEY, owner_id text NOT NULL, model jsonb)',
       );
+      const utcMinute = new Date();
+      const asTime = (offset: number) => {
+        const time = new Date(utcMinute.getTime() + offset * 60_000);
+        return `${String(time.getUTCHours()).padStart(2, '0')}:${String(time.getUTCMinutes()).padStart(2, '0')}`;
+      };
       await db.pool.query(
         `INSERT INTO preferences(owner_id,quiet_hours_enabled,quiet_start,quiet_end,time_zone,proactive_paused)
-         VALUES($1,true,'00:00','23:59','UTC',false)`,
-        [ownerId],
+         VALUES($1,true,$2,$3,'UTC',false)`,
+        [ownerId, asTime(-10), asTime(10)],
       );
 
       await t.test('different occurrence keys share one open deferred task', async () => {
@@ -10689,6 +10694,58 @@ test(
           first.id,
         ]);
       });
+
+      await t.test(
+        'reopening an older completed task cannot collide with a new open watch',
+        async () => {
+          const earlier = await start('reopen-original', activity);
+          await db.pool.query("UPDATE tasks SET state='done',closed_at=now() WHERE id=$1", [
+            earlier.id,
+          ]);
+          const replacement = await start('reopen-replacement', activity);
+          assert.notEqual(replacement.id, earlier.id);
+          const sourceTurnId = randomUUID();
+          const replyTurnId = randomUUID();
+          const replyMessageId = randomUUID();
+          await db.pool.query(
+            `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,task_id)
+           VALUES($1,$3,$4,$1,'task','Synthetic task origin','done',$5),
+                 ($2,$3,$4,$2,'task','Synthetic reply','running',NULL)`,
+            [sourceTurnId, replyTurnId, ownerId, threadId, earlier.id],
+          );
+          await db.pool.query(
+            `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text)
+           VALUES($1,$2,$3,$4,'user','Reply to earlier task')`,
+            [replyMessageId, ownerId, threadId, sourceTurnId],
+          );
+          const client = await db.pool.connect();
+          try {
+            const resolved = await tasks.resolveReply(client, threadId, replyMessageId);
+            assert.ok(resolved);
+            await assert.rejects(
+              () => resolved.record(replyTurnId),
+              (error: unknown) =>
+                (error as { statusCode?: number }).statusCode === 409 &&
+                (error as Error).message.includes('Another open task'),
+            );
+          } finally {
+            client.release();
+          }
+          assert.equal(
+            (await db.pool.query('SELECT state FROM tasks WHERE id=$1', [earlier.id])).rows[0]
+              .state,
+            'done',
+          );
+          assert.equal(
+            (await db.pool.query('SELECT state FROM tasks WHERE id=$1', [replacement.id])).rows[0]
+              .state,
+            'open',
+          );
+          await db.pool.query("UPDATE tasks SET state='done',closed_at=now() WHERE id=$1", [
+            replacement.id,
+          ]);
+        },
+      );
 
       await t.test('completed occurrence replay remains unchanged', async () => {
         const first = await start('completed-key', activity);
