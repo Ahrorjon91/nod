@@ -60,6 +60,9 @@ const engineRoot = app.isPackaged
   : resolve(desktopRoot, '..');
 const notificationIcon = join(engineRoot, app.isPackaged ? 'dist/web' : 'public', 'nod-logo.png');
 const appPages = JSON.parse(readFileSync(join(engineRoot, 'src/shared/app-pages.json'), 'utf8'));
+const startupSteps = JSON.parse(
+  readFileSync(join(engineRoot, 'src/shared/startup-steps.json'), 'utf8'),
+);
 const posthogConfig = JSON.parse(
   readFileSync(join(engineRoot, 'src/shared/posthog-host.json'), 'utf8'),
 );
@@ -2200,8 +2203,6 @@ async function validateStart() {
   await settings.get();
   if (quitting) throw new Error('Nod is closing.');
 }
-
-const startupSteps = ['loading', 'loaded', 'database', 'threads', 'memory', 'apps', 'listening'];
 
 async function startEngine({ runtime, signal, pending = false }) {
   if (engineFailure) throw new Error(engineFailure);

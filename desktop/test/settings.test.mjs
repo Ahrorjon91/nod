@@ -53,6 +53,7 @@ import { appOpenPath } from '../main/app-links.mjs';
 import { trustSystemCertificates } from '../main/system-certificates.mjs';
 import appPages from '../../src/shared/app-pages.json' with { type: 'json' };
 import posthogHost from '../../src/shared/posthog-host.json' with { type: 'json' };
+import startupSteps from '../../src/shared/startup-steps.json' with { type: 'json' };
 
 test('setup resources cannot read other origins or local files', () => {
   assert.equal(setupResource('nod-setup://app/index.html?firstSetup=true'), 'index.html');
@@ -577,7 +578,13 @@ async function runningDesktop(
   };
   const context = {
     readFileSync: (path) =>
-      JSON.stringify(path.endsWith('posthog-host.json') ? posthogHost : appPages),
+      JSON.stringify(
+        path.endsWith('posthog-host.json')
+          ? posthogHost
+          : path.endsWith('startup-steps.json')
+            ? startupSteps
+            : appPages,
+      ),
     appOpenPath,
     trustSystemCertificates: trustCertificates,
     app: {
@@ -4123,7 +4130,7 @@ test('a background service health timeout records the last failure without priva
 });
 
 test('a background service that reports new startup steps gets more time, up to a cap', async (t) => {
-  const valid = ['loading', 'loaded', 'database', 'threads', 'memory', 'apps', 'listening'];
+  const valid = startupSteps;
   for (const scenario of [
     { name: 'progressing', steps: valid.slice(0, 6), ready: true },
     { name: 'capped', steps: valid, ready: false, waited: /timed out after 6\d\d\.\ds\./ },
