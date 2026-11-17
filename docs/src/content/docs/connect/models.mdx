@@ -248,7 +248,9 @@ A change applies from the next turn; work that's already running keeps its model
 
 If a model request fails, Nod doesn't switch to another connection on its own; the notice above the chat box offers one when you have it. Nod retries a temporary provider error up to three times, waiting 4, 8 and 16 seconds. Temporary errors include an overload, a rate limit, and, for hosted providers, a request that gets no response within 90 seconds of being sent, cache warming included. Requests to a model server you run have no such limit, because local models can take minutes to start answering.
 
-Background work, such as memory upkeep, uses a smaller model from the same connection when it has one, such as `gpt-6-luna` or `claude-haiku-5-5`. Otherwise it uses your model or, for an audio model, its text companion. Background work and checks use the lightest reasoning their model offers: off, minimal, low or medium in that order, or the model's first effort level if it offers none of these.
+Background work, such as memory upkeep, uses a smaller model from the same connection when it has one, such as `gpt-6-luna` or `claude-haiku-5-5`. Otherwise it uses your model or, for an audio model, its text companion.
+
+To choose that smaller model yourself, open **Manage** beside the provider and pick a **Light model** for the connection. The list shows the text models on that connection that cost no more than its default light model, so background work and checks stay on a small model. **Default** returns to Nod's choice. If the model you picked leaves the connection's model list, Nod uses the default until it returns. Memory, app and email checks, the light model for schedules and Nod's own work, and image reading when your model can't read images all use this choice. Connections without a default light model, such as your own model server, don't show the choice. Background work and checks use the lightest reasoning their model offers: off, minimal, low or medium in that order, or the model's first effort level if it offers none of these.
 
 ## Models with a small context window
 
