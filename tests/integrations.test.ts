@@ -48,7 +48,11 @@ import { logFailure } from '../src/server/failure-log.ts';
 import { serviceEnvironment } from '../src/providers/process.ts';
 import { createIntegrationIdentityCheckpoint } from '../src/server/integration-identity.ts';
 import { createIntegrationBrowser } from '../src/server/integration-browser.ts';
-import { createDiscoveredTransport, safeRemoteFetch } from '../src/providers/discovered/remote.ts';
+import {
+  createDiscoveredTransport,
+  ownerAddress,
+  safeRemoteFetch,
+} from '../src/providers/discovered/remote.ts';
 import { createAgentRuntime } from '../src/runtime/index.ts';
 import { createDiscoveredConnections } from '../src/server/discovered-connections.ts';
 import { registerLocalAccess } from '../src/server/access.ts';
@@ -7660,6 +7664,103 @@ test(
       assert.equal(Object.hasOwn(view.json(), 'callbackUrl'), false);
     }
     assert.equal((await pool.query('SELECT id FROM discovered_connections')).rowCount, 0);
+  },
+);
+
+test(
+  'manual MCP setup accepts an owner-typed private address and binds it to that origin',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    const schema = `test_manual_local_mcp_${randomUUID().replaceAll('-', '')}`;
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = new pg.Pool({
+      connectionString: process.env.TEST_DATABASE_URL,
+      options: `-c search_path=${schema}`,
+    });
+    const app = Fastify();
+    t.after(async () => {
+      await app.close();
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+    });
+    const ownerId = 'fixture-local-mcp-owner';
+    const key = randomBytes(32);
+    const keyStore = { id: 'fixture', configured: true, getKey: async () => key };
+    const grantVault = await createAppGrantVault(pool, { ownerId, keyStore });
+    const unused = async () => {
+      throw new Error('Proposal creation must not call the remote server.');
+    };
+    const oauth: Parameters<typeof createDiscoveredConnections>[1]['oauth'] = {
+      begin: unused,
+      finish: unused,
+      refresh: unused,
+    };
+    const origins: string[] = [];
+    const options = {
+      ownerId,
+      baseUrl: 'http://localhost:4310',
+      grantVault,
+      transport: createDiscoveredTransport(unused),
+      oauth,
+      local: (origin: string) => {
+        origins.push(origin);
+        const check = ownerAddress(origin);
+        return {
+          transport: createDiscoveredTransport(unused, async (endpoint) => {
+            const { url } = await check(endpoint);
+            if (url.hash || url.search) throw new Error('Use an address without a query.');
+            return url.href;
+          }),
+          oauth,
+        };
+      },
+    };
+    const connections = await createDiscoveredConnections(pool, options);
+    connections.registerRoutes(app);
+    const create = (endpoint: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/apps/mcp',
+        payload: { name: 'Local MCP', endpoint, auth: 'bearer' },
+      });
+    const accepted = await create('http://127.0.0.1:4931/mcp');
+    assert.equal(accepted.statusCode, 200, accepted.body);
+    const saved = (
+      await pool.query('SELECT paths FROM discovered_connection_proposals WHERE id=$1', [
+        accepted.json().id,
+      ])
+    ).rows[0];
+    assert.deepEqual(saved.paths, [
+      {
+        id: accepted.json().id,
+        kind: 'mcp',
+        endpoint: 'http://127.0.0.1:4931/mcp',
+        auth: 'bearer',
+        local: true,
+      },
+    ]);
+    assert.deepEqual(origins, ['http://127.0.0.1:4931', 'http://127.0.0.1:4931']);
+    for (const endpoint of [
+      'http://93.184.216.34/mcp',
+      'http://127.0.0.1:4931/mcp?token=synthetic',
+      'http://user:synthetic@127.0.0.1:4931/mcp',
+    ]) {
+      const rejected = await create(endpoint);
+      assert.equal(rejected.statusCode, 400, rejected.body);
+    }
+    const proposed = await connections
+      .propose({
+        name: 'Proposed',
+        service: 'proposed-local',
+        paths: [{ kind: 'mcp', endpoint: 'http://127.0.0.1:4931/mcp', auth: 'bearer' }],
+      })
+      .then(
+        () => 'accepted',
+        () => 'rejected',
+      );
+    assert.equal(proposed, 'rejected', 'A model proposal never reaches a private address.');
   },
 );
 
