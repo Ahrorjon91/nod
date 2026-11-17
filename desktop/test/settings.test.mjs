@@ -4122,6 +4122,44 @@ test('a background service health timeout records the last failure without priva
   }
 });
 
+test('a background service that reports startup steps gets more time, up to a cap', async (t) => {
+  for (const scenario of ['progressing', 'capped']) {
+    await t.test(scenario, async (t) => {
+      let clock = Date.now();
+      const steps = ['loaded', 'database', 'threads', 'memory', 'apps', 'listening'];
+      let reported = 0;
+      const f = await runningDesktop(
+        t,
+        async () => {
+          if (scenario === 'progressing' && reported === steps.length)
+            return Response.json({ ok: true });
+          clock += 90_000;
+          f.children[0].emit('message', {
+            type: 'nod-starting',
+            step: steps[reported++ % steps.length],
+          });
+          await new Promise((accept) => setTimeout(accept, 5));
+          return new Response(null, { status: 503 });
+        },
+        { allowStart: true, now: () => clock },
+      );
+      f.crash();
+      const status = await f.prepare();
+      const log = await readFile(join(f.profileRoot, 'logs/startup.log'), 'utf8');
+      assert.match(log, /Background service step: database after \d+\.\ds\./);
+      if (scenario === 'progressing') {
+        assert.equal(status.phase, 'ready');
+        assert.doesNotMatch(log, /Background service health check timed out/);
+        await f.close();
+      } else {
+        assert.equal(status.phase, 'error');
+        assert.match(status.error, /did not respond/);
+        assert.match(log, /timed out after 6\d\d\.\ds\..* Last startup step: [a-z]+\./);
+      }
+    });
+  }
+});
+
 test('a successful health check, engine exit or shutdown does not log a timeout', async (t) => {
   for (const ending of ['healthy', 'exit', 'shutdown']) {
     await t.test(ending, async (t) => {
