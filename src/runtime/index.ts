@@ -1272,7 +1272,9 @@ export function createAgentRuntime(dependencies: {
       if (modelIncomplete && status === 'succeeded')
         throw new Error(
           modelIncomplete === 'context'
-            ? 'This chat got too long for the model. Send your message again and I’ll shorten the chat first, or pick a model that handles longer chats in Settings > Models.'
+            ? context.background
+              ? 'This run got too long for the model. Run it again, or pick a model that handles longer work in Settings > Models.'
+              : 'This chat got too long for the model. Send your message again to continue with a shorter chat, or pick a model that handles longer chats in Settings > Models.'
             : 'The model response was incomplete. Say continue to try again.',
         );
       if (stopped && status === 'succeeded') throw new Error('The turn was stopped.');
