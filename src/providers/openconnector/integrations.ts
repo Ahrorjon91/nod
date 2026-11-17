@@ -636,6 +636,7 @@ export function createOpenConnectorProvider(options: {
     webhooksConfigured: false,
     supportsSubscriptions: [],
     authorize,
+    accountBoundReconnect: true,
     async reconnectAccount(ownerId, slug, accountId, callbackUrl) {
       owner(ownerId);
       const saved = await connection(accountId);

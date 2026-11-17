@@ -58,8 +58,13 @@ export async function verifyIntegrationCompletion(options: {
     throw new IntegrationError('App sign-in is incomplete. Connect again.', 409);
   if (query.pendingAccountId && query.pendingAccountId !== query.accountId)
     options.verifiedAccount?.(query.accountId);
+  const accountBound =
+    provider.accountBoundReconnect &&
+    pending.originalEmail === null &&
+    Boolean(pending.originalAuthConfigId);
   if (
     (pending.originalEmail !== undefined &&
+      !accountBound &&
       (!pending.originalEmail ||
         normalizedEmail(remote.accountEmail ?? '') !== pending.originalEmail)) ||
     (pending.originalAuthConfigId !== undefined &&
