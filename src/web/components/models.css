@@ -188,6 +188,7 @@
 }
 .model-connection {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   min-height: 62px;
@@ -218,18 +219,8 @@
   font-size: 11px;
 }
 .model-connection-light {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--muted-foreground);
-}
-.model-connection-light .input {
-  width: auto;
-  max-width: 220px;
-  min-width: 0;
-  font-size: 12px;
+  flex-basis: 100%;
+  padding-left: 36px;
 }
 .model-service-actions,
 .model-dialog-actions {
