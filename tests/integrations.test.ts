@@ -12031,7 +12031,7 @@ test(
 );
 
 test('proactive readers use fixed GET paths, preserve pages, and check exact source state', async () => {
-  const { composioActivity } = await import('../src/providers/composio/activity.ts');
+  const { googleActivity } = await import('../src/providers/google/activity.ts');
   const readActivity = async (
     client: Pick<Composio['tools'], 'proxyExecute'>,
     service: string,
@@ -12039,7 +12039,7 @@ test('proactive readers use fixed GET paths, preserve pages, and check exact sou
     input: { ids?: string[]; cursor?: string; asOf?: string },
     signal: AbortSignal,
   ) => {
-    const readers = composioActivity(client);
+    const readers = googleActivity(client);
     if (!Object.hasOwn(readers, service)) throw new Error('This source has no reader.');
     return readers[service].read(accountId, input, signal);
   };
