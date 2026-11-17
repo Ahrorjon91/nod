@@ -1272,7 +1272,7 @@ export function createAgentRuntime(dependencies: {
       if (modelIncomplete && status === 'succeeded')
         throw new Error(
           modelIncomplete === 'context'
-            ? 'The model response was cut off because its context is full. Start a new conversation or choose a model with a larger context.'
+            ? 'This chat got too long for the model. Send your message again and I’ll shorten the chat first, or pick a model that handles longer chats in Settings > Models.'
             : 'The model response was incomplete. Say continue to try again.',
         );
       if (stopped && status === 'succeeded') throw new Error('The turn was stopped.');
