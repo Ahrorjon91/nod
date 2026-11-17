@@ -698,6 +698,7 @@ export async function createApplication(
     channels?: boolean;
     heartbeat?: boolean;
     runtimeReady?: Promise<void>;
+    progress?: (step: string) => void;
   } = {},
 ) {
   const diagnostics: {
@@ -730,6 +731,7 @@ async function initializeApplication(
     channels?: boolean;
     heartbeat?: boolean;
     runtimeReady?: Promise<void>;
+    progress?: (step: string) => void;
   },
   diagnostics: { log?: Awaited<ReturnType<typeof createFeedbackLog>>; failure: FailureLogSink },
 ) {
@@ -807,8 +809,10 @@ async function initializeApplication(
   }
   const privacyNotice = await loadPrivacyNoticeFile(process.env.NOD_PRIVACY_NOTICE_FILE);
   await mkdir(dataRoot, { recursive: true, mode: 0o700 });
+  options.progress?.('database');
   await initializeDatabase();
   await adapters.initialize?.();
+  options.progress?.('threads');
   await initializeThreads();
   const artifacts = localArtifacts;
   async function sweepArtifacts() {
@@ -960,6 +964,7 @@ async function initializeApplication(
     },
   });
   const memoryStore = createPostgresObjectStore({ database: pool, ownerId });
+  options.progress?.('memory');
   await memoryStore.initialize();
   await importMemoryFile(memoryStore, join(dataRoot, 'objects', 'memory'));
   const memory = createMemoryService({
@@ -1201,6 +1206,7 @@ async function initializeApplication(
     },
     due: () => proactivity.due(),
   });
+  options.progress?.('apps');
   const grantVault = await createAppGrantVault(pool, {
     ownerId,
     keyStore: adapters.keyStore,
