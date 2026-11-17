@@ -3529,9 +3529,21 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     const f = await fixture(t);
     const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
     let listed = ['gpt-6.1-sol', 'gpt-6-luna', 'gpt-4.1-nano', 'gpt-4o-mini', 'gpt-audio-1.5'];
-    const backend = createPiModelBackend({
+    const pi = createPiModelBackend({
       fetch: async () => Response.json({ data: listed.map((id) => ({ id })) }),
     });
+    const backend = {
+      ...pi,
+      async catalog(...input: Parameters<typeof pi.catalog>) {
+        return (await pi.catalog(...input)).map((definition) => ({
+          ...definition,
+          choice: {
+            ...definition.choice,
+            images: ['gpt-6-luna', 'gpt-4.1-nano'].includes(definition.choice.id),
+          },
+        }));
+      },
+    };
     const owner = await f.create('fixture-light-owner', backend);
     const other = await f.create('fixture-light-other', backend);
     const apps = [owner, other].map((service) => {
@@ -3562,20 +3574,21 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       (await owner.resolveClassification())?.definition.choice.id,
       (await owner.resolveClassification(true))?.definition.choice.id,
       (await owner.resolve(true)).definition.choice.id,
+      (await owner.resolveImage()).definition.choice.id,
     ];
-    assert.deepEqual(await uses(), Array(4).fill('gpt-4.1-nano'));
+    assert.deepEqual(await uses(), Array(5).fill('gpt-4.1-nano'));
     await owner.addKey('openai', 'fixture-light-key');
     assert.equal(shown().model, 'gpt-4.1-nano');
 
     listed = ['gpt-6.1-sol', 'gpt-6-luna'];
     await owner.refreshCatalog(connectionId);
-    assert.deepEqual(await uses(), Array(4).fill('gpt-6-luna'));
+    assert.deepEqual(await uses(), Array(5).fill('gpt-6-luna'));
     listed = ['gpt-6.1-sol', 'gpt-6-luna', 'gpt-4.1-nano'];
     await owner.refreshCatalog(connectionId);
-    assert.deepEqual(await uses(), Array(4).fill('gpt-4.1-nano'));
+    assert.deepEqual(await uses(), Array(5).fill('gpt-4.1-nano'));
 
     assert.equal((await choose(apps[0], connectionId, null)).statusCode, 200);
-    assert.deepEqual(await uses(), Array(4).fill('gpt-6-luna'));
+    assert.deepEqual(await uses(), Array(5).fill('gpt-6-luna'));
   });
 
   test('classification resolves an approved small model only on the selected owned connection', async (t) => {
