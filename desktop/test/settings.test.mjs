@@ -4122,22 +4122,31 @@ test('a background service health timeout records the last failure without priva
   }
 });
 
-test('a background service that reports startup steps gets more time, up to a cap', async (t) => {
-  for (const scenario of ['progressing', 'capped']) {
-    await t.test(scenario, async (t) => {
+test('a background service that reports new startup steps gets more time, up to a cap', async (t) => {
+  const valid = ['loading', 'loaded', 'database', 'threads', 'memory', 'apps', 'listening'];
+  for (const scenario of [
+    { name: 'progressing', steps: valid.slice(0, 6), ready: true },
+    { name: 'capped', steps: valid, ready: false, waited: /timed out after 6\d\d\.\ds\./ },
+    {
+      name: 'ignored',
+      steps: ['Database', 'x'.repeat(21), 42, 'unknown', 'loading', 'loading', 'loaded', 'loading'],
+      ready: false,
+      waited: /timed out after (?:29[5-9]|30[0-4])\.\ds\./,
+    },
+  ]) {
+    await t.test(scenario.name, async (t) => {
       let clock = Date.now();
-      const steps = ['loaded', 'database', 'threads', 'memory', 'apps', 'listening'];
       let reported = 0;
       const f = await runningDesktop(
         t,
         async () => {
-          if (scenario === 'progressing' && reported === steps.length)
-            return Response.json({ ok: true });
-          clock += 90_000;
-          f.children[0].emit('message', {
-            type: 'nod-starting',
-            step: steps[reported++ % steps.length],
-          });
+          if (reported === scenario.steps.length) {
+            if (scenario.ready) return Response.json({ ok: true });
+            clock += scenario.name === 'ignored' ? 10_000 : 90_000;
+            return new Response(null, { status: 503 });
+          }
+          clock += scenario.name === 'ignored' ? 25_000 : 90_000;
+          f.children[0].emit('message', { type: 'nod-starting', step: scenario.steps[reported++] });
           await new Promise((accept) => setTimeout(accept, 5));
           return new Response(null, { status: 503 });
         },
@@ -4146,16 +4155,21 @@ test('a background service that reports startup steps gets more time, up to a ca
       f.crash();
       const status = await f.prepare();
       const log = await readFile(join(f.profileRoot, 'logs/startup.log'), 'utf8');
-      assert.match(log, /Background service step: database after \d+\.\ds\./);
-      if (scenario === 'progressing') {
+      if (scenario.ready) {
         assert.equal(status.phase, 'ready');
+        assert.match(log, /Background service step: database after \d+\.\ds\./);
         assert.doesNotMatch(log, /Background service health check timed out/);
         await f.close();
-      } else {
-        assert.equal(status.phase, 'error');
-        assert.match(status.error, /did not respond/);
-        assert.match(log, /timed out after 6\d\d\.\ds\..* Last startup step: [a-z]+\./);
+        return;
       }
+      assert.equal(status.phase, 'error');
+      assert.match(status.error, /did not respond/);
+      assert.match(log, scenario.waited);
+      if (scenario.name === 'ignored') {
+        assert.equal(log.match(/Background service step:/g)?.length, 2);
+        assert.doesNotMatch(log, /step: (?:Database|x{21}|42|unknown)/);
+        assert.match(log, /Last startup step: loaded\./);
+      } else assert.match(log, /Last startup step: listening\./);
     });
   }
 });

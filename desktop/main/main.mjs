@@ -2201,6 +2201,8 @@ async function validateStart() {
   if (quitting) throw new Error('Nod is closing.');
 }
 
+const startupSteps = ['loading', 'loaded', 'database', 'threads', 'memory', 'apps', 'listening'];
+
 async function startEngine({ runtime, signal, pending = false }) {
   if (engineFailure) throw new Error(engineFailure);
   if (engine && enginePreferencesReady) return finishEnginePreparation(pending);
@@ -2286,8 +2288,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     if (
       engine === child &&
       message?.type === 'nod-starting' &&
-      typeof message.step === 'string' &&
-      /^[a-z]{1,20}$/.test(message.step)
+      startupSteps.indexOf(message.step) > startupSteps.indexOf(step)
     ) {
       step = message.step;
       deadline = Math.min(Math.max(deadline, Date.now() + 120_000), started + 600_000);
